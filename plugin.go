@@ -147,6 +147,8 @@ func handleMethod(method string, request []byte) ([]byte, error) {
 		return handleUsage(request)
 	case pluginabi.MethodManagementRegister:
 		return okEnvelope(buildManagementRegistration())
+	case pluginabi.MethodManagementHandle:
+		return handleManagement(request)
 	default:
 		return errorEnvelope("unknown_method", "unknown method: "+method), nil
 	}

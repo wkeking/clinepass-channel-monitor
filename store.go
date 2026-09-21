@@ -283,6 +283,16 @@ func (s *store) unmatchedHostSamples() []unmatchedHostSample {
 	return out
 }
 
+// used returns how many events the ring currently holds.
+func (s *store) used() int {
+	if s == nil {
+		return 0
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.size
+}
+
 func (s *store) countObservations() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

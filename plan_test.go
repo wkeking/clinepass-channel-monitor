@@ -33,8 +33,15 @@ func TestClineAPIKeyFromConfigFileReadsAPIKeyEntries(t *testing.T) {
 	}
 	cfg := defaultConfig()
 	cfg.PlanConfigPath = path
-	if key := clineAPIKeyFromConfigFile(cfg); key != "key-from-entries" {
-		t.Fatalf("key = %q, 期望从 api-key-entries 读到 key-from-entries", key)
+	creds := clineCredentialsFromConfigFile(cfg)
+	if len(creds) != 1 || creds[0].Key != "key-from-entries" {
+		t.Fatalf("creds = %+v，期望从 api-key-entries 读到 key-from-entries", creds)
+	}
+	if creds[0].Label != "Cline #1 · key…ries" {
+		t.Errorf("label = %q，期望「条目名 #序号 · 掩码key」", creds[0].Label)
+	}
+	if strings.Contains(creds[0].Label, "key-from-entries") {
+		t.Errorf("label 不应包含完整 key: %q", creds[0].Label)
 	}
 }
 
@@ -107,7 +114,7 @@ func TestPlanPollerRefreshServesOfficialWindows(t *testing.T) {
 	}()
 
 	poller := newPlanPoller()
-	poller.refresh("test-key")
+	poller.refresh()
 	quota := poller.snapshot()
 
 	if !quota.Available || quota.Error != "" {
@@ -180,12 +187,95 @@ func TestPlanPollerSurvivesUpstreamFailure(t *testing.T) {
 	loadConfig([]byte(fmt.Sprintf("plan_enabled: false\nplan_api_key: test-key\nplan_base_url: %s\n", broken.URL)))
 
 	poller := newPlanPoller()
-	poller.refresh("test-key")
+	poller.refresh()
 	quota := poller.snapshot()
 	if quota.Available {
 		t.Errorf("上游失败时不应标记可用")
 	}
 	if !strings.Contains(quota.Error, "401") {
 		t.Errorf("错误信息应包含状态码，实际 %q", quota.Error)
+	}
+}
+
+// TestPlanPollerPollsEveryConfiguredCredential checks that several keys inside one Cline
+// entry become several accounts with their own quota and a label that never leaks the key.
+func TestPlanPollerPollsEveryConfiguredCredential(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	content := "openai-compatibility:\n" +
+		"  - name: Cline\n" +
+		"    base-url: https://api.cline.bot/api/v1\n" +
+		"    api-key-entries:\n" +
+		"      - api-key: key-one-aaaaaaaaaaaaaaaa\n" +
+		"      - api-key: key-two-bbbbbbbbbbbbbbbb\n"
+	if errWrite := os.WriteFile(path, []byte(content), 0o600); errWrite != nil {
+		t.Fatalf("write fixture: %v", errWrite)
+	}
+
+	// 每把 key 属于不同账号：用 Authorization 头区分。
+	limitsByKey := map[string]float64{
+		"key-one-aaaaaaaaaaaaaaaa": 11,
+		"key-two-bbbbbbbbbbbbbbbb": 42,
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		key := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		w.Header().Set("Content-Type", "application/json")
+		write := func(data any) { _ = json.NewEncoder(w).Encode(map[string]any{"success": true, "data": data}) }
+		switch {
+		case r.URL.Path == "/users/me":
+			write(map[string]any{"id": "usr-" + key, "displayName": key, "createdAt": "2026-09-17T00:00:00Z"})
+		case r.URL.Path == "/users/me/plan":
+			write(map[string]any{"plan": map[string]any{"displayName": "Cline Pass (Monthly)", "pricePerSeatCents": 999}})
+		case r.URL.Path == "/users/me/plan/usage-limits":
+			write(map[string]any{"limits": []map[string]any{
+				{"type": "five_hour", "percentUsed": limitsByKey[key], "resetsAt": "2026-09-21T20:00:00Z"},
+			}})
+		default:
+			write(map[string]any{"items": []any{}})
+		}
+	}))
+	defer server.Close()
+
+	loadConfig([]byte(fmt.Sprintf(
+		"plan_enabled: false\nplan_config_path: %s\nplan_base_url: %s\nplan_usage_enabled: false\nplan_daily_enabled: false\n",
+		path, server.URL)))
+	defer func() { loadConfig([]byte("plan_enabled: false\n")) }()
+
+	poller := newPlanPoller()
+	poller.refresh()
+	quota := poller.snapshot()
+	if len(quota.Accounts) != 2 {
+		t.Fatalf("accounts = %+v，期望两把 key 各一个账号", quota.Accounts)
+	}
+	byLabel := map[string]planAccountSnapshot{}
+	for _, account := range quota.Accounts {
+		if account.ID == "" {
+			t.Errorf("账号缺少 id: %+v", account)
+		}
+		if strings.Contains(account.Label, "key-one") || strings.Contains(account.Label, "key-two") {
+			t.Errorf("label 不应包含完整 key: %q", account.Label)
+		}
+		byLabel[account.Label] = account
+	}
+	first, okFirst := byLabel["Cline #1 · key…aaaa"]
+	second, okSecond := byLabel["Cline #2 · key…bbbb"]
+	if !okFirst || !okSecond {
+		t.Fatalf("标签不符合预期: %v", byLabel)
+	}
+	if !first.Available || !second.Available {
+		t.Fatalf("两个账号都应可用: %+v %+v", first, second)
+	}
+	if first.Limits[0].PercentUsed != 11 || second.Limits[0].PercentUsed != 42 {
+		t.Errorf("每个账号应显示自己的限额: %+v %+v", first.Limits, second.Limits)
+	}
+	if first.ID == second.ID {
+		t.Errorf("不同 key 的账号 id 不应相同")
+	}
+	// 主视图跟随第一个账号，页面单选时用得到。
+	if quota.PlanName != "Cline Pass (Monthly)" || len(quota.Accounts) != 2 {
+		t.Errorf("主视图 = %+v", quota)
+	}
+	if len(quota.Windows) != 0 {
+		t.Errorf("plan_usage_enabled=false 时不应有官方窗口: %+v", quota.Windows)
 	}
 }

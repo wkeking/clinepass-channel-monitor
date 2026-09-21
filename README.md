@@ -125,7 +125,7 @@ plugins:
 | `store_planning_reasoning` | `false` | `false` 时只记 `planningReasoning` 长度，不记文本 |
 | `timezone` | `Asia/Shanghai` | 页面与时间戳展示时区 |
 | `plan_enabled` | `true` | 开启「Cline 套餐用量」区（套餐名、5 小时/周/月限额、官方 Token 总量）。需要能拿到 Cline API Key |
-| `plan_api_key` | 空 | 显式指定 Cline API Key。**留空即可**：插件会按 `plan_config_path` → CPA 凭据接口 → 上游请求头依次自动发现（实测留空时从 CPA 供应商配置的 `api-key-entries` 读到 key） |
+| `plan_api_key` | 空 | 显式指定一把 Cline API Key。**留空即可**：插件会按 `plan_config_path` → CPA 凭据接口 → 上游请求头自动发现（实测留空时从 CPA 供应商配置的 `api-key-entries` 读到 key）；填了会与自动发现的 key 一起参与轮询（同一把 key 只算一次） |
 | `plan_base_url` | `https://api.cline.bot/api/v1` | Cline API 基址 |
 | `plan_config_path` | `/CLIProxyAPI/config.yaml` | 容器内 CPA 配置文件路径。Cline 的 key 通常以 `openai-compatibility[].api-key-entries[].api-key` 存在这里 |
 | `plan_refresh` | `5m` | 套餐与限额刷新间隔（最小 1 分钟） |
@@ -147,6 +147,15 @@ plugins:
 | `GET /api/v1/users/{id}/balance` | 余额 | 微美元 |
 
 **套餐卡片里的数字**：`成本` 是 Cline 按上游 API 单价折算的**参考成本**（ClinePass 是包月，不按这条扣钱），5 小时/周/月限额百分比就是按这个口径算的；`余额` 是账号余额；`官方计费条目` 是逐日逐模型汇总的行数，**不是请求数**——请求数看概览里带「官方」标注的那张卡。
+
+**多个 Cline 条目 / 多把 key**：官方套餐与限额是**按账号**算的，所以插件把每把 key 当成一个账号分别轮询：
+
+- 发现范围：所有 base-url 命中 `hosts` 的 `openai-compatibility` 条目，以及名称是 `Cline` 的条目，取它们的 `api-keys` 与 `api-key-entries`（同一个 key 出现在多处只算一次，最多 8 个）；
+- 每把 key 一个账号卡：套餐、5 小时/周/月限额、31 天汇总、7 天汇总、官方逐条用量窗口都是各算各的；页面顶部出现**账号下拉**（≥2 个凭据时），概览里带「官方」标注的数值也跟着下拉切换，选择记在浏览器里；
+- 同一账号的两把 key（`/users/me` 返回同一个 user id）会被合并成一条，避免对同一个账号重复拉取；
+- 凭据列表每个轮询周期重新解析，所以在 CPA 里新增/删除 Cline key 后不用重启插件；
+- 页面标签只显示「条目名 #序号 · sk-…尾4位」，账号显示为 `usr-xxxx…xxxx`，**不会出现完整 key**；
+- 上游调用量按账号叠加：账号之间串行并间隔 0.5s，每个账号有自己的 26 小时保留窗口、分页预算与退避。
 
 **凭据发现顺序**：`plan_api_key` → CPA 凭据接口（`host.auth.list` / `host.auth.get`，若 CPA 把 Cline 注册成 auth 文件）→ CPA `config.yaml` 里的 `api-keys` / `api-key-entries` → 最近一次上游请求的 `Authorization`。多数部署走到第三步就够了：CPA 会把你在供应商配置里填的 key 持久化到 `openai-compatibility[].api-key-entries[].api-key`，所以 `plan_api_key` 可以一直留空（少一份密钥副本），只有把配置文件放到容器外读不到时才需要显式填。key 只留在内存，不落盘、不打日志、不返回给页面。
 
@@ -221,7 +230,7 @@ curl -s -H "Authorization: Bearer $CPA_MANAGEMENT_KEY" \
 |---|---|---|
 | GET | `/v0/management/plugins/clinepass-channel-monitor/stats?window=1h\|24h\|7d` | 聚合：按渠道/模型/来源，附带 `plan`（官方套餐、限额、`windows` 三个时间窗的官方口径） |
 | GET | `/v0/management/plugins/clinepass-channel-monitor/events?window=1h&limit=200&offset=0&channel=&model=&source=&result=` | 明细（分页 + 过滤） |
-| GET | `/v0/management/plugins/clinepass-channel-monitor/health` | 计数器与自诊断样本（含 `plan_usage`：官方明细条数、覆盖起点、是否截断、最近一次错误） |
+| GET | `/v0/management/plugins/clinepass-channel-monitor/health` | 计数器与自诊断样本（含 `plan_usage`：官方明细条数、覆盖起点、是否截断、最近一次错误；`plan_accounts`：每个 Cline 凭据的标签、账号、可用性与错误） |
 | GET | `/v0/management/plugins/clinepass-channel-monitor/export?window=24h` | 当前筛选条件的 CSV |
 
 ## 字段说明

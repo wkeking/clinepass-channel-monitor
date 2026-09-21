@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -33,6 +35,11 @@ const (
 	planDefaultDailyEvery = time.Hour
 	// planDefaultUsageRefresh is how often the official per-request records are paged.
 	planDefaultUsageRefresh = 5 * time.Minute
+	// planAccountStagger separates two credentials in one polling round so several accounts
+	// do not page the same upstream endpoint back to back.
+	planAccountStagger = 500 * time.Millisecond
+	// planMaxCredentials bounds how many credentials are polled at all.
+	planMaxCredentials = 8
 	planRequestTimeout      = 20 * time.Second
 	planUsageWindowDays     = 31
 	microUSD                = 1_000_000.0
@@ -59,6 +66,28 @@ type quotaTokens struct {
 	Requests     int64   `json:"requests"`
 }
 
+// planAccountSnapshot is the official view of one Cline credential. Several Cline entries
+// or several keys inside one entry each get their own snapshot: every key can belong to a
+// different Cline account with its own quota.
+type planAccountSnapshot struct {
+	// ID is a stable, key-derived identifier (never the key itself); the page uses it to
+	// remember which account the user selected.
+	ID          string                         `json:"id"`
+	Label       string                         `json:"label"`
+	Source      string                         `json:"source,omitempty"`
+	Available   bool                           `json:"available"`
+	Account     string                         `json:"account,omitempty"`
+	PlanName    string                         `json:"plan_name,omitempty"`
+	PlanPrice   string                         `json:"plan_price,omitempty"`
+	Limits      []quotaWindow                  `json:"limits,omitempty"`
+	Tokens      quotaTokens                    `json:"tokens"`
+	TokensError string                         `json:"tokens_error,omitempty"`
+	Windows     map[string]officialUsageWindow `json:"windows,omitempty"`
+	Usage       officialUsageState             `json:"usage"`
+	FetchedAt   string                         `json:"fetched_at,omitempty"`
+	Error       string                         `json:"error,omitempty"`
+}
+
 // planQuota is the cached view served to the page.
 type planQuota struct {
 	Available bool          `json:"available"`
@@ -77,6 +106,9 @@ type planQuota struct {
 	Usage     officialUsageState `json:"usage"`
 	FetchedAt string             `json:"fetched_at,omitempty"`
 	Error     string             `json:"error,omitempty"`
+	// Accounts lists every configured Cline credential. The fields above mirror the primary
+	// account (the first one that answered) so single-account clients keep working.
+	Accounts []planAccountSnapshot `json:"accounts,omitempty"`
 }
 
 // planClient performs the upstream calls. It never logs the API key.
@@ -247,29 +279,56 @@ func (c *planClient) balance(userID string) (float64, error) {
 	return float64(payload.BalanceUnits) / microUSD, nil
 }
 
-// planPoller keeps one cached snapshot of the upstream subscription state.
-type planPoller struct {
-	mu        sync.RWMutex
-	quota     planQuota
-	stopped   chan struct{}
-	once      sync.Once
+// planCredential is one Cline credential the poller may use. Its label never contains the
+// whole key: it is built from the provider entry name and a masked tail.
+type planCredential struct {
+	Key    string
+	Label  string
+	Source string
+}
+
+// planAccount is the polling state of one credential.
+type planAccount struct {
+	id        string
+	label     string
+	source    string
+	key       string
+	usage     *officialUsageCollector
+	userID    string
+	created   time.Time
+	tokens    quotaTokens
+	tokensErr string
+	window7   *officialUsageWindow
 	lastDaily time.Time
-	// usage holds the official per-request records behind the overview cards.
-	usage *officialUsageCollector
-	// dailyWindow is the 7-day window built from the daily totals, kept until the next
-	// daily refresh (at most once per hour).
-	dailyWindow *officialUsageWindow
-	// userID is the account id of the last successful /users/me call. Only the poller
-	// goroutine touches it; it keeps the official records refreshable while /users/me is
-	// temporarily unavailable.
-	userID string
-	// accountCreated marks the account's birthday, which tells "the account had no usage
-	// in this window" apart from "the retained records do not reach back that far".
-	accountCreated time.Time
+	snapshot  planAccountSnapshot
+}
+
+func newPlanAccount(cred planCredential) *planAccount {
+	return &planAccount{
+		id:     credentialID(cred.Key),
+		label:  cred.Label,
+		source: cred.Source,
+		key:    cred.Key,
+		usage:  newOfficialUsageCollector(),
+	}
+}
+
+// planPoller keeps one cached snapshot per Cline credential plus the primary view the page
+// shows by default. A deployment may configure several Cline entries, or several keys inside
+// one entry, and each key can belong to a different Cline account with its own quota, so
+// every credential is polled as its own account.
+type planPoller struct {
+	mu       sync.RWMutex
+	quota    planQuota
+	stopped  chan struct{}
+	once     sync.Once
+	accounts []*planAccount
+	// loggedEmpty avoids repeating the "no credential" line on every cycle.
+	loggedEmpty bool
 }
 
 func newPlanPoller() *planPoller {
-	return &planPoller{stopped: make(chan struct{}), usage: newOfficialUsageCollector()}
+	return &planPoller{stopped: make(chan struct{})}
 }
 
 func (p *planPoller) snapshot() planQuota {
@@ -294,77 +353,125 @@ func (p *planPoller) stop() {
 	p.once.Do(func() { close(p.stopped) })
 }
 
-// storeQuota attaches the official per-request view and publishes the snapshot.
-func (p *planPoller) storeQuota(quota planQuota) {
-	cfg := currentConfig()
-	if cfg.PlanUsageEnabled {
-		now := time.Now()
-		quota.Windows = p.usage.aggregate(now, p.accountCreated)
-		if p.dailyWindow != nil {
-			quota.Windows["7d"] = *p.dailyWindow
-		}
-		quota.Usage = p.usage.state(true)
+// syncAccounts keeps the polling state of the credentials that are still configured and
+// drops the ones that disappeared, so a removed key stops being polled.
+func (p *planPoller) syncAccounts(creds []planCredential) []*planAccount {
+	byID := make(map[string]*planAccount, len(p.accounts))
+	for _, account := range p.accounts {
+		byID[account.id] = account
 	}
-	p.store(quota)
+	out := make([]*planAccount, 0, len(creds))
+	for _, cred := range creds {
+		id := credentialID(cred.Key)
+		if existing, ok := byID[id]; ok {
+			existing.label = cred.Label
+			existing.source = cred.Source
+			existing.key = cred.Key
+			out = append(out, existing)
+			continue
+		}
+		out = append(out, newPlanAccount(cred))
+	}
+	return out
 }
 
-// refresh performs one round of upstream calls. Errors are reported in the snapshot so
-// the page can show why the quota is unavailable instead of silently showing zeros.
-func (p *planPoller) refresh(apiKey string) {
+// refresh polls every configured credential once and publishes the combined snapshot.
+// Accounts are polled sequentially and each paces its own paging, so several credentials do
+// not turn into a burst against the same upstream.
+func (p *planPoller) refresh() {
 	cfg := currentConfig()
-	client := newPlanClient(cfg.PlanBaseURL, apiKey)
+	creds := resolvePlanCredentials(cfg)
+	p.accounts = p.syncAccounts(creds)
+	if len(p.accounts) == 0 {
+		if !p.loggedEmpty {
+			hostLogAsync("warn", pluginID+": no Cline api key available for the subscription card", map[string]string{
+				"hint": "set plan_api_key in the plugin config, or point plan_config_path at CPA's config.yaml",
+			})
+			p.loggedEmpty = true
+		}
+		p.store(planQuota{Source: "cline-api", Error: "no Cline api key available yet"})
+		return
+	}
+	p.loggedEmpty = false
+
+	// Two keys of the same Cline account share one quota and one rate limit; polling both
+	// would only duplicate upstream calls.
+	byUserID := make(map[string]string, len(p.accounts))
+	for index, account := range p.accounts {
+		if index > 0 && cfg.PlanUsageEnabled {
+			time.Sleep(planAccountStagger)
+		}
+		if covered, ok := byUserID[account.userID]; ok && account.userID != "" {
+			account.snapshot = planAccountSnapshot{
+				ID: account.id, Label: account.label, Source: account.source,
+				Account: shortAccountID(account.userID),
+				Error:   "与 " + covered + " 是同一个 Cline 账号，已合并（未重复拉取）",
+			}
+			continue
+		}
+		p.refreshAccount(cfg, account)
+		if account.userID != "" {
+			byUserID[account.userID] = account.label
+		}
+	}
+	p.publish()
+}
+
+// refreshAccount performs one round of upstream calls for a single credential.
+func (p *planPoller) refreshAccount(cfg config, account *planAccount) {
+	client := newPlanClient(cfg.PlanBaseURL, account.key)
 	now := time.Now()
-	quota := planQuota{Available: false, Source: "cline-api"}
+	snapshot := planAccountSnapshot{
+		ID: account.id, Label: account.label, Source: account.source,
+		Tokens: account.tokens, TokensError: account.tokensErr,
+	}
 
 	user, errMe := client.me()
 	if errMe != nil {
-		if p.userID == "" {
-			quota.Error = errMe.Error()
-			quota.FetchedAt = time.Now().Format(time.RFC3339)
-			p.storeQuota(quota)
+		if account.userID == "" {
+			snapshot.Error = errMe.Error()
+			snapshot.FetchedAt = time.Now().Format(time.RFC3339)
+			p.attachUsage(cfg, account, &snapshot, now)
+			account.snapshot = snapshot
 			return
 		}
 	} else {
-		p.userID = user.ID
+		account.userID = user.ID
 		if createdAt, errParse := time.Parse(time.RFC3339Nano, user.CreatedAt); errParse == nil {
-			p.accountCreated = createdAt.UTC()
+			account.created = createdAt.UTC()
 		}
-		if len(user.ID) > 12 {
-			quota.Account = user.ID[:8] + "…" + user.ID[len(user.ID)-4:]
-		} else {
-			quota.Account = user.ID
-		}
+		snapshot.Account = shortAccountID(user.ID)
 	}
 
-	// The official per-request records back the overview cards; they are paged at most
-	// once per plan_usage_refresh.
 	if cfg.PlanUsageEnabled {
-		p.usage.refreshIfDue(client, p.userID, cfg.PlanUsageRefresh.Or(planDefaultUsageRefresh), now)
+		account.usage.refreshIfDue(client, account.userID, cfg.PlanUsageRefresh.Or(planDefaultUsageRefresh), now)
 	}
 
 	limits, errLimits := client.usageLimits()
 	if errLimits != nil {
-		quota.Error = errLimits.Error()
-		quota.FetchedAt = time.Now().Format(time.RFC3339)
-		p.storeQuota(quota)
+		snapshot.Error = errLimits.Error()
+		snapshot.FetchedAt = time.Now().Format(time.RFC3339)
+		p.attachUsage(cfg, account, &snapshot, now)
+		account.snapshot = snapshot
 		return
 	}
 	if plan, errPlan := client.plan(); errPlan == nil {
-		quota.PlanName = plan.Name
+		snapshot.PlanName = plan.Name
 		if plan.PriceUSD > 0 {
-			quota.PlanPrice = fmt.Sprintf("$%.2f / 月", plan.PriceUSD)
+			snapshot.PlanPrice = fmt.Sprintf("$%.2f / 月", plan.PriceUSD)
 		}
 	}
-	quota.Limits = limits
-	quota.Available = true
+	snapshot.Limits = limits
+	snapshot.Available = true
 
 	// The daily endpoint rejects ranges above 31 days (inclusive), so the window is
-	// today-30 .. today. It is refreshed at most once per hour to stay polite.
-	if cfg.PlanDailyEnabled && (p.lastDaily.IsZero() || time.Since(p.lastDaily) > planDefaultDailyEvery) {
+	// today-30 .. today. It is refreshed at most once per hour and the totals are kept
+	// between refreshes.
+	if cfg.PlanDailyEnabled && (account.lastDaily.IsZero() || time.Since(account.lastDaily) > planDefaultDailyEvery) {
 		utcNow := time.Now().UTC()
 		from := utcNow.AddDate(0, 0, -(planUsageWindowDays - 1)).Format("2006-01-02")
 		to := utcNow.Format("2006-01-02")
-		items, errDaily := client.dailyUsage(p.userID, from, to)
+		items, errDaily := client.dailyUsage(account.userID, from, to)
 		if errDaily == nil {
 			totals := quotaTokens{FromDate: from, ToDate: to}
 			for _, item := range items {
@@ -374,22 +481,78 @@ func (p *planPoller) refresh(apiKey string) {
 				totals.Requests++
 			}
 			totals.TotalTokens = totals.InputTokens + totals.OutputTokens
-			if balance, errBalance := client.balance(p.userID); errBalance == nil {
+			if balance, errBalance := client.balance(account.userID); errBalance == nil {
 				totals.BalanceUSD = balance
 			}
-			quota.Tokens = totals
-			quota.TokensError = ""
-			window7 := officialDailyWindow(items, time.Now(), p.accountCreated)
-			p.dailyWindow = &window7
-			p.lastDaily = time.Now()
+			window7 := officialDailyWindow(items, time.Now(), account.created)
+			account.tokens = totals
+			account.tokensErr = ""
+			account.window7 = &window7
+			account.lastDaily = time.Now()
+			snapshot.Tokens = totals
+			snapshot.TokensError = ""
 		} else {
-			// 取不到时不要假装是 0：把原因交给页面显示。
-			quota.TokensError = errDaily.Error()
+			account.tokensErr = errDaily.Error()
+			snapshot.TokensError = errDaily.Error()
 		}
 	}
-	quota.FetchedAt = time.Now().Format(time.RFC3339)
-	quota.Error = ""
-	p.storeQuota(quota)
+
+	p.attachUsage(cfg, account, &snapshot, now)
+	snapshot.FetchedAt = time.Now().Format(time.RFC3339)
+	snapshot.Error = ""
+	account.snapshot = snapshot
+}
+
+// attachUsage hangs the official per-request windows and the collector state onto a
+// snapshot.
+func (p *planPoller) attachUsage(cfg config, account *planAccount, snapshot *planAccountSnapshot, now time.Time) {
+	if !cfg.PlanUsageEnabled {
+		return
+	}
+	snapshot.Windows = account.usage.aggregate(now, account.created)
+	if account.window7 != nil {
+		snapshot.Windows["7d"] = *account.window7
+	}
+	snapshot.Usage = account.usage.state(true)
+}
+
+// publish exposes the per-account snapshots plus the primary one under the legacy fields.
+func (p *planPoller) publish() {
+	quota := planQuota{Source: "cline-api"}
+	for _, account := range p.accounts {
+		quota.Accounts = append(quota.Accounts, account.snapshot)
+	}
+	primary := p.primaryAccount()
+	if primary != nil {
+		snapshot := primary.snapshot
+		quota.Available = snapshot.Available
+		quota.Account = snapshot.Account
+		quota.PlanName = snapshot.PlanName
+		quota.PlanPrice = snapshot.PlanPrice
+		quota.Limits = snapshot.Limits
+		quota.Tokens = snapshot.Tokens
+		quota.TokensError = snapshot.TokensError
+		quota.Windows = snapshot.Windows
+		quota.Usage = snapshot.Usage
+		quota.FetchedAt = snapshot.FetchedAt
+		quota.Error = snapshot.Error
+	}
+	p.store(quota)
+}
+
+// primaryAccount is the account the page shows by default: the first one that answered,
+// otherwise the first configured one.
+func (p *planPoller) primaryAccount() *planAccount {
+	var first *planAccount
+	for _, account := range p.accounts {
+		if first == nil {
+			first = account
+		}
+		if account.snapshot.Available {
+			return account
+		}
+	}
+	return first
 }
 
 // latestUpstreamBearer remembers the bearer token that CPA sent upstream for the most
@@ -440,52 +603,90 @@ func upstreamBearerDiagnostics() (string, int) {
 	return latestUpstreamBearer.lastKeys, latestUpstreamBearer.lastLen
 }
 
-// resolvePlanAPIKey finds the credential used for the subscription card: an explicit
-// configuration value first, then CPA's own auth store, then CPA's configuration file,
-// and finally the bearer token CPA itself sends to Cline.
-func resolvePlanAPIKey() string {
-	cfg := currentConfig()
+// resolvePlanCredentials collects every Cline credential this deployment can use. A Cline
+// entry may carry several keys, and several entries may point at Cline, so the poller works
+// on a list instead of a single key.
+//
+// Order of preference (earlier sources win when the same key appears twice):
+//
+//  1. plan_api_key in the plugin configuration (explicit wins),
+//  2. the keys of every matching openai-compatibility entry in CPA's configuration file,
+//     which is where CPA keeps the provider keys it was configured with,
+//  3. the credentials CPA exposes through the host auth callbacks,
+//  4. the bearer token observed on an intercepted upstream request.
+//
+// Values stay in memory: they are never logged, never written to disk and never returned to
+// the page (labels only carry a masked tail).
+func resolvePlanCredentials(cfg config) []planCredential {
+	out := make([]planCredential, 0, 4)
+	seen := make(map[string]struct{}, 4)
+	add := func(key, label, source string) {
+		trimmed := strings.TrimSpace(key)
+		if trimmed == "" || len(out) >= planMaxCredentials {
+			return
+		}
+		if _, duplicate := seen[trimmed]; duplicate {
+			return
+		}
+		seen[trimmed] = struct{}{}
+		out = append(out, planCredential{Key: trimmed, Label: label, Source: source})
+	}
+
 	if key := strings.TrimSpace(cfg.PlanAPIKey); key != "" {
-		return key
+		add(key, "插件配置 · "+maskCredential(key), "plugin-config")
 	}
-	if key := discoverClineAPIKey(cfg); key != "" {
-		return key
+	for _, cred := range clineCredentialsFromConfigFile(cfg) {
+		add(cred.Key, cred.Label, cred.Source)
 	}
-	if key := clineAPIKeyFromConfigFile(cfg); key != "" {
-		return key
+	for _, cred := range clineCredentialsFromHostAuth(cfg) {
+		add(cred.Key, cred.Label, cred.Source)
 	}
 	if key := upstreamBearer(); key != "" {
-		hostLogAsync("info", pluginID+": using the bearer token observed on an upstream Cline request", map[string]string{
-			"source": "observed-header",
-		})
-		return key
+		add(key, "上游请求头 · "+maskCredential(key), "observed-header")
 	}
-	hostLogAsync("warn", pluginID+": no Cline api key available for the subscription card", map[string]string{
-		"hint": "set plan_api_key in the plugin config, or point plan_config_path at CPA's config.yaml",
-	})
-	return ""
+	if len(out) > 0 {
+		return out
+	}
+	return nil
 }
 
-// startPlanPoller refreshes the quota in the background until stop is called. The key is
-// resolved again on every cycle, so a deployment that can only reveal its credential
-// later (for example through an observed upstream request) still gets the card.
-func startPlanPoller(apiKey string) *planPoller {
+// credentialID derives the stable identifier the page uses to remember a selection. It is a
+// hash prefix, so the id itself never carries the key.
+func credentialID(key string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(key)))
+	return hex.EncodeToString(sum[:])[:12]
+}
+
+// maskCredential keeps at most the first three and the last four characters of a key.
+func maskCredential(key string) string {
+	trimmed := strings.TrimSpace(key)
+	if len(trimmed) <= 8 {
+		return "…"
+	}
+	return trimmed[:3] + "…" + trimmed[len(trimmed)-4:]
+}
+
+// shortAccountID masks a Cline account id for display.
+func shortAccountID(id string) string {
+	trimmed := strings.TrimSpace(id)
+	if len(trimmed) <= 12 {
+		return trimmed
+	}
+	return trimmed[:8] + "…" + trimmed[len(trimmed)-4:]
+}
+
+// startPlanPoller refreshes every configured credential in the background until stop is
+// called. Credentials are resolved again on every cycle, so a deployment that only reveals
+// its key later (for example through an observed upstream request) still gets the card.
+func startPlanPoller() *planPoller {
 	poller := newPlanPoller()
 	interval := currentConfig().PlanRefresh.Or(planDefaultRefresh)
 	if interval < time.Minute {
 		interval = time.Minute
 	}
 	go func() {
-		key := apiKey
 		for {
-			if strings.TrimSpace(key) == "" {
-				key = resolvePlanAPIKey()
-			}
-			if strings.TrimSpace(key) == "" {
-				poller.storeQuota(planQuota{Source: "cline-api", Error: "no Cline api key available yet"})
-			} else {
-				poller.refresh(key)
-			}
+			poller.refresh()
 			select {
 			case <-poller.stopped:
 				return
@@ -494,26 +695,6 @@ func startPlanPoller(apiKey string) *planPoller {
 		}
 	}()
 	return poller
-}
-
-// clineAPIKey resolves the key used to query Cline, in order of preference:
-//
-//  1. plan_api_key in the plugin configuration (explicit wins),
-//  2. the credential CPA is configured with, read through the host auth callbacks,
-//  3. the same credential read from CPA's own configuration file, which is mounted
-//     read-only into the container and is the last resort when the host does not
-//     expose synthesized credentials.
-//
-// The value stays in memory: it is never logged, never written to disk and never
-// returned to the page.
-func clineAPIKey(cfg config) string {
-	if key := strings.TrimSpace(cfg.PlanAPIKey); key != "" {
-		return key
-	}
-	if key := discoverClineAPIKey(cfg); key != "" {
-		return key
-	}
-	return clineAPIKeyFromConfigFile(cfg)
 }
 
 type hostAuthFileEntry struct {
@@ -531,17 +712,20 @@ type hostAuthGetResponse struct {
 	JSON      json.RawMessage `json:"json"`
 }
 
-// discoverClineAPIKey reads the Cline credential through the host auth callbacks.
-func discoverClineAPIKey(cfg config) string {
+// clineCredentialsFromHostAuth reads every Cline credential CPA exposes through the host auth
+// callbacks (auth files). Credentials CPA synthesizes from openai-compatibility entries are
+// not listed here; those are read from the configuration file.
+func clineCredentialsFromHostAuth(cfg config) []planCredential {
+	out := make([]planCredential, 0, 2)
 	raw, ok := callHost(pluginabi.MethodHostAuthList, nil)
 	if !ok {
-		return ""
+		return out
 	}
 	var listed struct {
 		Files []hostAuthFileEntry `json:"files"`
 	}
 	if errUnmarshal := json.Unmarshal(raw, &listed); errUnmarshal != nil {
-		return ""
+		return out
 	}
 	count, matched := 0, 0
 	for _, entry := range listed.Files {
@@ -562,25 +746,37 @@ func discoverClineAPIKey(cfg config) string {
 		if errUnmarshal := json.Unmarshal(rawAuth, &got); errUnmarshal != nil {
 			continue
 		}
-		if key := apiKeyFromAuthJSON(got.JSON); key != "" {
-			hostLogAsync("info", pluginID+": using the Cline credential registered with CPA", map[string]string{
-				"source":     "host-auth",
-				"auth_index": entry.AuthIndex,
-			})
-			return key
+		key := strings.TrimSpace(apiKeyFromAuthJSON(got.JSON))
+		if key == "" {
+			continue
 		}
+		name := strings.TrimSpace(entry.Name)
+		if name == "" {
+			name = strings.TrimSpace(entry.Type)
+		}
+		if name == "" {
+			name = "host-auth"
+		}
+		out = append(out, planCredential{
+			Key:    key,
+			Label:  name + " · " + maskCredential(key),
+			Source: "host-auth",
+		})
 	}
-	hostLogAsync("info", pluginID+": host auth lookup finished without a usable Cline credential", map[string]string{
+	hostLogAsync("info", pluginID+": host auth lookup finished", map[string]string{
 		"auth_files": strconv.Itoa(count),
 		"matched":    strconv.Itoa(matched),
+		"usable":     strconv.Itoa(len(out)),
 	})
-	return ""
+	return out
 }
 
-// clineAPIKeyFromConfigFile reads CPA's configuration and picks the first key of the
-// openai-compatibility entry whose base URL is a Cline host.
-func clineAPIKeyFromConfigFile(cfg config) string {
-	attempts := make([]string, 0, len(planConfigPaths))
+// clineCredentialsFromConfigFile reads CPA's configuration and collects the keys of every
+// openai-compatibility entry that points at Cline: matched by base_url host, or by the entry
+// name being "Cline" when the host does not match. CPA persists the keys it was configured
+// with under api-key-entries, so this is normally the source that needs no user input.
+func clineCredentialsFromConfigFile(cfg config) []planCredential {
+	out := make([]planCredential, 0, 2)
 	paths := planConfigPaths
 	if override := strings.TrimSpace(cfg.PlanConfigPath); override != "" {
 		paths = []string{override}
@@ -588,10 +784,9 @@ func clineAPIKeyFromConfigFile(cfg config) string {
 	for _, path := range paths {
 		raw, errRead := os.ReadFile(path)
 		if errRead != nil {
-			attempts = append(attempts, path+": "+errRead.Error())
+			hostLogAsync("info", pluginID+": config attempt: "+path+": "+errRead.Error(), nil)
 			continue
 		}
-		attempts = append(attempts, path+": read "+strconv.Itoa(len(raw))+" bytes")
 		var file struct {
 			OpenAICompatibility []struct {
 				Name          string   `yaml:"name"`
@@ -604,9 +799,10 @@ func clineAPIKeyFromConfigFile(cfg config) string {
 			} `yaml:"openai-compatibility"`
 		}
 		if errUnmarshal := yaml.Unmarshal(raw, &file); errUnmarshal != nil {
+			hostLogAsync("info", pluginID+": config attempt: "+path+": decode failed", nil)
 			continue
 		}
-		attempts[len(attempts)-1] += " entries=" + strconv.Itoa(len(file.OpenAICompatibility))
+		found := 0
 		for _, entry := range file.OpenAICompatibility {
 			if entry.Disabled {
 				continue
@@ -622,36 +818,43 @@ func clineAPIKeyFromConfigFile(cfg config) string {
 			if !matches && !strings.EqualFold(strings.TrimSpace(entry.Name), "cline") {
 				continue
 			}
-			attempts[len(attempts)-1] += " keys[" + entry.Name + "]=" + strconv.Itoa(len(entry.APIKeys)) +
-				" entries=" + strconv.Itoa(len(entry.APIKeyEntries))
-			for _, key := range entry.APIKeys {
-				if trimmed := strings.TrimSpace(key); trimmed != "" {
-					hostLogAsync("info", pluginID+": using the Cline credential from CPA's configuration file", map[string]string{
-						"source": "config-file",
-						"host":   host,
-						"field":  "api-keys",
-					})
-					return trimmed
-				}
+			name := strings.TrimSpace(entry.Name)
+			if name == "" {
+				name = host
 			}
-			// CPA injects the credentials it is configured with through the management API
-			// into api-key-entries, so this is the field that usually carries the key.
+			keys := make([]string, 0, len(entry.APIKeys)+len(entry.APIKeyEntries))
+			keys = append(keys, entry.APIKeys...)
 			for _, keyEntry := range entry.APIKeyEntries {
-				if trimmed := strings.TrimSpace(keyEntry.APIKey); trimmed != "" {
-					hostLogAsync("info", pluginID+": using the Cline credential from CPA's configuration file", map[string]string{
-						"source": "config-file",
-						"host":   host,
-						"field":  "api-key-entries",
-					})
-					return trimmed
+				keys = append(keys, keyEntry.APIKey)
+			}
+			index := 0
+			for _, key := range keys {
+				trimmed := strings.TrimSpace(key)
+				if trimmed == "" {
+					continue
 				}
+				index++
+				out = append(out, planCredential{
+					Key:    trimmed,
+					Label:  fmt.Sprintf("%s #%d · %s", name, index, maskCredential(trimmed)),
+					Source: "config-file",
+				})
+			}
+			if index > 0 {
+				hostLogAsync("info", pluginID+": using Cline credentials from CPA's configuration file", map[string]string{
+					"source": "config-file",
+					"host":   host,
+					"entry":  name,
+					"keys":   strconv.Itoa(index),
+				})
+				found += index
 			}
 		}
+		if found > 0 {
+			return out
+		}
 	}
-	for _, attempt := range attempts {
-		hostLogAsync("info", pluginID+": config attempt: "+attempt, nil)
-	}
-	return ""
+	return out
 }
 
 // planConfigPaths are the locations CPA's configuration can be read from inside the

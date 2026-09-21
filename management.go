@@ -126,8 +126,12 @@ type healthResponse struct {
 	Uptime               string   `json:"uptime"`
 	PlanEnabled          bool     `json:"plan_enabled"`
 	// PlanUsage reports the official per-request collector that backs the overview cards
-	// (retained records, coverage, last error) without exposing any credential.
+	// (retained records, coverage, last error) without exposing any credential. When several
+	// Cline credentials are configured it describes the primary one; PlanAccounts lists all.
 	PlanUsage officialUsageState `json:"plan_usage"`
+	// PlanAccounts lists every configured Cline credential so a deployment with several
+	// entries or several keys can be checked at a glance.
+	PlanAccounts []planAccountHealth `json:"plan_accounts,omitempty"`
 	// RequestHeaderNames lists the header names seen on the last intercepted request and
 	// the length of its bearer token; it exists to diagnose credential discovery and
 	// never contains a credential value.
@@ -135,6 +139,29 @@ type healthResponse struct {
 	RequestBearerLen   int    `json:"request_bearer_len,omitempty"`
 	statsTotals
 	UnmatchedHostSamples []unmatchedHostSample `json:"unmatched_host_samples"`
+}
+
+// planAccountHealth is the per-credential diagnostic summary shown by /health.
+type planAccountHealth struct {
+	ID        string `json:"id"`
+	Label     string `json:"label"`
+	Source    string `json:"source,omitempty"`
+	Available bool   `json:"available"`
+	Account   string `json:"account,omitempty"`
+	Items     int    `json:"items"`
+	Oldest    string `json:"oldest,omitempty"`
+	Truncated bool   `json:"truncated"`
+	Failures  int    `json:"failures,omitempty"`
+	Error     string `json:"error,omitempty"`
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 var pluginStart = time.Now()
@@ -161,7 +188,24 @@ func buildHealthResponse() healthResponse {
 	}
 	resp.PlanUsage = officialUsageState{Enabled: cfg.PlanUsageEnabled}
 	if poller := currentPlan(); poller != nil {
-		resp.PlanUsage = poller.usage.state(cfg.PlanUsageEnabled)
+		snapshot := poller.snapshot()
+		if len(snapshot.Accounts) > 0 {
+			resp.PlanUsage = snapshot.Usage
+		}
+		for _, account := range snapshot.Accounts {
+			resp.PlanAccounts = append(resp.PlanAccounts, planAccountHealth{
+				ID:        account.ID,
+				Label:     account.Label,
+				Source:    account.Source,
+				Available: account.Available,
+				Account:   account.Account,
+				Items:     account.Usage.Items,
+				Oldest:    account.Usage.Oldest,
+				Truncated: account.Usage.Truncated,
+				Failures:  account.Usage.Failures,
+				Error:     firstNonEmpty(account.Error, account.Usage.Error),
+			})
+		}
 	}
 	if st == nil {
 		return resp

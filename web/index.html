@@ -78,6 +78,7 @@ td.num,th.num{text-align:right}
 .pcard .bar2 i{position:absolute;inset:0 auto 0 0;border-radius:6px;background:var(--accent)}
 .pcard .ps{margin-top:8px;color:var(--muted);font-size:11.5px;display:flex;flex-wrap:wrap;gap:3px 10px}
 .plan-head{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin-bottom:12px;color:var(--muted);font-size:12.5px}
+.plan-head select{padding:5px 9px;font-size:12.5px;border-radius:9px;max-width:100%}
 .plan-warn{color:var(--warn)}
 .plan-err{color:var(--err)}
 </style>
@@ -111,7 +112,10 @@ td.num,th.num{text-align:right}
 
   <section id="plan-section">
     <h2>Cline 套餐用量（官方接口）</h2>
-    <div class="plan-head" id="plan-head"></div>
+    <div class="plan-head">
+      <select id="plan-account" class="hidden" title="按 Cline API Key / 账号切换官方数据（多凭据时显示）"></select>
+      <span id="plan-head"></span>
+    </div>
     <div class="plan" id="plan-cards"></div>
     <div class="msg hidden" id="plan-msg"></div>
   </section>
@@ -234,10 +238,40 @@ function card(opt){
 // （stats.plan.windows[当前时间窗]），官方没有延时与生成速度，这两块始终是本机口径。
 function windowLabel(w){return w==="1h"?"近 1 小时":w==="7d"?"近 7 天":"近 24 小时"}
 
+// 一个 CPA 里可能配置了多个 Cline 条目或多把 key，每把 key 对应一个 Cline 账号：
+// 官方套餐/限额/用量都是按账号（key）分开的，所以页面顶部有一个账号下拉。
+const PLAN_ACCOUNT_KEY="cpm-plan-account";
+
+function planAccountList(plan){
+  const list=(plan&&plan.accounts)||[];
+  return list.length?list:(plan?[plan]:[]);
+}
+
+function selectedPlanAccount(plan){
+  const list=planAccountList(plan);
+  if(!list.length)return plan||null;
+  const want=store.get(PLAN_ACCOUNT_KEY);
+  let account=list.filter(a=>a&&a.id===want)[0];
+  if(!account)account=list.filter(a=>a&&a.available)[0]||list[0];
+  return account;
+}
+
+function renderAccountPicker(picker,list){
+  if(!picker)return;
+  if(list.length<2){picker.innerHTML="";picker.classList.add("hidden");return}
+  const current=(selectedPlanAccount(planSnapshot)||{}).id||"";
+  picker.innerHTML=list.map(function(account){
+    const label=(account.label||account.id||"账号")+(account.available===false?"（不可用）":"");
+    return '<option value="'+esc(account.id||"")+'"'+(account.id===current?" selected":"")+">"+esc(label)+"</option>";
+  }).join("");
+  picker.classList.remove("hidden");
+}
+
 function officialView(s){
-  const plan=s.plan||{}, usage=plan.usage||{};
+  const account=selectedPlanAccount(s&&s.plan)||{};
+  const usage=account.usage||{};
   const win=$("window").value||"24h";
-  return {win:win,usage:usage,fetchedAt:usage.fetched_at||"",off:(plan.windows||{})[win]||null};
+  return {win:win,account:account,usage:usage,fetchedAt:usage.fetched_at||"",off:(account.windows||{})[win]||null};
 }
 
 function renderOverviewNote(view){
@@ -316,37 +350,45 @@ function renderCards(s){
 }
 
 let planSnapshot=null;
+let lastStats=null;
 
 function quotaTint(pct){if(pct>=90)return "#f87171";if(pct>=70)return "#fbbf24";return "#34d399"}
 
 function renderPlan(plan){
   planSnapshot=plan;
-  const head=$("plan-head"), cards=$("plan-cards"), msg=$("plan-msg");
-  if(!plan||plan.available===false){
+  const head=$("plan-head"), cards=$("plan-cards"), msg=$("plan-msg"), picker=$("plan-account");
+  const list=planAccountList(plan);
+  renderAccountPicker(picker,list);
+  const view=selectedPlanAccount(plan);
+  if(!view||view.available===false){
     cards.innerHTML="";
     head.innerHTML="";
     msg.classList.remove("hidden");
     msg.className="msg plan-err";
-    if(plan&&plan.error&&plan.error.indexOf("no Cline api key")>=0){
+    const error=(view&&view.error)||(plan&&plan.error)||"";
+    if(error.indexOf("no Cline api key")>=0){
       msg.innerHTML='未取到官方用量：插件拿不到 Cline API Key。请二选一：'+
         '① 在插件配置里填 <code>plan_api_key</code>（就是配置 Cline 条目时用的那个 key）；'+
         '② 保持 <code>plan_enabled: false</code> 关闭这张卡片。'+
-        '<br>读取顺序：插件配置 <code>plan_api_key</code> → CPA 的凭据接口 → CPA 的 config.yaml → 最近一次上游请求的 Authorization 头。';
+        '<br>读取顺序：插件配置 <code>plan_api_key</code> → CPA 的 config.yaml（<code>openai-compatibility[].api-key-entries</code>）→ CPA 凭据接口 → 最近一次上游请求的 Authorization 头。';
+    }else if(list.length>1&&error){
+      msg.textContent="该账号官方用量暂不可用（"+(view.label||"")+"）："+error;
     }else{
-      msg.textContent=plan&&plan.error?("未取到官方用量："+plan.error):"官方用量暂不可用。";
+      msg.textContent=error?("未取到官方用量："+error):"官方用量暂不可用。";
     }
     return;
   }
   msg.classList.add("hidden");
   const bits=[];
-  if(plan.plan_name)bits.push('<span class="chip">'+esc(plan.plan_name)+"</span>");
-  if(plan.plan_price)bits.push(esc(plan.plan_price));
-  if(plan.account)bits.push("账号 "+esc(plan.account));
-  if(plan.fetched_at)bits.push("更新于 "+esc(fmtTime(plan.fetched_at).slice(11,19)));
-  if(plan.tokens_error)bits.push('<span class="plan-warn">官方汇总未取到：'+esc(plan.tokens_error)+"</span>");
+  if(list.length>1)bits.push(list.length+" 个 Cline 凭据");
+  if(view.plan_name)bits.push('<span class="chip">'+esc(view.plan_name)+"</span>");
+  if(view.plan_price)bits.push(esc(view.plan_price));
+  if(view.account)bits.push("账号 "+esc(view.account));
+  if(view.fetched_at)bits.push("更新于 "+esc(fmtTime(view.fetched_at).slice(11,19)));
+  if(view.tokens_error)bits.push('<span class="plan-warn">官方汇总未取到：'+esc(view.tokens_error)+"</span>");
   head.innerHTML=bits.join(" · ");
 
-  const blocks=(plan.limits||[]).map(function(limit){
+  const blocks=(view.limits||[]).map(function(limit){
     const pct=n(limit.percent_used);
     const warn=pct>=90?" plan-warn":"";
     return '<div class="pcard">'+
@@ -358,7 +400,7 @@ function renderPlan(plan){
       "</div>";
   }).join("");
 
-  const tok=plan.tokens||{};
+  const tok=view.tokens||{};
   const bals=[];
   if(tok.balance_usd)bals.push("余额 $"+fixed(tok.balance_usd,4));
   if(tok.cost_usd)bals.push("近 31 天成本 $"+fixed(tok.cost_usd,4));
@@ -462,6 +504,7 @@ async function load(){
     $("statusline").textContent=bits.join(" · ");
 
     const stats=await api("/stats",{window:w});
+    lastStats=stats;
     renderPlan(stats.plan);
     renderCards(stats);
     renderChannels(stats.channels);
@@ -491,6 +534,7 @@ $("token").addEventListener("keydown",e=>{if(e.key==="Enter")$("save").click()})
 $("forget").addEventListener("click",()=>{store.del(TOKEN_KEY);$("token").value="";$("gate").classList.remove("hidden");$("statusline").textContent="已清除本机保存的密钥"});
 $("refresh").addEventListener("click",()=>load());
 $("window").addEventListener("change",()=>{state.offset=0;load()});
+$("plan-account").addEventListener("change",()=>{store.set(PLAN_ACCOUNT_KEY,$("plan-account").value);renderPlan(planSnapshot);renderCards(lastStats||{})});
 $("apply").addEventListener("click",()=>{state.offset=0;load()});
 $("prev").addEventListener("click",()=>{state.offset=Math.max(0,state.offset-PAGE_SIZE);load()});
 $("next").addEventListener("click",()=>{state.offset+=PAGE_SIZE;load()});

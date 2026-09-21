@@ -95,7 +95,7 @@ func loadConfig(raw []byte) {
 	}
 	stateMu.Unlock()
 	if cfg.PlanEnabled {
-		poller = startPlanPoller(resolvePlanAPIKey())
+		poller = startPlanPoller()
 		stateMu.Lock()
 		state.Plan = poller
 		stateMu.Unlock()

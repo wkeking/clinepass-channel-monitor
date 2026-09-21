@@ -5,51 +5,72 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Cline 渠道监控</title>
 <style>
-:root{color-scheme:light dark;--bg:#f6f7f9;--card:#fff;--fg:#16181d;--muted:#666c78;--line:#e3e6ea;--accent:#2563eb;--warn:#b45309;--err:#b91c1c;--ok:#15803d}
-@media (prefers-color-scheme:dark){:root{--bg:#111318;--card:#181b21;--fg:#e8eaee;--muted:#9aa3b2;--line:#272b33;--accent:#60a5fa;--warn:#fbbf24;--err:#f87171;--ok:#4ade80}}
+:root{color-scheme:light dark;--bg:#f6f7f9;--card:#fff;--fg:#16181d;--muted:#666c78;--line:#e3e6ea;--accent:#2563eb;--accent-soft:rgba(37,99,235,.08);--warn:#b45309;--err:#b91c1c;--ok:#15803d}
+@media (prefers-color-scheme:dark){:root{--bg:#0f1116;--card:#161a21;--fg:#e8eaee;--muted:#98a2b3;--line:#242a33;--accent:#60a5fa;--accent-soft:rgba(96,165,250,.12);--warn:#fbbf24;--err:#f87171;--ok:#4ade80}}
 *{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans CJK SC","PingFang SC","Microsoft YaHei",sans-serif}
-header{display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between;padding:14px 18px;background:var(--card);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:5}
-h1{margin:0;font-size:16px;font-weight:600}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans CJK SC","PingFang SC","Microsoft YaHei",sans-serif;-webkit-font-smoothing:antialiased}
+header{display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between;padding:14px 22px;background:var(--card);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:5}
+h1{margin:0;font-size:16px;font-weight:650;letter-spacing:.2px}
+h1 span{color:var(--muted);font-weight:400;font-size:12px;margin-left:6px}
 .sub{color:var(--muted);font-size:12px}
-main{padding:18px;max-width:1600px;margin:0 auto}
-section{margin-bottom:22px}
-h2{margin:0 0 10px;font-size:14px;font-weight:600;color:var(--muted)}
-.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px}
-.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px}
-.card .k{color:var(--muted);font-size:12px;margin-bottom:4px}
-.card .v{font-size:20px;font-weight:600;font-variant-numeric:tabular-nums}
-.card .s{color:var(--muted);font-size:11px;margin-top:2px}
+main{padding:20px 22px 40px;max-width:1780px;margin:0 auto}
+section{margin-bottom:24px}
+h2{margin:0 0 10px;font-size:13px;font-weight:600;color:var(--muted);letter-spacing:.3px}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(168px,1fr));gap:12px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:13px 15px}
+.card .k{color:var(--muted);font-size:12px;display:flex;align-items:center;gap:5px;margin-bottom:6px}
+.card .v{font-size:22px;font-weight:650;font-variant-numeric:tabular-nums;letter-spacing:-.2px}
+.card .v small{font-size:12px;font-weight:500;color:var(--muted);margin-left:3px}
+.card .s{color:var(--muted);font-size:11.5px;margin-top:3px;display:flex;gap:8px;flex-wrap:wrap}
 .bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:12px}
-button,select,input{font:inherit;color:inherit;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:6px 10px}
+button,select,input{font:inherit;color:inherit;background:var(--card);border:1px solid var(--line);border-radius:9px;padding:7px 12px;transition:border-color .15s,background .15s}
 button{cursor:pointer}
+button:hover{border-color:var(--accent)}
 button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
-button:disabled{opacity:.5;cursor:not-allowed}
-table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--line);border-radius:10px;overflow:hidden}
-th,td{padding:7px 9px;text-align:left;border-bottom:1px solid var(--line);white-space:nowrap}
-th{background:color-mix(in srgb,var(--card) 70%,var(--bg));font-size:12px;color:var(--muted);position:sticky;top:0}
-tbody tr{cursor:pointer}
-tbody tr:hover{background:color-mix(in srgb,var(--accent) 8%,var(--card))}
-td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
-.wrap{overflow-x:auto}
-.tag{display:inline-block;padding:1px 7px;border-radius:999px;border:1px solid var(--line);font-size:12px}
-.tag.ok{color:var(--ok);border-color:color-mix(in srgb,var(--ok) 40%,var(--line))}
-.tag.err{color:var(--err);border-color:color-mix(in srgb,var(--err) 40%,var(--line))}
-.tag.miss{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 40%,var(--line))}
-.detail td{background:color-mix(in srgb,var(--bg) 60%,var(--card));white-space:normal}
-.detail pre{margin:0;max-height:320px;overflow:auto;font-size:12px;line-height:1.45;background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:10px}
-.msg{color:var(--muted);padding:14px 0}
+button.primary:hover{filter:brightness(1.06)}
+button:disabled{opacity:.45;cursor:not-allowed;border-color:var(--line)}
+input::placeholder{color:var(--muted)}
+.wrap{overflow-x:auto;border:1px solid var(--line);border-radius:12px;background:var(--card)}
+table{width:100%;border-collapse:separate;border-spacing:0}
+th,td{padding:9px 12px;text-align:left;white-space:nowrap;vertical-align:top}
+th{font-size:12px;color:var(--muted);font-weight:600;background:color-mix(in srgb,var(--card) 82%,var(--bg));border-bottom:1px solid var(--line);position:sticky;top:0}
+td{border-bottom:1px solid var(--line);font-variant-numeric:tabular-nums}
+tbody tr:last-child td{border-bottom:none}
+tbody tr.row{cursor:pointer}
+tbody tr.row:hover td{background:var(--accent-soft)}
+td.num,th.num{text-align:right}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12.5px}
+.stack{display:flex;flex-direction:column;gap:1px;line-height:1.35}
+.stack .m{color:var(--muted);font-size:11.5px}
+.tok{display:grid;grid-template-columns:auto 1fr;gap:1px 6px;justify-content:start}
+.tok .lbl{color:var(--muted);font-size:11.5px}
+.tag{display:inline-block;padding:2px 9px;border-radius:999px;border:1px solid var(--line);font-size:12px;line-height:1.5}
+.tag.ok{color:var(--ok);border-color:color-mix(in srgb,var(--ok) 45%,var(--line));background:color-mix(in srgb,var(--ok) 10%,transparent)}
+.tag.err{color:var(--err);border-color:color-mix(in srgb,var(--err) 45%,var(--line));background:color-mix(in srgb,var(--err) 10%,transparent)}
+.tag.miss{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 45%,var(--line));background:color-mix(in srgb,var(--warn) 10%,transparent)}
+.chip{display:inline-block;padding:1px 7px;border-radius:6px;background:var(--accent-soft);color:var(--accent);font-size:12px;font-weight:600}
+.cache-bar{position:relative;height:4px;border-radius:3px;background:color-mix(in srgb,var(--err) 35%,var(--line));margin-top:4px;overflow:hidden;min-width:80px}
+.cache-bar i{position:absolute;inset:0 auto 0 0;background:var(--ok);border-radius:3px}
+.detail td{background:color-mix(in srgb,var(--bg) 55%,var(--card));white-space:normal;padding:0}
+.detail .inner{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px;padding:14px 16px}
+.detail h3{margin:0 0 6px;font-size:12px;color:var(--muted);font-weight:600}
+.detail dl{margin:0;display:grid;grid-template-columns:auto 1fr;gap:2px 10px;font-size:12.5px}
+.detail dt{color:var(--muted)}
+.detail dd{margin:0;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;word-break:break-all}
+.detail pre{margin:0;max-height:260px;overflow:auto;font-size:12px;line-height:1.5;background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:10px}
+.msg{color:var(--muted);padding:16px}
 .hidden{display:none}
-.mode{font-size:12px;padding:2px 8px;border-radius:999px;border:1px solid var(--line)}
+.mode{font-size:12px;padding:3px 10px;border-radius:999px;border:1px solid var(--line);color:var(--muted)}
+.empty-row td{text-align:center;color:var(--muted);padding:18px}
 </style>
 </head>
 <body>
 <header>
   <div>
-    <h1>Cline 渠道监控 <span class="sub" id="ver"></span></h1>
+    <h1>Cline 渠道监控<span id="ver"></span></h1>
     <div class="sub" id="statusline">加载中…</div>
   </div>
-  <div class="bar">
+  <div class="bar" style="margin:0">
     <span class="mode" id="mode">-</span>
     <select id="window">
       <option value="1h">近 1 小时</option>
@@ -64,12 +85,11 @@ td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
 <main>
   <section id="gate" class="hidden">
     <div class="card">
-      <div class="k">需要 CPA 管理密钥（只存在本机浏览器，不会发送到本页面之外）</div>
+      <div class="k">需要 CPA 管理密钥（仅保存在本机浏览器，只用于调用本站管理接口）</div>
       <div class="bar" style="margin:10px 0 0">
         <input id="token" type="password" placeholder="粘贴 management key" size="46">
         <button class="primary" id="save">保存并加载</button>
       </div>
-      <div class="sub" id="gatem sg"></div>
     </div>
   </section>
 
@@ -81,16 +101,16 @@ td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
   <section>
     <h2>渠道分布</h2>
     <div class="wrap"><table id="channels"><thead>
-      <tr><th>渠道</th><th class="num">请求</th><th class="num">失败</th><th class="num">成本($)</th><th class="num">平均延时(ms)</th><th class="num">平均 TTFT(ms)</th><th class="num">平均输入</th><th class="num">平均输出</th></tr>
+      <tr><th>渠道</th><th class="num">请求</th><th class="num">失败</th><th class="num">成本($)</th><th class="num">平均延时</th><th class="num">平均 TTFT</th><th class="num">Token 输入/输出</th><th class="num">上游缓存命中率</th></tr>
     </thead><tbody></tbody></table></div>
   </section>
 
   <section>
     <h2>明细</h2>
     <div class="bar">
-      <input id="f-channel" placeholder="渠道" size="12">
-      <input id="f-model" placeholder="模型" size="24">
-      <input id="f-source" placeholder="来源 key" size="16">
+      <input id="f-channel" placeholder="渠道" size="10">
+      <input id="f-model" placeholder="模型" size="20">
+      <input id="f-source" placeholder="来源 key" size="14">
       <select id="f-result"><option value="">全部结果</option><option value="success">成功</option><option value="failed">失败</option><option value="missing_channel">无渠道</option></select>
       <button id="apply" class="primary">应用过滤</button>
       <span class="sub" id="pageinfo"></span>
@@ -99,10 +119,8 @@ td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
     </div>
     <div class="wrap"><table id="events"><thead>
       <tr>
-        <th>时间</th><th>来源</th><th>模型</th><th>上游地址</th><th>渠道</th>
-        <th class="num">延时(ms)</th><th class="num">TTFT(ms)</th><th class="num">tok/s</th>
-        <th class="num">输入</th><th class="num">输出</th><th class="num">缓存命中</th><th class="num">缓存未命中</th>
-        <th class="num">成本($)</th><th>结果</th>
+        <th>时间</th><th>来源</th><th>渠道</th><th>模型</th><th>思考等级</th><th>结果</th><th>请求</th>
+        <th class="num">延时 / TTFT</th><th class="num">生成速度</th><th class="num">Token</th><th class="num">缓存</th><th class="num">成本</th>
       </tr>
     </thead><tbody></tbody></table></div>
     <div class="msg hidden" id="empty">当前筛选条件下没有记录。</div>
@@ -112,70 +130,100 @@ td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
 (function(){
 "use strict";
 const BASE="/v0/management/plugins/clinepass-channel-monitor";
-const store={get:k=>{try{return localStorage.getItem(k)||""}catch(e){return ""}},set:(k,v)=>{try{localStorage.setItem(k,v)}catch(e){}},del:k=>{try{localStorage.removeItem(k)}catch(e){}}};
 const TOKEN_KEY="cpm-management-key";
 const PAGE_SIZE=50;
-let state={offset:0,total:0};
+const state={offset:0,total:0};
+const store={
+  get(k){try{return localStorage.getItem(k)||""}catch(e){return ""}},
+  set(k,v){try{localStorage.setItem(k,v)}catch(e){}},
+  del(k){try{localStorage.removeItem(k)}catch(e){}}
+};
 
 function $(id){return document.getElementById(id)}
-function fmtNum(n){if(n==null||n===0&&arguments.length<2)return n==null?"-":"0";return Number(n).toLocaleString("zh-CN")}
-function fmtFloat(n,d){if(n==null)return"-";return Number(n).toFixed(d==null?2:d)}
 function esc(s){return String(s==null?"":s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]))}
-function shortKey(k){if(!k)return"-";return k.length>14?k.slice(0,6)+"…"+k.slice(-4):k}
-function fmtTime(ts){if(!ts)return"-";const d=new Date(ts);if(isNaN(d))return ts;const p=n=>String(n).padStart(2,"0");return d.getFullYear()+"-"+p(d.getMonth()+1)+"-"+p(d.getDate())+" "+p(d.getHours())+":"+p(d.getMinutes())+":"+p(d.getSeconds())}
+function n(v){return v==null?0:Number(v)}
+function int(v){return v==null?"-":Math.round(n(v)).toLocaleString("zh-CN")}
+function fixed(v,d){return v==null?"-":n(v).toFixed(d==null?2:d)}
+function compact(v){const x=n(v);if(!x)return "0";if(x>=1e9)return (x/1e9).toFixed(2)+"G";if(x>=1e6)return (x/1e6).toFixed(2)+"M";if(x>=1e4)return (x/1e3).toFixed(2)+"K";if(x>=1e3)return (x/1e3).toFixed(1)+"K";return String(Math.round(x))}
+function ms(v){const x=n(v);if(!x)return "-";if(x>=60000)return (x/60000).toFixed(1)+" 分钟";return x>=10000?(x/1000).toFixed(1)+"s":Math.round(x)+" ms"}
+function shortKey(k){if(!k)return "-";return k.length>16?k.slice(0,4)+"…"+k.slice(-4):k}
+function fmtTime(ts){if(!ts)return "-";const d=new Date(ts);if(isNaN(d))return ts;const p=x=>String(x).padStart(2,"0");return d.getFullYear()+"-"+p(d.getMonth()+1)+"-"+p(d.getDate())+" "+p(d.getHours())+":"+p(d.getMinutes())+":"+p(d.getSeconds())}
+function protoLabel(v){if(!v)return "-";if(v==="openai-response")return "/v1/responses";if(v==="openai"||v==="chat-completions")return "/v1/chat/completions";if(v==="claude"||v==="anthropic")return "/v1/messages";return v}
+function ratio(hit,miss){const t=n(hit)+n(miss);return t>0?n(hit)/t:0}
+function token(v){const map={max:"最高",xhigh:"极高",high:"高",medium:"中",low:"低",minimal:"极低"};return map[v]||v||"-"}
 
-function token(){return store.get(TOKEN_KEY)}
 async function api(path,params){
   const url=new URL(BASE+path,location.origin);
   if(params)Object.entries(params).forEach(([k,v])=>{if(v!==""&&v!=null)url.searchParams.set(k,v)});
-  const res=await fetch(url,{headers:{"Authorization":"Bearer "+token()},cache:"no-store"});
+  const res=await fetch(url,{headers:{"Authorization":"Bearer "+store.get(TOKEN_KEY)},cache:"no-store"});
   if(res.status===401||res.status===403){const e=new Error("unauthorized");e.code=res.status;throw e}
   if(!res.ok)throw new Error("HTTP "+res.status);
   return res.json();
 }
 
-function showGate(show,msg){$("gate").classList.toggle("hidden",!show);if(msg)$("gatesg");if(msg)$("gatesg")}
+function card(label,tip,value,unit,details){
+  return '<div class="card"><div class="k" title="'+esc(tip)+'">'+esc(label)+'</div><div class="v">'+esc(value)+
+    (unit?'<small>'+esc(unit)+"</small>":"")+"</div>"+(details?'<div class="s">'+details.map(d=>"<span>"+esc(d)+"</span>").join("")+"</div>":"")+"</div>";
+}
 
 function renderCards(s){
+  const tok=s.tokens||{}, cost=s.cost||{}, pc=s.prompt_cache||{};
+  const cacheRatio=ratio(pc.hit,pc.miss);
   const cards=[
-    ["请求数",fmtNum(s.requests),s.failed?("失败 "+fmtNum(s.failed)+"（"+fmtFloat(s.error_rate*100,1)+"%）"):"无失败"],
-    ["平均延时",fmtNum(Math.round(s.avg_latency_ms||0))+" ms",""],
-    ["平均 TTFT",fmtNum(Math.round(s.avg_ttft_ms||0))+" ms","有 TTFT 的 "+fmtNum(s.ttft_requests||0)+" 次"],
-    ["生成速度",fmtFloat(s.tokens_per_second_avg,1)+" tok/s",""],
-    ["输入 / 输出","["+fmtNum(s.tokens?Math.round(s.tokens.avg_input):0)+" / "+fmtNum(s.tokens?Math.round(s.tokens.avg_output):0)+"]","均值"],
-    ["缓存命中率",fmtFloat((s.cache_ratio||0)*100,1)+" %","cached/input"],
-    ["上游缓存命中率",fmtFloat(((s.prompt_cache&&s.prompt_cache.ratio)?s.prompt_cache.ratio:0)*100,1)+" %","prompt_cache_hit/(hit+miss)"],
-    ["总成本","$"+fmtFloat(s.cost?s.cost.total:0,6),s.cost&&s.cost.unparsed?("未解析 "+s.cost.unparsed):""],
-    ["无渠道记录",fmtNum(s.channel_missing),"失败请求属正常"]
+    card("请求数","当前时间窗内落盘的请求数",int(s.requests),"条",[s.failed?("失败 "+int(s.failed)+"（"+fixed(n(s.error_rate)*100,1)+"%）"):"无失败"]),
+    card("平均延时","同一时间窗内所有请求的平均总延时",fixed((n(s.avg_latency_ms))/1000,1),"s",["平均 TTFT "+ms(s.avg_ttft_ms)]),
+    card("生成速度","平均输出速度 = output_tokens / 生成耗时",fixed(s.tokens_per_second_avg,1),"tok/s",["TTFT 后段更快：见明细"]),
+    card("输入 / 输出","当前时间窗内每个请求的平均输入、输出 token",compact(tok.avg_input)+" / "+compact(tok.avg_output),"/ 请求",["合计 "+compact(tok.input)+" / "+compact(tok.output)+" token"]),
+    card("CPA 缓存","CPA 侧统计的 cached_tokens 占 input_tokens 的比例",fixed(n(s.cache_ratio)*100,1),"%",["cached "+compact(tok.cached)+" / input "+compact(tok.input)]),
+    card("上游缓存","Cline 网关提供的 promptCacheHit/(hit+miss)，与 CPA 缓存统计口径不同",fixed(cacheRatio*100,1),"%",["hit "+compact(pc.hit)+" / miss "+compact(pc.miss)]),
+    card("总成本","上游网关按请求返回的 cost 求和（美元）","$ "+fixed(cost.total,6),"",[(cost.unparsed?("未解析 "+int(cost.unparsed)+" 条"):"全部可解析")]),
+    card("无渠道记录","落盘行里没有渠道字段的数量：连接失败、上游报错、模型不存在等请求本来就没有渠道",int(s.channel_missing),"条",[s.channel_missing?"属正常状态":"当前全部有渠道"])
   ];
-  $("cards").innerHTML=cards.map(c=>'<div class="card"><div class="k">'+c[0]+'</div><div class="v">'+esc(c[1])+'</div><div class="s">'+esc(c[2])+'</div></div>').join("");
+  $("cards").innerHTML=cards.join("");
 }
 
 function renderChannels(rows){
   const body=$("channels").querySelector("tbody");
-  if(!rows||!rows.length){body.innerHTML='<tr><td colspan="8" class="msg">该时间窗内没有渠道数据。</td></tr>';return}
-  body.innerHTML=rows.map(r=>"<tr>"+
-    "<td>"+esc(r.key)+"</td>"+
-    '<td class="num">'+fmtNum(r.requests)+"</td>"+
-    '<td class="num">'+(r.failed?fmtNum(r.failed):"0")+"</td>"+
-    '<td class="num">'+fmtFloat(r.cost,6)+"</td>"+
-    '<td class="num">'+fmtNum(Math.round(r.avg_latency_ms||0))+"</td>"+
-    '<td class="num">'+fmtNum(Math.round(r.avg_ttft_ms||0))+"</td>"+
-    '<td class="num">'+fmtNum(Math.round(r.avg_input_tokens||0))+"</td>"+
-    '<td class="num">'+fmtNum(Math.round(r.avg_output_tokens||0))+"</td>"+
-    "</tr>").join("");
+  if(!rows||!rows.length){body.innerHTML='<tr class="empty-row"><td colspan="8">该时间窗内没有渠道数据。</td></tr>';return}
+  body.innerHTML=rows.map(r=>{
+    return "<tr>"+
+      '<td><span class="chip">'+esc(r.key)+"</span></td>"+
+      '<td class="num">'+int(r.requests)+"</td>"+
+      '<td class="num">'+(r.failed?'<span class="tag err">'+int(r.failed)+"</span>":"0")+"</td>"+
+      '<td class="num">'+fixed(r.cost,6)+"</td>"+
+      '<td class="num">'+ms(r.avg_latency_ms)+"</td>"+
+      '<td class="num">'+ms(r.avg_ttft_ms)+"</td>"+
+      '<td class="num">'+compact(r.avg_input_tokens)+" / "+compact(r.avg_output_tokens)+"</td>"+
+      '<td class="num">'+fixed(n(r.prompt_cache_ratio)*100,1)+"%</td>"+
+      "</tr>";
+  }).join("");
 }
 
-function detailRow(e){
-  const meta={planning_reasoning:e.planning_reasoning||("（未落盘，长度 "+fmtNum(e.planning_reasoning_length||0)+" 字符）"),
-    client_protocol:e.client_protocol,upstream_protocol:e.upstream_protocol,stream:e.stream,
-    model_attempt_count:e.model_attempt_count,total_provider_attempt_count:e.total_provider_attempt_count,
-    fallbacks_available_count:e.fallbacks_available_count,generation_id:e.generation_id,
-    resolved_provider:e.resolved_provider,canonical_slug:e.canonical_slug,original_model_id:e.original_model_id,
-    system_fingerprint:e.system_fingerprint,auth_index:e.auth_index,auth_type:e.auth_type,
-    provider:e.provider,event_id:e.event_id,session_id:e.session_id,parent_session_id:e.parent_session_id,
-    status_code:e.status_code,error:e.error};
-  return '<tr class="detail"><td colspan="14"><pre>'+esc(JSON.stringify(meta,null,2))+"</pre></td></tr>";
+function detailPanel(e){
+  const rows=[["计划推理 planningReasoning",e.planning_reasoning||("未落盘（长度 "+int(e.planning_reasoning_length)+" 字符）")]];
+  const dl=pairs=>'<dl>'+pairs.filter(p=>p[1]!==undefined&&p[1]!==null&&p[1]!=="").map(p=>"<dt>"+esc(p[0])+"</dt><dd>"+esc(p[1])+"</dd>").join("")+"</dl>";
+  return '<tr class="detail hidden"><td colspan="12"><div class="inner">'+
+    "<div><h3>请求</h3>"+dl([
+      ["上游地址",e.base_url],["客户端协议",e.client_protocol],["上游协议",e.upstream_protocol],
+      ["stream",e.stream?"是":"否"],["session",e.session_id],["CPA 内部 provider",e.provider],
+      ["凭据 auth_index",e.auth_index],["凭据类型",e.auth_type],["event_id",e.event_id]
+    ])+"</div>"+
+    "<div><h3>渠道与成本</h3>"+dl([
+      ["finalProvider",e.final_provider],["resolvedProvider",e.resolved_provider],
+      ["canonicalSlug",e.canonical_slug],["originalModelId",e.original_model_id],
+      ["modelAttemptCount",e.model_attempt_count],["totalProviderAttemptCount",e.total_provider_attempt_count],
+      ["fallbacksAvailable",e.fallbacks_available_count],["generationId",e.generation_id],
+      ["cost",e.cost],["inputInferenceCost",e.input_cost],["outputInferenceCost",e.output_cost]
+    ])+"</div>"+
+    "<div><h3>token 与缓存</h3>"+dl([
+      ["input / output",int(e.input_tokens)+" / "+int(e.output_tokens)],
+      ["reasoning",int(e.reasoning_tokens)],["total",int(e.total_tokens)],
+      ["cached / cache_read / cache_creation",int(e.cached_tokens)+" / "+int(e.cache_read_tokens)+" / "+int(e.cache_creation_tokens)],
+      ["prompt_cache hit / miss",int(e.prompt_cache_hit_tokens)+" / "+int(e.prompt_cache_miss_tokens)],
+      ["systemFingerprint",e.system_fingerprint],["失败原因",e.error],["status code",e.status_code?String(e.status_code):""]
+    ])+"</div>"+
+    "<div><h3>planningReasoning</h3><pre>"+esc(rows[0][1])+"</pre></div>"+
+    "</div></td></tr>";
 }
 
 function renderEvents(list){
@@ -183,30 +231,36 @@ function renderEvents(list){
   $("empty").classList.toggle("hidden",!!(list&&list.length));
   if(!list||!list.length){body.innerHTML="";return}
   body.innerHTML=list.map((e,i)=>{
-    const tag=e.failed?'<span class="tag err">失败 '+(e.status_code||"")+"</span>":(e.channel_missing?'<span class="tag miss">无渠道</span>':'<span class="tag ok">成功</span>');
-    return "<tr data-i=\""+i+"\">"+
-      "<td>"+esc(fmtTime(e.timestamp))+"</td>"+
-      "<td title=\""+esc(e.api_key)+"\">"+esc(shortKey(e.api_key))+"</td>"+
-      "<td>"+esc(e.model_alias||e.model||"-")+"<div class=\"sub\">"+esc(e.model||"")+"</div></td>"+
-      "<td>"+esc(e.base_url||"-")+"</td>"+
-      "<td>"+esc(e.final_provider||"—")+"</td>"+
-      '<td class="num">'+fmtNum(e.latency_ms)+"</td>"+
-      '<td class="num">'+fmtNum(e.ttft_ms)+"</td>"+
-      '<td class="num">'+fmtFloat(e.tokens_per_second,2)+"</td>"+
-      '<td class="num">'+fmtNum(e.input_tokens)+"</td>"+
-      '<td class="num">'+fmtNum(e.output_tokens)+"</td>"+
-      '<td class="num">'+fmtNum(e.prompt_cache_hit_tokens)+"</td>"+
-      '<td class="num">'+fmtNum(e.prompt_cache_miss_tokens)+"</td>"+
-      '<td class="num">'+esc(e.cost||"—")+"</td>"+
-      "<td>"+tag+"</td></tr>"+detailRow(e);
+    const tag=e.failed?'<span class="tag err">失败'+(e.status_code?" "+e.status_code:"")+"</span>":(e.channel_missing?'<span class="tag miss">无渠道</span>':'<span class="tag ok">成功</span>');
+    const hit=n(e.prompt_cache_hit_tokens),miss=n(e.prompt_cache_miss_tokens);
+    const cacheRatio=ratio(hit,miss);
+    return '<tr class="row" data-i="'+i+'">'+
+      '<td><div class="stack">'+esc(fmtTime(e.timestamp).slice(0,19))+"</div></td>"+
+      '<td title="'+esc(e.api_key)+'"><span class="mono">'+esc(shortKey(e.api_key))+"</span></td>"+
+      '<td><span class="chip">'+esc(e.final_provider||"—")+"</span></td>"+
+      '<td><div class="stack">'+esc(e.model_alias||e.model||"-")+'<span class="m">'+esc(e.model||"")+"</span></div></td>"+
+      "<td>"+esc(token(e.reasoning_effort))+"</td>"+
+      "<td>"+tag+"</td>"+
+      '<td><span class="mono">'+esc(protoLabel(e.client_protocol))+(e.stream?" <span class=\"m\">SSE</span>":"")+"</span></td>"+
+      '<td class="num"><div class="stack">'+esc(ms(e.latency_ms))+'<span class="m">首 token '+esc(ms(e.ttft_ms))+"</span></div></td>"+
+      '<td class="num"><div class="stack">'+fixed(e.tokens_per_second,1)+" t/s"+'<span class="m">TTFT 后 '+fixed(e.tokens_per_second_after_ttft,1)+" t/s</span></div></td>"+
+      '<td class="num"><div class="tok">'+
+        '<span class="lbl">↑ 输入</span><span>'+int(e.input_tokens)+"</span>"+
+        '<span class="lbl">↓ 输出</span><span>'+int(e.output_tokens)+"</span>"+
+        (n(e.reasoning_tokens)?'<span class="lbl">◇ 思考</span><span>'+int(e.reasoning_tokens)+"</span>":"")+
+        '<span class="lbl">Σ 总计</span><span>'+int(e.total_tokens)+"</span>"+
+      "</div></td>"+
+      '<td class="num"><div class="stack">'+int(hit)+" / "+int(miss)+
+        '<span class="m">命中 '+fixed(cacheRatio*100,1)+'%</span><span class="cache-bar"><i style="width:'+fixed(cacheRatio*100,1)+'%"></i></span></div></td>'+
+      '<td class="num">'+(e.cost?esc("$"+e.cost):"—")+"</td>"+
+      "</tr>"+detailPanel(e);
   }).join("");
-  body.querySelectorAll("tr[data-i]").forEach(tr=>{
+  body.querySelectorAll("tr.row").forEach(tr=>{
     tr.addEventListener("click",()=>{
       const next=tr.nextElementSibling;
       if(next&&next.classList.contains("detail"))next.classList.toggle("hidden");
     });
   });
-  body.querySelectorAll("tr.detail").forEach(r=>r.classList.add("hidden"));
 }
 
 async function load(){
@@ -214,30 +268,32 @@ async function load(){
   try{
     const health=await api("/health");
     $("ver").textContent="v"+health.version;
-    $("mode").textContent=(health.mode||"-")+" · "+(health.hosts&&health.hosts.length?health.hosts.join(", "):"（hosts 为空）");
-    const bits=["记录 "+fmtNum(health.recorded)+" 条","已索引 "+fmtNum(health.ring_used)+"/"+fmtNum(health.ring_size),
-      "marker 缺失 "+fmtNum(health.marker_missing),"host 未命中 "+fmtNum(health.skipped_unmatched_host),
-      "解析失败 "+fmtNum(health.parse_errors),"写盘失败 "+fmtNum(health.write_error)];
-    if(health.jsonl_enabled)bits.push("JSONL 开启（"+health.jsonl_dir+"）");
+    $("mode").textContent=(health.mode||"-")+" · "+(health.hosts&&health.hosts.length?health.hosts.join(", "):"hosts 为空");
+    const bits=["记录 "+int(health.recorded)+" 条","已索引 "+int(health.ring_used)+"/"+int(health.ring_size),
+      "marker 缺失 "+int(health.marker_missing),"host 未命中 "+int(health.skipped_unmatched_host),
+      "解析失败 "+int(health.parse_errors),"写盘失败 "+int(health.write_error)];
+    if(health.jsonl_enabled)bits.push("JSONL "+health.jsonl_dir);
     $("statusline").textContent=bits.join(" · ");
 
     const stats=await api("/stats",{window:w});
     renderCards(stats);
     renderChannels(stats.channels);
 
-    const params={window:w,limit:PAGE_SIZE,offset:state.offset,
+    const events=await api("/events",{window:w,limit:PAGE_SIZE,offset:state.offset,
       channel:$("f-channel").value.trim(),model:$("f-model").value.trim(),
-      source:$("f-source").value.trim(),result:$("f-result").value};
-    const events=await api("/events",params);
-    state.total=events.total||0;
+      source:$("f-source").value.trim(),result:$("f-result").value});
+    state.total=n(events.total);
     renderEvents(events.events);
     const from=state.total?state.offset+1:0,to=Math.min(state.offset+PAGE_SIZE,state.total);
-    $("pageinfo").textContent="第 "+from+"-"+to+" 条 / 共 "+fmtNum(state.total)+" 条";
+    $("pageinfo").textContent="第 "+from+"-"+to+" 条 / 共 "+int(state.total)+" 条";
     $("prev").disabled=state.offset<=0;
     $("next").disabled=state.offset+PAGE_SIZE>=state.total;
     $("gate").classList.add("hidden");
   }catch(err){
-    if(err.code===401||err.code===403){showGate(true);$("statusline").textContent="管理密钥无效或缺失（HTTP "+err.code+"）"}else{
+    if(err.code===401||err.code===403){
+      $("gate").classList.remove("hidden");
+      $("statusline").textContent="管理密钥无效或缺失（HTTP "+err.code+"）";
+    }else{
       $("statusline").textContent="加载失败："+err.message;
     }
   }
@@ -245,7 +301,7 @@ async function load(){
 
 $("save").addEventListener("click",()=>{const v=$("token").value.trim();if(!v)return;store.set(TOKEN_KEY,v);state.offset=0;load()});
 $("token").addEventListener("keydown",e=>{if(e.key==="Enter")$("save").click()});
-$("forget").addEventListener("click",()=>{store.del(TOKEN_KEY);$("token").value="";showGate(true);$("statusline").textContent="已清除本机保存的密钥"});
+$("forget").addEventListener("click",()=>{store.del(TOKEN_KEY);$("token").value="";$("gate").classList.remove("hidden");$("statusline").textContent="已清除本机保存的密钥"});
 $("refresh").addEventListener("click",()=>load());
 $("window").addEventListener("change",()=>{state.offset=0;load()});
 $("apply").addEventListener("click",()=>{state.offset=0;load()});
@@ -256,7 +312,7 @@ $("export").addEventListener("click",()=>{
   const params={window:$("window").value,channel:$("f-channel").value.trim(),model:$("f-model").value.trim(),
     source:$("f-source").value.trim(),result:$("f-result").value};
   Object.entries(params).forEach(([k,v])=>{if(v!==""&&v!=null)url.searchParams.set(k,v)});
-  fetch(url,{headers:{"Authorization":"Bearer "+token()},cache:"no-store"}).then(res=>{
+  fetch(url,{headers:{"Authorization":"Bearer "+store.get(TOKEN_KEY)},cache:"no-store"}).then(res=>{
     if(!res.ok)throw new Error("HTTP "+res.status);
     return res.blob();
   }).then(blob=>{
@@ -266,9 +322,9 @@ $("export").addEventListener("click",()=>{
   }).catch(err=>{alert("导出失败："+err.message)});
 });
 
-if(!token())showGate(true);
+if(!store.get(TOKEN_KEY))$("gate").classList.remove("hidden");
 load();
-setInterval(()=>{if(token())load()},60000);
+setInterval(()=>{if(store.get(TOKEN_KEY))load()},60000);
 })();
 </script>
 </body>

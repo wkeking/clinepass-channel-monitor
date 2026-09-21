@@ -101,6 +101,13 @@ type channelStat struct {
 	AvgInputTokens  float64 `json:"avg_input_tokens"`
 	AvgOutputTokens float64 `json:"avg_output_tokens"`
 	ErrorRate       float64 `json:"error_rate"`
+	// AvgCachedTokens is the CPA-side cached token average for this dimension.
+	AvgCachedTokens float64 `json:"avg_cached_tokens"`
+	// PromptCacheHitTokens / PromptCacheMissTokens are the upstream cache counters; the
+	// page shows their ratio, which is a different measurement than the CPA-side cache.
+	PromptCacheHitTokens  int64   `json:"prompt_cache_hit_tokens"`
+	PromptCacheMissTokens int64   `json:"prompt_cache_miss_tokens"`
+	PromptCacheRatio      float64 `json:"prompt_cache_ratio"`
 }
 
 // windowStats is the aggregation returned by /stats for one time window.
@@ -238,6 +245,18 @@ func accumulate(target map[string]*channelStat, key string, e *event) {
 	stat.AvgTTFTMS += float64(e.TTFTMS)
 	stat.AvgInputTokens += float64(e.InputTokens)
 	stat.AvgOutputTokens += float64(e.OutputTokens)
+	stat.AvgCachedTokens += float64(e.CachedTokens)
+	stat.PromptCacheHitTokens += e.PromptCacheHitTokens
+	stat.PromptCacheMissTokens += e.PromptCacheMissTokens
+}
+
+// ratioOf returns hit/(hit+miss), or 0 when no counter is available.
+func ratioOf(hit, miss int64) float64 {
+	total := hit + miss
+	if total <= 0 {
+		return 0
+	}
+	return float64(hit) / float64(total)
 }
 
 func finalizeStats(source map[string]*channelStat) []channelStat {
@@ -248,7 +267,9 @@ func finalizeStats(source map[string]*channelStat) []channelStat {
 			stat.AvgTTFTMS /= float64(stat.Requests)
 			stat.AvgInputTokens /= float64(stat.Requests)
 			stat.AvgOutputTokens /= float64(stat.Requests)
+			stat.AvgCachedTokens /= float64(stat.Requests)
 			stat.ErrorRate = float64(stat.Failed) / float64(stat.Requests)
+			stat.PromptCacheRatio = ratioOf(stat.PromptCacheHitTokens, stat.PromptCacheMissTokens)
 		}
 		out = append(out, *stat)
 	}

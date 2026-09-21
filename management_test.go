@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
@@ -66,6 +67,16 @@ func TestIndexPageCarriesNoData(t *testing.T) {
 			t.Errorf("page is missing %q", needle)
 		}
 	}
+	// The detail table shows the recorded columns; the upstream address and the raw
+	// provider key stay out of the list and only appear in the expanded detail panel.
+	for _, needle := range []string{"思考等级", "延时 / TTFT", "生成速度", "缓存", "Token"} {
+		if !strings.Contains(page, needle) {
+			t.Errorf("page is missing the %q column", needle)
+		}
+	}
+	if strings.Contains(page, "<th>上游地址</th>") {
+		t.Errorf("the upstream address must not be a table column")
+	}
 }
 
 func TestRouteManagementDispatch(t *testing.T) {
@@ -104,6 +115,32 @@ func TestExportCSVHeader(t *testing.T) {
 	}
 	if disposition := resp.Headers.Get("Content-Disposition"); !strings.Contains(disposition, "clinepass-channel-monitor-") {
 		t.Errorf("missing download filename, got %q", disposition)
+	}
+}
+
+// TestChannelStatsCacheRatio checks the per-channel upstream cache ratio the page shows.
+func TestChannelStatsCacheRatio(t *testing.T) {
+	loadConfig(defaultConfigBytes())
+	st := currentStore()
+	now := time.Now()
+	st.add(&event{Timestamp: now, Model: "m", FinalProvider: "deepseek", PromptCacheHitTokens: 900, PromptCacheMissTokens: 100, InputTokens: 1000, CachedTokens: 800})
+	st.add(&event{Timestamp: now, Model: "m", FinalProvider: "deepseek", PromptCacheHitTokens: 90, PromptCacheMissTokens: 10, InputTokens: 100, CachedTokens: 0})
+	stats := st.statsWindow(statsWindowDay, "24h", now)
+	if len(stats.Channels) != 1 {
+		t.Fatalf("channels = %d, want 1", len(stats.Channels))
+	}
+	channel := stats.Channels[0]
+	if channel.PromptCacheHitTokens != 990 || channel.PromptCacheMissTokens != 110 {
+		t.Errorf("cache counters = %d/%d, want 990/110", channel.PromptCacheHitTokens, channel.PromptCacheMissTokens)
+	}
+	if got := channel.PromptCacheRatio; got < 0.89 || got > 0.91 {
+		t.Errorf("prompt cache ratio = %v, want about 0.9", got)
+	}
+	if got := channel.AvgCachedTokens; got != 400 {
+		t.Errorf("avg cached tokens = %v, want 400", got)
+	}
+	if stats.Requests != 2 {
+		t.Errorf("requests = %d, want 2", stats.Requests)
 	}
 }
 

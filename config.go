@@ -21,6 +21,9 @@ const (
 	// defaultJSONLDir is expressed relative to the CPA working directory so the
 	// default never depends on one particular deployment layout.
 	defaultJSONLDir = "logs/channel-monitor"
+	// defaultPlanManagementURL is CPA's own management API on the loopback interface. The
+	// plugin uses it only to discover which Cline credential this deployment uses.
+	defaultPlanManagementURL = "http://127.0.0.1:8317/v0/management"
 )
 
 // defaultHosts is the only value that carries a Cline assumption. It is a default,
@@ -53,6 +56,18 @@ type config struct {
 	Timezone               string `yaml:"timezone"`
 	// SampleRate stores channel metadata for every Nth request (1-100, 100 = every request).
 	SampleRate int `yaml:"sample_rate"`
+
+	// ---- Cline 订阅用量（官方接口）----
+	// PlanEnabled turns the subscription quota card on. It needs a Cline API key:
+	// either plan_api_key below, or CPA's own Cline credential discovered through the
+	// management API on the loopback interface.
+	PlanEnabled       bool     `yaml:"plan_enabled"`
+	PlanAPIKey        string   `yaml:"plan_api_key"`
+	PlanBaseURL       string   `yaml:"plan_base_url"`
+	PlanManagementURL string   `yaml:"plan_management_url"`
+	PlanConfigPath    string   `yaml:"plan_config_path"`
+	PlanRefresh       Duration `yaml:"plan_refresh"`
+	PlanDailyEnabled  bool     `yaml:"plan_daily_enabled"`
 }
 
 // Duration accepts both Go duration strings ("5s", "1m30s") and plain numbers,
@@ -108,6 +123,11 @@ func defaultConfig() config {
 		CaptureCost:        true,
 		CaptureCache:       true,
 		Timezone:           defaultTimezone,
+		PlanEnabled:        true,
+		PlanBaseURL:        planDefaultBaseURL,
+		PlanManagementURL:  defaultPlanManagementURL,
+		PlanRefresh:        Duration{Value: planDefaultRefresh, Set: true},
+		PlanDailyEnabled:   true,
 	}
 }
 
@@ -191,6 +211,12 @@ func normalizeConfig(cfg *config) {
 	cfg.JSONLDir = strings.TrimRight(strings.TrimSpace(cfg.JSONLDir), "/")
 	if strings.TrimSpace(cfg.Timezone) == "" {
 		cfg.Timezone = defaultTimezone
+	}
+	if strings.TrimSpace(cfg.PlanBaseURL) == "" {
+		cfg.PlanBaseURL = planDefaultBaseURL
+	}
+	if strings.TrimSpace(cfg.PlanManagementURL) == "" {
+		cfg.PlanManagementURL = defaultPlanManagementURL
 	}
 }
 

@@ -29,6 +29,15 @@ import (
 	"unsafe"
 )
 
+// storeHost keeps the host API in this file's copy of the bridge storage. Every cgo
+// file compiles its own copy of the preamble, so main.go cannot fill this one in.
+func storeHost(host *C.cliproxy_host_api) {
+	if host == nil {
+		return
+	}
+	C.store_host_api(host)
+}
+
 // callHost performs one host callback and returns the raw response bytes.
 //
 // Failures are swallowed on purpose: a plugin observation must never influence the

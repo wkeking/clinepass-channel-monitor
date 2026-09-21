@@ -62,6 +62,8 @@ type pluginState struct {
 	Store  *store
 	// Identities correlates the request, response and usage hooks of one request.
 	Identities *identityTable
+	// Plan polls Cline's own API for subscription quota information.
+	Plan *planPoller
 }
 
 func loadConfig(raw []byte) {
@@ -86,7 +88,18 @@ func loadConfig(raw []byte) {
 		state.Store.reset()
 	}
 	state.Identities = newIdentityTable()
+	poller := state.Plan
+	if poller != nil {
+		poller.stop()
+		state.Plan = nil
+	}
 	stateMu.Unlock()
+	if cfg.PlanEnabled {
+		poller = startPlanPoller(resolvePlanAPIKey())
+		stateMu.Lock()
+		state.Plan = poller
+		stateMu.Unlock()
+	}
 	hostLogAsync("info", "clinepass-channel-monitor: configured", map[string]string{
 		"mode":          cfg.matchMode(),
 		"hosts":         strings.Join(cfg.Hosts, ","),
@@ -116,8 +129,17 @@ func currentIdentities() *identityTable {
 	return state.Identities
 }
 
+func currentPlan() *planPoller {
+	stateMu.RLock()
+	defer stateMu.RUnlock()
+	return state.Plan
+}
+
 func shutdown() {
 	sinkShutdown()
+	if poller := currentPlan(); poller != nil {
+		poller.stop()
+	}
 	stateMu.Lock()
 	defer stateMu.Unlock()
 	if state.Store != nil {
@@ -203,6 +225,12 @@ func buildRegistration() registration {
 				{Name: "store_planning_reasoning", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Store the gateway planning text. When false only its length is stored."},
 				{Name: "timezone", Type: pluginapi.ConfigFieldTypeString, Description: "Timezone used for display and timestamps."},
 				{Name: "sample_rate", Type: pluginapi.ConfigFieldTypeInteger, Description: "Record every Nth request (1-100)."},
+				{Name: "plan_enabled", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Show Cline's own subscription usage (plan, rolling limits, official token totals)."},
+				{Name: "plan_api_key", Type: pluginapi.ConfigFieldTypeString, Description: "Cline API key used for the subscription card. Leave empty to reuse CPA's own Cline credential."},
+				{Name: "plan_base_url", Type: pluginapi.ConfigFieldTypeString, Description: "Base URL of Cline's API. Default https://api.cline.bot/api/v1."},
+				{Name: "plan_config_path", Type: pluginapi.ConfigFieldTypeString, Description: "Path of CPA's config.yaml inside the container, used to read the Cline credential."},
+				{Name: "plan_refresh", Type: pluginapi.ConfigFieldTypeString, Description: "How often the subscription usage is refreshed (for example 5m)."},
+				{Name: "plan_daily_enabled", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Also fetch the official 31-day token totals and balance (at most once per hour)."},
 			},
 		},
 		Capabilities: registrationCapability{

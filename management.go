@@ -124,6 +124,12 @@ type healthResponse struct {
 	PendingObservations  int      `json:"pending_observations"`
 	InFlightIdentities   int      `json:"in_flight_identities"`
 	Uptime               string   `json:"uptime"`
+	PlanEnabled          bool     `json:"plan_enabled"`
+	// RequestHeaderNames lists the header names seen on the last intercepted request and
+	// the length of its bearer token; it exists to diagnose credential discovery and
+	// never contains a credential value.
+	RequestHeaderNames string `json:"request_header_names,omitempty"`
+	RequestBearerLen   int    `json:"request_bearer_len,omitempty"`
 	statsTotals
 	UnmatchedHostSamples []unmatchedHostSample `json:"unmatched_host_samples"`
 }
@@ -133,6 +139,7 @@ var pluginStart = time.Now()
 func buildHealthResponse() healthResponse {
 	cfg := currentConfig()
 	st := currentStore()
+	headerNames, bearerLen := upstreamBearerDiagnostics()
 	resp := healthResponse{
 		Plugin:               pluginID,
 		Version:              pluginVersion,
@@ -145,6 +152,9 @@ func buildHealthResponse() healthResponse {
 		RetentionDays:        cfg.RetentionDays,
 		RingSize:             cfg.RingSize,
 		Uptime:               time.Since(pluginStart).Round(time.Second).String(),
+		PlanEnabled:          cfg.PlanEnabled,
+		RequestHeaderNames:   headerNames,
+		RequestBearerLen:     bearerLen,
 	}
 	if st == nil {
 		return resp

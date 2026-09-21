@@ -268,6 +268,9 @@ func handleRequestInterceptAfter(request []byte) ([]byte, error) {
 	if captured := captureIdentity(&req); captured != nil {
 		currentIdentities().remember(captured)
 	}
+	// Feeds the subscription card when no other credential source is readable. The
+	// value is kept in memory only, never logged and never returned to a caller.
+	rememberUpstreamBearer(req.Headers)
 	return okEnvelope(pluginapi.RequestInterceptResponse{})
 }
 

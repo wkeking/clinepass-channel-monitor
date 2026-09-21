@@ -136,6 +136,8 @@ type windowStats struct {
 
 	// Series holds per-bucket counters for the charts on the overview cards.
 	Series seriesStats `json:"series"`
+	// Plan carries Cline's own subscription view when it is enabled and reachable.
+	Plan planQuota `json:"plan"`
 
 	Channels []channelStat `json:"channels"`
 	Models   []channelStat `json:"models"`
@@ -283,6 +285,9 @@ func (s *store) statsWindow(window time.Duration, label string, now time.Time) *
 	stats.Channels = finalizeStats(channels)
 	stats.Models = finalizeStats(models)
 	stats.Sources = finalizeStats(sources)
+	if poller := currentPlan(); poller != nil {
+		stats.Plan = poller.snapshot()
+	}
 	return stats
 }
 

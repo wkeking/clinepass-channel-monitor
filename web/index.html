@@ -67,6 +67,17 @@ td.num,th.num{text-align:right}
 .hidden{display:none}
 .mode{font-size:12px;padding:3px 10px;border-radius:999px;border:1px solid var(--line);color:var(--muted)}
 .empty-row td{text-align:center;color:var(--muted);padding:20px}
+.plan{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:14px}
+.pcard{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px 16px}
+.pcard .pk{display:flex;align-items:center;justify-content:space-between;gap:8px;color:var(--muted);font-size:12.5px}
+.pcard .pv{margin-top:8px;font-size:26px;font-weight:680;letter-spacing:-.4px;font-variant-numeric:tabular-nums}
+.pcard .pv small{font-size:12px;font-weight:500;color:var(--muted);margin-left:4px;letter-spacing:0}
+.pcard .bar2{position:relative;height:8px;border-radius:6px;background:var(--bg);border:1px solid var(--line);margin-top:10px;overflow:hidden}
+.pcard .bar2 i{position:absolute;inset:0 auto 0 0;border-radius:6px;background:var(--accent)}
+.pcard .ps{margin-top:8px;color:var(--muted);font-size:11.5px;display:flex;flex-wrap:wrap;gap:3px 10px}
+.plan-head{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin-bottom:12px;color:var(--muted);font-size:12.5px}
+.plan-warn{color:var(--warn)}
+.plan-err{color:var(--err)}
 </style>
 <header>
   <div>
@@ -94,6 +105,13 @@ td.num,th.num{text-align:right}
         <button class="primary" id="save">保存并加载</button>
       </div>
     </div>
+  </section>
+
+  <section id="plan-section">
+    <h2>Cline 套餐用量（官方接口）</h2>
+    <div class="plan-head" id="plan-head"></div>
+    <div class="plan" id="plan-cards"></div>
+    <div class="msg hidden" id="plan-msg"></div>
   </section>
 
   <section>
@@ -243,6 +261,62 @@ function renderCards(s){
   $("cards").innerHTML=cards.join("");
 }
 
+let planSnapshot=null;
+
+function quotaTint(pct){if(pct>=90)return "#f87171";if(pct>=70)return "#fbbf24";return "#34d399"}
+
+function renderPlan(plan){
+  planSnapshot=plan;
+  const head=$("plan-head"), cards=$("plan-cards"), msg=$("plan-msg");
+  if(!plan||plan.available===false){
+    cards.innerHTML="";
+    head.innerHTML="";
+    msg.classList.remove("hidden");
+    msg.className="msg plan-err";
+    if(plan&&plan.error&&plan.error.indexOf("no Cline api key")>=0){
+      msg.innerHTML='未取到官方用量：插件拿不到 Cline API Key。请二选一：'+
+        '① 在插件配置里填 <code>plan_api_key</code>（就是配置 Cline 条目时用的那个 key）；'+
+        '② 保持 <code>plan_enabled: false</code> 关闭这张卡片。'+
+        '<br>读取顺序：插件配置 <code>plan_api_key</code> → CPA 的凭据接口 → CPA 的 config.yaml → 最近一次上游请求的 Authorization 头。';
+    }else{
+      msg.textContent=plan&&plan.error?("未取到官方用量："+plan.error):"官方用量暂不可用。";
+    }
+    return;
+  }
+  msg.classList.add("hidden");
+  const bits=[];
+  if(plan.plan_name)bits.push('<span class="chip">'+esc(plan.plan_name)+"</span>");
+  if(plan.plan_price)bits.push(esc(plan.plan_price));
+  if(plan.account)bits.push("账号 "+esc(plan.account));
+  if(plan.fetched_at)bits.push("更新于 "+esc(fmtTime(plan.fetched_at).slice(11,19)));
+  head.innerHTML=bits.join(" · ");
+
+  const blocks=(plan.limits||[]).map(function(limit){
+    const pct=n(limit.percent_used);
+    const warn=pct>=90?" plan-warn":"";
+    return '<div class="pcard">'+
+      '<div class="pk"><span>'+esc(limit.label||limit.type)+'</span><span class="'+warn.trim()+'">'+fixed(pct,0)+'%</span></div>'+
+      '<div class="pv">'+fixed(pct,1)+'<small>% 已用</small></div>'+
+      '<div class="bar2"><i style="width:'+fixed(Math.min(100,pct),1)+'%;background:'+quotaTint(pct)+'"></i></div>'+
+      '<div class="ps"><span>剩余 '+fixed(100-pct,1)+'%</span><span>重置 '+(limit.resets_in?esc(limit.resets_in):"—")+"</span></div>"+
+      '<div class="ps"><span>'+esc(limit.resets_at?fmtTime(limit.resets_at):"")+"</span></div>"+
+      "</div>";
+  }).join("");
+
+  const tok=plan.tokens||{};
+  const bals=[];
+  if(tok.balance_usd)bals.push("余额 $"+fixed(tok.balance_usd,4));
+  if(tok.cost_usd)bals.push("近 31 天成本 $"+fixed(tok.cost_usd,4));
+  if(tok.requests)bals.push("官方计费条目 "+int(tok.requests));
+  const tokenCard=tok.total_tokens?'<div class="pcard">'+
+      '<div class="pk"><span>近 31 天已用 Token（官方）</span><span>'+esc((tok.from_date||"")+" ~ "+(tok.to_date||""))+'</span></div>'+
+      '<div class="pv">'+scaled(tok.total_tokens)+'<small>token</small></div>'+
+      '<div class="ps"><span>输入 '+scaled(tok.input_tokens)+"</span><span>输出 "+scaled(tok.output_tokens)+"</span></div>"+
+      '<div class="ps">'+bals.map(b=>"<span>"+esc(b)+"</span>").join("")+"</div>"+
+      "</div>":"";
+  cards.innerHTML=blocks+tokenCard;
+}
+
 function renderChannels(rows){
   const body=$("channels").querySelector("tbody");
   if(!rows||!rows.length){body.innerHTML='<tr class="empty-row"><td colspan="8">该时间窗内没有渠道数据。</td></tr>';return}
@@ -333,6 +407,7 @@ async function load(){
     $("statusline").textContent=bits.join(" · ");
 
     const stats=await api("/stats",{window:w});
+    renderPlan(stats.plan);
     renderCards(stats);
     renderChannels(stats.channels);
 

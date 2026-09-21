@@ -134,6 +134,9 @@ type windowStats struct {
 	// PromptCache is the upstream-side prompt cache ratio reported by the gateway.
 	PromptCache promptCacheAccumulator `json:"prompt_cache"`
 
+	// Series holds per-bucket counters for the charts on the overview cards.
+	Series seriesStats `json:"series"`
+
 	Channels []channelStat `json:"channels"`
 	Models   []channelStat `json:"models"`
 	Sources  []channelStat `json:"sources"`
@@ -143,6 +146,24 @@ type windowStats struct {
 	// Complete is false when the requested window reaches further back than the ring buffer.
 	Complete bool `json:"complete"`
 }
+
+// seriesStats carries one bucket per label for the overview charts. Every slice has
+// the same length as Labels.
+type seriesStats struct {
+	BucketSeconds int64     `json:"bucket_seconds"`
+	Labels        []string  `json:"labels"`
+	Requests      []float64 `json:"requests"`
+	Tokens        []float64 `json:"tokens"`
+	CacheHits     []float64 `json:"cache_hits"`
+	CacheMisses   []float64 `json:"cache_misses"`
+	Cost          []float64 `json:"cost"`
+	LatencyMS     []float64 `json:"latency_ms"`
+	TTFTMS        []float64 `json:"ttft_ms"`
+	TPS           []float64 `json:"tokens_per_second"`
+	Failed        []float64 `json:"failed"`
+}
+
+const maxSeriesBuckets = 48
 
 // statsWindow replays the in-memory ring for one window. It is the only place that
 // walks the ring for aggregation, so the cost stays linear in the buffer size.
@@ -154,6 +175,20 @@ func (s *store) statsWindow(window time.Duration, label string, now time.Time) *
 	cutoff := now.Add(-window)
 	stats.To = now.Format(time.RFC3339)
 	stats.From = cutoff.Format(time.RFC3339)
+
+	bucketSeconds, bucketCount := seriesBucket(window)
+	stats.Series = newSeriesStats(bucketSeconds, bucketCount, cutoff)
+	bucketIndex := func(at time.Time) int {
+		offset := at.Sub(cutoff)
+		if offset < 0 {
+			return -1
+		}
+		index := int(offset / (time.Duration(bucketSeconds) * time.Second))
+		if index >= bucketCount {
+			index = bucketCount - 1
+		}
+		return index
+	}
 
 	channels := map[string]*channelStat{}
 	models := map[string]*channelStat{}
@@ -170,11 +205,11 @@ func (s *store) statsWindow(window time.Duration, label string, now time.Time) *
 		if e == nil {
 			continue
 		}
-		if e.Timestamp.Before(oldest) {
-			oldest = e.Timestamp
-		}
 		if e.Timestamp.Before(cutoff) {
 			break
+		}
+		if e.Timestamp.Before(oldest) {
+			oldest = e.Timestamp
 		}
 		stats.Events++
 		stats.Requests++
@@ -199,6 +234,21 @@ func (s *store) statsWindow(window time.Duration, label string, now time.Time) *
 		if s.cfg.CaptureCache {
 			stats.PromptCache.add(e.PromptCacheHitTokens, e.PromptCacheMissTokens)
 		}
+		if bucket := bucketIndex(e.Timestamp); bucket >= 0 {
+			stats.Series.Requests[bucket]++
+			stats.Series.Tokens[bucket] += float64(e.TotalTokens)
+			stats.Series.CacheHits[bucket] += float64(e.PromptCacheHitTokens)
+			stats.Series.CacheMisses[bucket] += float64(e.PromptCacheMissTokens)
+			stats.Series.LatencyMS[bucket] += float64(e.LatencyMS)
+			stats.Series.TTFTMS[bucket] += float64(e.TTFTMS)
+			stats.Series.TPS[bucket] += e.TokensPerSecond
+			if parsedCost, okCost := parseCost(e.Cost); okCost {
+				stats.Series.Cost[bucket] += parsedCost
+			}
+			if e.Failed {
+				stats.Series.Failed[bucket]++
+			}
+		}
 		accumulate(channels, e.FinalProvider, e)
 		accumulate(models, e.Model, e)
 		accumulate(sources, e.APIKey, e)
@@ -212,9 +262,20 @@ func (s *store) statsWindow(window time.Duration, label string, now time.Time) *
 		stats.ErrorRate = float64(stats.Failed) / float64(stats.Requests)
 		stats.AvgLatency = float64(latencySum) / float64(stats.Requests)
 		stats.TPSAvg = stats.TPSAvg / float64(stats.Requests)
+		for i := range stats.Series.Requests {
+			if stats.Series.Requests[i] > 0 {
+				stats.Series.LatencyMS[i] /= stats.Series.Requests[i]
+				stats.Series.TPS[i] /= stats.Series.Requests[i]
+			}
+		}
 	}
 	if stats.TTFTRequests > 0 {
 		stats.AvgTTFT = float64(ttftSum) / float64(stats.TTFTRequests)
+		for i := range stats.Series.TTFTMS {
+			if stats.Series.TTFTMS[i] > 0 {
+				stats.Series.TTFTMS[i] /= float64(stats.TTFTRequests)
+			}
+		}
 	}
 	if stats.Tokens.Input > 0 {
 		stats.CacheRatio = float64(stats.Tokens.Cached) / float64(stats.Tokens.Input)
@@ -223,6 +284,47 @@ func (s *store) statsWindow(window time.Duration, label string, now time.Time) *
 	stats.Models = finalizeStats(models)
 	stats.Sources = finalizeStats(sources)
 	return stats
+}
+
+// newSeriesStats allocates one bucket per label so the chart always has a fixed width.
+func newSeriesStats(bucketSeconds int64, bucketCount int, cutoff time.Time) seriesStats {
+	series := seriesStats{
+		BucketSeconds: bucketSeconds,
+		Labels:        make([]string, bucketCount),
+		Requests:      make([]float64, bucketCount),
+		Tokens:        make([]float64, bucketCount),
+		CacheHits:     make([]float64, bucketCount),
+		CacheMisses:   make([]float64, bucketCount),
+		Cost:          make([]float64, bucketCount),
+		LatencyMS:     make([]float64, bucketCount),
+		TTFTMS:        make([]float64, bucketCount),
+		TPS:           make([]float64, bucketCount),
+		Failed:        make([]float64, bucketCount),
+	}
+	for i := 0; i < bucketCount; i++ {
+		series.Labels[i] = cutoff.Add(time.Duration(i+1) * time.Duration(bucketSeconds) * time.Second).Format(time.RFC3339)
+	}
+	return series
+}
+
+// seriesBucket picks a bucket size that keeps the chart under maxSeriesBuckets points.
+func seriesBucket(window time.Duration) (int64, int) {
+	seconds := int64(window / time.Second)
+	if seconds <= 0 {
+		seconds = int64(time.Hour / time.Second)
+	}
+	bucket := int64(60)
+	for seconds/bucket > maxSeriesBuckets {
+		bucket *= 2
+	}
+	count := int((seconds + bucket - 1) / bucket)
+	if count < 1 {
+		count = 1
+	}
+	if count > maxSeriesBuckets {
+		count = maxSeriesBuckets
+	}
+	return bucket, count
 }
 
 func accumulate(target map[string]*channelStat, key string, e *event) {

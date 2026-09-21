@@ -5,66 +5,69 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Cline 渠道监控</title>
 <style>
-:root{color-scheme:light dark;--bg:#f6f7f9;--card:#fff;--fg:#16181d;--muted:#666c78;--line:#e3e6ea;--accent:#2563eb;--accent-soft:rgba(37,99,235,.08);--warn:#b45309;--err:#b91c1c;--ok:#15803d}
-@media (prefers-color-scheme:dark){:root{--bg:#0f1116;--card:#161a21;--fg:#e8eaee;--muted:#98a2b3;--line:#242a33;--accent:#60a5fa;--accent-soft:rgba(96,165,250,.12);--warn:#fbbf24;--err:#f87171;--ok:#4ade80}}
+:root{color-scheme:light dark;--bg:#f5f6f8;--card:#fff;--fg:#15171c;--muted:#6a7280;--line:#e5e8ec;--accent:#2563eb;--accent-soft:rgba(37,99,235,.08);--warn:#b45309;--err:#b91c1c;--ok:#15803d;--chip:#eef2f7}
+@media (prefers-color-scheme:dark){:root{--bg:#0d0f13;--card:#14181f;--fg:#e9ecf1;--muted:#8b95a5;--line:#222833;--accent:#60a5fa;--accent-soft:rgba(96,165,250,.12);--warn:#fbbf24;--err:#f87171;--ok:#4ade80;--chip:#1b2029}}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans CJK SC","PingFang SC","Microsoft YaHei",sans-serif;-webkit-font-smoothing:antialiased}
-header{display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between;padding:14px 22px;background:var(--card);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:5}
+header{display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between;padding:14px 24px;background:var(--card);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:5}
 h1{margin:0;font-size:16px;font-weight:650;letter-spacing:.2px}
 h1 span{color:var(--muted);font-weight:400;font-size:12px;margin-left:6px}
 .sub{color:var(--muted);font-size:12px}
-main{padding:20px 22px 40px;max-width:1780px;margin:0 auto}
-section{margin-bottom:24px}
-h2{margin:0 0 10px;font-size:13px;font-weight:600;color:var(--muted);letter-spacing:.3px}
-.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(168px,1fr));gap:12px}
-.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:13px 15px}
-.card .k{color:var(--muted);font-size:12px;display:flex;align-items:center;gap:5px;margin-bottom:6px}
-.card .v{font-size:22px;font-weight:650;font-variant-numeric:tabular-nums;letter-spacing:-.2px}
-.card .v small{font-size:12px;font-weight:500;color:var(--muted);margin-left:3px}
-.card .s{color:var(--muted);font-size:11.5px;margin-top:3px;display:flex;gap:8px;flex-wrap:wrap}
+main{padding:22px 24px 44px;max-width:1800px;margin:0 auto}
+section{margin-bottom:26px}
+h2{margin:0 0 12px;font-size:12px;font-weight:600;color:var(--muted);letter-spacing:.6px;text-transform:uppercase}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(232px,1fr));gap:14px}
+.card{position:relative;background:linear-gradient(180deg,color-mix(in srgb,var(--tint,var(--accent)) 7%,var(--card)) 0,var(--card) 58%);border:1px solid var(--line);border-radius:14px;padding:16px 18px 14px;overflow:hidden}
+.card::before{content:"";position:absolute;inset:0 0 auto 0;height:3px;background:var(--tint,var(--accent));opacity:.85}
+.card .top{display:flex;align-items:flex-start;justify-content:space-between;gap:10px}
+.card .k{color:var(--muted);font-size:12.5px;font-weight:500}
+.card .ico{width:26px;height:26px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:14px;line-height:1;background:color-mix(in srgb,var(--tint,var(--accent)) 18%,transparent);color:var(--tint,var(--accent))}
+.card .v{margin-top:12px;font-size:30px;font-weight:680;letter-spacing:-.6px;font-variant-numeric:tabular-nums;display:flex;align-items:baseline;gap:5px}
+.card .v small{font-size:13px;font-weight:500;color:var(--muted);letter-spacing:0}
+.card .s{margin-top:8px;color:var(--muted);font-size:12px;display:flex;flex-wrap:wrap;gap:4px 12px}
+.card .spark{margin-top:12px;height:34px}
+.card .spark svg{display:block;width:100%;height:34px}
 .bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:12px}
 button,select,input{font:inherit;color:inherit;background:var(--card);border:1px solid var(--line);border-radius:9px;padding:7px 12px;transition:border-color .15s,background .15s}
 button{cursor:pointer}
 button:hover{border-color:var(--accent)}
 button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
-button.primary:hover{filter:brightness(1.06)}
 button:disabled{opacity:.45;cursor:not-allowed;border-color:var(--line)}
 input::placeholder{color:var(--muted)}
-.wrap{overflow-x:auto;border:1px solid var(--line);border-radius:12px;background:var(--card)}
+.wrap{overflow-x:auto;border:1px solid var(--line);border-radius:14px;background:var(--card)}
 table{width:100%;border-collapse:separate;border-spacing:0}
-th,td{padding:9px 12px;text-align:left;white-space:nowrap;vertical-align:top}
-th{font-size:12px;color:var(--muted);font-weight:600;background:color-mix(in srgb,var(--card) 82%,var(--bg));border-bottom:1px solid var(--line);position:sticky;top:0}
+th,td{padding:10px 13px;text-align:left;white-space:nowrap;vertical-align:top}
+th{font-size:12px;color:var(--muted);font-weight:600;background:color-mix(in srgb,var(--card) 84%,var(--bg));border-bottom:1px solid var(--line);position:sticky;top:0}
 td{border-bottom:1px solid var(--line);font-variant-numeric:tabular-nums}
 tbody tr:last-child td{border-bottom:none}
 tbody tr.row{cursor:pointer}
 tbody tr.row:hover td{background:var(--accent-soft)}
 td.num,th.num{text-align:right}
 .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12.5px}
-.stack{display:flex;flex-direction:column;gap:1px;line-height:1.35}
+.stack{display:flex;flex-direction:column;gap:1px;line-height:1.4}
 .stack .m{color:var(--muted);font-size:11.5px}
-.tok{display:grid;grid-template-columns:auto 1fr;gap:1px 6px;justify-content:start}
+.tok{display:flex;flex-direction:column;gap:1px;line-height:1.45}
+.tok .row2{display:flex;justify-content:space-between;gap:14px}
 .tok .lbl{color:var(--muted);font-size:11.5px}
 .tag{display:inline-block;padding:2px 9px;border-radius:999px;border:1px solid var(--line);font-size:12px;line-height:1.5}
 .tag.ok{color:var(--ok);border-color:color-mix(in srgb,var(--ok) 45%,var(--line));background:color-mix(in srgb,var(--ok) 10%,transparent)}
 .tag.err{color:var(--err);border-color:color-mix(in srgb,var(--err) 45%,var(--line));background:color-mix(in srgb,var(--err) 10%,transparent)}
 .tag.miss{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 45%,var(--line));background:color-mix(in srgb,var(--warn) 10%,transparent)}
-.chip{display:inline-block;padding:1px 7px;border-radius:6px;background:var(--accent-soft);color:var(--accent);font-size:12px;font-weight:600}
-.cache-bar{position:relative;height:4px;border-radius:3px;background:color-mix(in srgb,var(--err) 35%,var(--line));margin-top:4px;overflow:hidden;min-width:80px}
+.chip{display:inline-block;padding:1px 8px;border-radius:7px;background:var(--chip);color:var(--accent);font-size:12px;font-weight:600}
+.cache-bar{position:relative;height:4px;border-radius:3px;background:color-mix(in srgb,var(--err) 30%,var(--line));margin-top:5px;overflow:hidden;min-width:72px}
 .cache-bar i{position:absolute;inset:0 auto 0 0;background:var(--ok);border-radius:3px}
 .detail td{background:color-mix(in srgb,var(--bg) 55%,var(--card));white-space:normal;padding:0}
-.detail .inner{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px;padding:14px 16px}
-.detail h3{margin:0 0 6px;font-size:12px;color:var(--muted);font-weight:600}
-.detail dl{margin:0;display:grid;grid-template-columns:auto 1fr;gap:2px 10px;font-size:12.5px}
+.detail .inner{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:16px;padding:16px 18px}
+.detail h3{margin:0 0 7px;font-size:12px;color:var(--muted);font-weight:600}
+.detail dl{margin:0;display:grid;grid-template-columns:auto 1fr;gap:2px 12px;font-size:12.5px}
 .detail dt{color:var(--muted)}
 .detail dd{margin:0;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;word-break:break-all}
-.detail pre{margin:0;max-height:260px;overflow:auto;font-size:12px;line-height:1.5;background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:10px}
+.detail pre{margin:0;max-height:260px;overflow:auto;font-size:12px;line-height:1.5;background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:11px}
 .msg{color:var(--muted);padding:16px}
 .hidden{display:none}
 .mode{font-size:12px;padding:3px 10px;border-radius:999px;border:1px solid var(--line);color:var(--muted)}
-.empty-row td{text-align:center;color:var(--muted);padding:18px}
+.empty-row td{text-align:center;color:var(--muted);padding:20px}
 </style>
-</head>
-<body>
 <header>
   <div>
     <h1>Cline 渠道监控<span id="ver"></span></h1>
@@ -85,8 +88,8 @@ td.num,th.num{text-align:right}
 <main>
   <section id="gate" class="hidden">
     <div class="card">
-      <div class="k">需要 CPA 管理密钥（仅保存在本机浏览器，只用于调用本站管理接口）</div>
-      <div class="bar" style="margin:10px 0 0">
+      <div class="top"><div class="k">需要 CPA 管理密钥（仅保存在本机浏览器，只用于调用本站管理接口）</div></div>
+      <div class="bar" style="margin:12px 0 0">
         <input id="token" type="password" placeholder="粘贴 management key" size="46">
         <button class="primary" id="save">保存并加载</button>
       </div>
@@ -141,16 +144,29 @@ const store={
 
 function $(id){return document.getElementById(id)}
 function esc(s){return String(s==null?"":s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]))}
-function n(v){return v==null?0:Number(v)}
+function n(v){return v==null?0:Number(v)||0}
 function int(v){return v==null?"-":Math.round(n(v)).toLocaleString("zh-CN")}
 function fixed(v,d){return v==null?"-":n(v).toFixed(d==null?2:d)}
-function compact(v){const x=n(v);if(!x)return "0";if(x>=1e9)return (x/1e9).toFixed(2)+"G";if(x>=1e6)return (x/1e6).toFixed(2)+"M";if(x>=1e4)return (x/1e3).toFixed(2)+"K";if(x>=1e3)return (x/1e3).toFixed(1)+"K";return String(Math.round(x))}
-function ms(v){const x=n(v);if(!x)return "-";if(x>=60000)return (x/60000).toFixed(1)+" 分钟";return x>=10000?(x/1000).toFixed(1)+"s":Math.round(x)+" ms"}
+// 千位以上转 K/M/G，保留两位小数
+function scaled(v){
+  const x=n(v);
+  if(Math.abs(x)>=1e9)return (x/1e9).toFixed(2)+"G";
+  if(Math.abs(x)>=1e6)return (x/1e6).toFixed(2)+"M";
+  if(Math.abs(x)>=1e3)return (x/1e3).toFixed(2)+"K";
+  return String(Math.round(x));
+}
+// 时长：<1000ms 用 ms，>=1000ms 转 s 保留两位小数
+function dur(v){
+  const x=n(v);
+  if(!x)return "-";
+  if(x<1000)return Math.round(x)+" ms";
+  return (x/1000).toFixed(2)+" s";
+}
 function shortKey(k){if(!k)return "-";return k.length>16?k.slice(0,4)+"…"+k.slice(-4):k}
 function fmtTime(ts){if(!ts)return "-";const d=new Date(ts);if(isNaN(d))return ts;const p=x=>String(x).padStart(2,"0");return d.getFullYear()+"-"+p(d.getMonth()+1)+"-"+p(d.getDate())+" "+p(d.getHours())+":"+p(d.getMinutes())+":"+p(d.getSeconds())}
-function protoLabel(v){if(!v)return "-";if(v==="openai-response")return "/v1/responses";if(v==="openai"||v==="chat-completions")return "/v1/chat/completions";if(v==="claude"||v==="anthropic")return "/v1/messages";return v}
+function endpointLabel(v){if(!v)return "-";if(v==="openai-response")return "/v1/responses";if(v==="openai"||v==="chat-completions")return "/v1/chat/completions";if(v==="claude"||v==="anthropic")return "/v1/messages";return v}
 function ratio(hit,miss){const t=n(hit)+n(miss);return t>0?n(hit)/t:0}
-function token(v){const map={max:"最高",xhigh:"极高",high:"高",medium:"中",low:"低",minimal:"极低"};return map[v]||v||"-"}
+function effort(v){const map={max:"最高",xhigh:"极高",high:"高",medium:"中",low:"低",minimal:"极低"};return map[v]||v||"-"}
 
 async function api(path,params){
   const url=new URL(BASE+path,location.origin);
@@ -161,23 +177,68 @@ async function api(path,params){
   return res.json();
 }
 
-function card(label,tip,value,unit,details){
-  return '<div class="card"><div class="k" title="'+esc(tip)+'">'+esc(label)+'</div><div class="v">'+esc(value)+
-    (unit?'<small>'+esc(unit)+"</small>":"")+"</div>"+(details?'<div class="s">'+details.map(d=>"<span>"+esc(d)+"</span>").join("")+"</div>":"")+"</div>";
+// 迷你折线图（内联 SVG，无外部依赖）
+function sparkline(values,color){
+  const series=(values||[]).map(v=>n(v));
+  if(series.length<2)return "";
+  const w=240,h=34,pad=3;
+  const max=Math.max.apply(null,series),min=Math.min.apply(null,series);
+  const span=max-min||1;
+  const step=(w-pad*2)/(series.length-1);
+  const pts=series.map((v,i)=>[pad+i*step,pad+(h-pad*2)*(1-(v-min)/span)]);
+  const line=pts.map((p,i)=>(i?"L":"M")+p[0].toFixed(1)+" "+p[1].toFixed(1)).join(" ");
+  const area=line+" L"+(pad+(series.length-1)*step).toFixed(1)+" "+(h-pad)+" L"+pad+" "+(h-pad)+" Z";
+  const gid="sg"+Math.random().toString(36).slice(2,8);
+  return '<svg viewBox="0 0 '+w+" "+h+'" preserveAspectRatio="none" aria-hidden="true">'+
+    '<defs><linearGradient id="'+gid+'" x1="0" y1="0" x2="0" y2="1">'+
+    '<stop offset="0%" stop-color="'+color+'" stop-opacity="0.28"/>'+
+    '<stop offset="100%" stop-color="'+color+'" stop-opacity="0"/>'+
+    "</linearGradient></defs>"+
+    '<path d="'+area+'" fill="url(#'+gid+')"/>'+
+    '<path d="'+line+'" fill="none" stroke="'+color+'" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"/>'+
+    "</svg>";
+}
+
+function card(opt){
+  const tint=opt.tint||"var(--accent)";
+  return '<div class="card" style="--tint:'+tint+'" title="'+esc(opt.tip||"")+'">'+
+    '<div class="top"><div class="k">'+esc(opt.label)+'</div><div class="ico">'+esc(opt.icon||"")+"</div></div>"+
+    '<div class="v">'+esc(opt.value)+(opt.unit?'<small>'+esc(opt.unit)+"</small>":"")+"</div>"+
+    (opt.sub&&opt.sub.length?'<div class="s">'+opt.sub.map(x=>"<span>"+esc(x)+"</span>").join("")+"</div>":"")+
+    (opt.spark?'<div class="spark">'+sparkline(opt.spark,tint)+"</div>":"")+
+    "</div>";
 }
 
 function renderCards(s){
-  const tok=s.tokens||{}, cost=s.cost||{}, pc=s.prompt_cache||{};
+  const tok=s.tokens||{}, cost=s.cost||{}, pc=s.prompt_cache||{}, series=s.series||{};
+  const requests=n(s.requests)||1;
   const cacheRatio=ratio(pc.hit,pc.miss);
+  const perRequestCost=n(cost.total)/requests;
   const cards=[
-    card("请求数","当前时间窗内落盘的请求数",int(s.requests),"条",[s.failed?("失败 "+int(s.failed)+"（"+fixed(n(s.error_rate)*100,1)+"%）"):"无失败"]),
-    card("平均延时","同一时间窗内所有请求的平均总延时",fixed((n(s.avg_latency_ms))/1000,1),"s",["平均 TTFT "+ms(s.avg_ttft_ms)]),
-    card("生成速度","平均输出速度 = output_tokens / 生成耗时",fixed(s.tokens_per_second_avg,1),"tok/s",["TTFT 后段更快：见明细"]),
-    card("输入 / 输出","当前时间窗内每个请求的平均输入、输出 token",compact(tok.avg_input)+" / "+compact(tok.avg_output),"/ 请求",["合计 "+compact(tok.input)+" / "+compact(tok.output)+" token"]),
-    card("CPA 缓存","CPA 侧统计的 cached_tokens 占 input_tokens 的比例",fixed(n(s.cache_ratio)*100,1),"%",["cached "+compact(tok.cached)+" / input "+compact(tok.input)]),
-    card("上游缓存","Cline 网关提供的 promptCacheHit/(hit+miss)，与 CPA 缓存统计口径不同",fixed(cacheRatio*100,1),"%",["hit "+compact(pc.hit)+" / miss "+compact(pc.miss)]),
-    card("总成本","上游网关按请求返回的 cost 求和（美元）","$ "+fixed(cost.total,6),"",[(cost.unparsed?("未解析 "+int(cost.unparsed)+" 条"):"全部可解析")]),
-    card("无渠道记录","落盘行里没有渠道字段的数量：连接失败、上游报错、模型不存在等请求本来就没有渠道",int(s.channel_missing),"条",[s.channel_missing?"属正常状态":"当前全部有渠道"])
+    card({label:"请求数",icon:"⇄",tint:"#60a5fa",tip:"当前时间窗内落盘的 Cline 请求数",
+      value:int(s.requests),unit:"条",
+      sub:[s.failed?("失败 "+int(s.failed)+"（"+fixed(n(s.error_rate)*100,2)+"%）"):"无失败","成功率 "+fixed(100-n(s.error_rate)*100,2)+"%"],
+      spark:series.requests}),
+    card({label:"平均延时",icon:"◷",tint:"#a78bfa",tip:"平均总延时；副值为平均首 token 延时（TTFT）",
+      value:fixed(n(s.avg_latency_ms)/1000,2),unit:"s",
+      sub:["平均 TTFT "+dur(s.avg_ttft_ms),"样本 "+int(s.ttft_requests)+" 条"],
+      spark:series.latency_ms}),
+    card({label:"生成速度",icon:"⚡",tint:"#f59e0b",tip:"平均生成速度 = output_tokens / 生成耗时",
+      value:fixed(s.tokens_per_second_avg,2),unit:"tok/s",sub:["越高越快"],spark:series.tokens_per_second}),
+    card({label:"输入 / 输出 合计",icon:"Σ",tint:"#38bdf8",tip:"时间窗内输入 token 与输出 token 的总量",
+      value:scaled(tok.input)+" / "+scaled(tok.output),unit:"入/出",
+      sub:["总计 "+scaled(tok.total),"推理 "+scaled(tok.reasoning)],spark:series.tokens}),
+    card({label:"输入 / 输出 每请求",icon:"÷",tint:"#22d3ee",tip:"平均每个请求消耗的输入 token 与输出 token",
+      value:scaled(tok.avg_input)+" / "+scaled(tok.avg_output),unit:"入/出",
+      sub:["输入含缓存命中部分"],spark:series.requests}),
+    card({label:"缓存命中率",icon:"%",tint:"#34d399",tip:"上游网关口径：promptCacheHit/(hit+miss)；CPA 口径见副值",
+      value:fixed(cacheRatio*100,2),unit:"%",
+      sub:["上游 hit "+scaled(pc.hit)+" / miss "+scaled(pc.miss),"CPA 缓存 "+fixed(n(s.cache_ratio)*100,2)+"%"],
+      spark:series.cache_hits}),
+    card({label:"总成本",icon:"$",tint:"#fbbf24",tip:"上游网关按请求返回的成本求和（美元）",
+      value:"$ "+fixed(cost.total,6),unit:"",
+      sub:["每请求 $"+fixed(perRequestCost,6),cost.unparsed?("未解析 "+int(cost.unparsed)+" 条"):"全部可解析"],
+      spark:series.cost})
   ];
   $("cards").innerHTML=cards.join("");
 }
@@ -185,22 +246,19 @@ function renderCards(s){
 function renderChannels(rows){
   const body=$("channels").querySelector("tbody");
   if(!rows||!rows.length){body.innerHTML='<tr class="empty-row"><td colspan="8">该时间窗内没有渠道数据。</td></tr>';return}
-  body.innerHTML=rows.map(r=>{
-    return "<tr>"+
-      '<td><span class="chip">'+esc(r.key)+"</span></td>"+
-      '<td class="num">'+int(r.requests)+"</td>"+
-      '<td class="num">'+(r.failed?'<span class="tag err">'+int(r.failed)+"</span>":"0")+"</td>"+
-      '<td class="num">'+fixed(r.cost,6)+"</td>"+
-      '<td class="num">'+ms(r.avg_latency_ms)+"</td>"+
-      '<td class="num">'+ms(r.avg_ttft_ms)+"</td>"+
-      '<td class="num">'+compact(r.avg_input_tokens)+" / "+compact(r.avg_output_tokens)+"</td>"+
-      '<td class="num">'+fixed(n(r.prompt_cache_ratio)*100,1)+"%</td>"+
-      "</tr>";
-  }).join("");
+  body.innerHTML=rows.map(r=>"<tr>"+
+    '<td><span class="chip">'+esc(r.key)+"</span></td>"+
+    '<td class="num">'+int(r.requests)+"</td>"+
+    '<td class="num">'+(r.failed?'<span class="tag err">'+int(r.failed)+"</span>":"0")+"</td>"+
+    '<td class="num">'+fixed(r.cost,6)+"</td>"+
+    '<td class="num">'+dur(r.avg_latency_ms)+"</td>"+
+    '<td class="num">'+dur(r.avg_ttft_ms)+"</td>"+
+    '<td class="num">'+scaled(r.avg_input_tokens)+" / "+scaled(r.avg_output_tokens)+"</td>"+
+    '<td class="num">'+fixed(n(r.prompt_cache_ratio)*100,2)+"%</td>"+
+    "</tr>").join("");
 }
 
 function detailPanel(e){
-  const rows=[["计划推理 planningReasoning",e.planning_reasoning||("未落盘（长度 "+int(e.planning_reasoning_length)+" 字符）")]];
   const dl=pairs=>'<dl>'+pairs.filter(p=>p[1]!==undefined&&p[1]!==null&&p[1]!=="").map(p=>"<dt>"+esc(p[0])+"</dt><dd>"+esc(p[1])+"</dd>").join("")+"</dl>";
   return '<tr class="detail hidden"><td colspan="12"><div class="inner">'+
     "<div><h3>请求</h3>"+dl([
@@ -222,7 +280,7 @@ function detailPanel(e){
       ["prompt_cache hit / miss",int(e.prompt_cache_hit_tokens)+" / "+int(e.prompt_cache_miss_tokens)],
       ["systemFingerprint",e.system_fingerprint],["失败原因",e.error],["status code",e.status_code?String(e.status_code):""]
     ])+"</div>"+
-    "<div><h3>planningReasoning</h3><pre>"+esc(rows[0][1])+"</pre></div>"+
+    "<div><h3>planningReasoning</h3><pre>"+esc(e.planning_reasoning||("未落盘（长度 "+int(e.planning_reasoning_length)+" 字符）"))+"</pre></div>"+
     "</div></td></tr>";
 }
 
@@ -235,23 +293,22 @@ function renderEvents(list){
     const hit=n(e.prompt_cache_hit_tokens),miss=n(e.prompt_cache_miss_tokens);
     const cacheRatio=ratio(hit,miss);
     return '<tr class="row" data-i="'+i+'">'+
-      '<td><div class="stack">'+esc(fmtTime(e.timestamp).slice(0,19))+"</div></td>"+
+      '<td><div class="stack">'+esc(fmtTime(e.timestamp))+"</div></td>"+
       '<td title="'+esc(e.api_key)+'"><span class="mono">'+esc(shortKey(e.api_key))+"</span></td>"+
       '<td><span class="chip">'+esc(e.final_provider||"—")+"</span></td>"+
       '<td><div class="stack">'+esc(e.model_alias||e.model||"-")+'<span class="m">'+esc(e.model||"")+"</span></div></td>"+
-      "<td>"+esc(token(e.reasoning_effort))+"</td>"+
+      "<td>"+esc(effort(e.reasoning_effort))+"</td>"+
       "<td>"+tag+"</td>"+
-      '<td><span class="mono">'+esc(protoLabel(e.client_protocol))+(e.stream?" <span class=\"m\">SSE</span>":"")+"</span></td>"+
-      '<td class="num"><div class="stack">'+esc(ms(e.latency_ms))+'<span class="m">首 token '+esc(ms(e.ttft_ms))+"</span></div></td>"+
-      '<td class="num"><div class="stack">'+fixed(e.tokens_per_second,1)+" t/s"+'<span class="m">TTFT 后 '+fixed(e.tokens_per_second_after_ttft,1)+" t/s</span></div></td>"+
+      '<td><div class="stack">'+esc(endpointLabel(e.client_protocol))+'<span class="m">'+(e.stream?"SSE":"非流式")+'</span></div></td>'+
+      '<td class="num"><div class="stack">'+esc(dur(e.latency_ms))+'<span class="m">TTFT '+esc(dur(e.ttft_ms))+'</span></div></td>'+
+      '<td class="num"><div class="stack">'+fixed(e.tokens_per_second,2)+' t/s<span class="m">TTFT 后 '+fixed(e.tokens_per_second_after_ttft,2)+' t/s</span></div></td>'+
       '<td class="num"><div class="tok">'+
-        '<span class="lbl">↑ 输入</span><span>'+int(e.input_tokens)+"</span>"+
-        '<span class="lbl">↓ 输出</span><span>'+int(e.output_tokens)+"</span>"+
-        (n(e.reasoning_tokens)?'<span class="lbl">◇ 思考</span><span>'+int(e.reasoning_tokens)+"</span>":"")+
-        '<span class="lbl">Σ 总计</span><span>'+int(e.total_tokens)+"</span>"+
+        '<span class="row2"><span class="lbl">↑ 输入</span><span>'+scaled(e.input_tokens)+"</span></span>"+
+        '<span class="row2"><span class="lbl">↓ 输出</span><span>'+scaled(e.output_tokens)+"</span></span>"+
+        (n(e.reasoning_tokens)?'<span class="row2"><span class="lbl">◇ 思考</span><span>'+scaled(e.reasoning_tokens)+"</span></span>":"")+
       "</div></td>"+
-      '<td class="num"><div class="stack">'+int(hit)+" / "+int(miss)+
-        '<span class="m">命中 '+fixed(cacheRatio*100,1)+'%</span><span class="cache-bar"><i style="width:'+fixed(cacheRatio*100,1)+'%"></i></span></div></td>'+
+      '<td class="num"><div class="stack"><span>'+scaled(hit)+" / "+scaled(miss)+"</span>"+
+        '<span class="m">命中 '+fixed(cacheRatio*100,2)+'%</span><span class="cache-bar"><i style="width:'+fixed(cacheRatio*100,2)+'%"></i></span></div></td>'+
       '<td class="num">'+(e.cost?esc("$"+e.cost):"—")+"</td>"+
       "</tr>"+detailPanel(e);
   }).join("");

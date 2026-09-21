@@ -80,6 +80,11 @@ func loadConfig(raw []byte) {
 	} else {
 		state.Store.reconfigure(cfg)
 	}
+	// A reconfigure (or reload) starts a fresh view: the ring and the counters describe
+	// this instance only, while the JSONL files keep the full history.
+	if state.Store != nil {
+		state.Store.reset()
+	}
 	state.Identities = newIdentityTable()
 	stateMu.Unlock()
 	hostLogAsync("info", "clinepass-channel-monitor: configured", map[string]string{

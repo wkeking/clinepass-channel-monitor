@@ -69,7 +69,7 @@ func TestIndexPageCarriesNoData(t *testing.T) {
 	}
 	// The detail table shows the recorded columns; the upstream address and the raw
 	// provider key stay out of the list and only appear in the expanded detail panel.
-	for _, needle := range []string{"思考等级", "延时 / TTFT", "生成速度", "缓存", "Token"} {
+	for _, needle := range []string{"思考等级", "延时 / TTFT", "生成速度", "缓存", "Token", "输入 / 输出 合计", "输入 / 输出 每请求", "sparkline", "cache-bar"} {
 		if !strings.Contains(page, needle) {
 			t.Errorf("page is missing the %q column", needle)
 		}
@@ -141,6 +141,56 @@ func TestChannelStatsCacheRatio(t *testing.T) {
 	}
 	if stats.Requests != 2 {
 		t.Errorf("requests = %d, want 2", stats.Requests)
+	}
+}
+
+// TestSeriesBucketKeepsChartsBounded checks the bucket sizing used by the overview charts.
+func TestSeriesBucketKeepsChartsBounded(t *testing.T) {
+	cases := []struct {
+		window        time.Duration
+		wantBucket    int64
+		wantMaxBucket int
+	}{
+		{time.Hour, 120, 48},
+		{24 * time.Hour, 1920, 48},
+		{7 * 24 * time.Hour, 15360, 48},
+	}
+	for _, tc := range cases {
+		bucket, count := seriesBucket(tc.window)
+		if bucket != tc.wantBucket {
+			t.Errorf("seriesBucket(%v) bucket = %d, want %d", tc.window, bucket, tc.wantBucket)
+		}
+		if count > tc.wantMaxBucket {
+			t.Errorf("seriesBucket(%v) count = %d, want <= %d", tc.window, count, tc.wantMaxBucket)
+		}
+	}
+}
+
+// TestStatsSeriesMapsEventsToBuckets verifies the chart data the page plots.
+func TestStatsSeriesMapsEventsToBuckets(t *testing.T) {
+	loadConfig(defaultConfigBytes())
+	st := currentStore()
+	now := time.Now()
+	st.add(&event{Timestamp: now.Add(-2 * time.Minute), TotalTokens: 100, PromptCacheHitTokens: 10, LatencyMS: 200, TTFTMS: 50, TokensPerSecond: 5})
+	st.add(&event{Timestamp: now.Add(-time.Minute), TotalTokens: 300, PromptCacheMissTokens: 20, LatencyMS: 400, TTFTMS: 60, TokensPerSecond: 7, Failed: true})
+	stats := st.statsWindow(time.Hour, "1h", now)
+	if len(stats.Series.Labels) != len(stats.Series.Requests) {
+		t.Fatalf("series length mismatch: %d labels vs %d values", len(stats.Series.Labels), len(stats.Series.Requests))
+	}
+	var requestSum, tokenSum float64
+	for i := range stats.Series.Requests {
+		requestSum += stats.Series.Requests[i]
+		tokenSum += stats.Series.Tokens[i]
+	}
+	if requestSum != 2 {
+		t.Errorf("series requests = %v, want 2", requestSum)
+	}
+	if tokenSum != 400 {
+		t.Errorf("series tokens = %v, want 400", tokenSum)
+	}
+	last := len(stats.Series.Requests) - 1
+	if stats.Series.Failed[last] != 1 {
+		t.Errorf("failed bucket = %v, want 1 in the last bucket", stats.Series.Failed[last])
 	}
 }
 

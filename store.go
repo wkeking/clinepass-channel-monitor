@@ -93,6 +93,19 @@ func (s *store) reconfigure(cfg config) {
 	s.cfg = cfg
 }
 
+// reset clears the in-memory view: a reconfigured plugin starts with empty counters
+// so that /health reflects the current instance instead of a previous configuration.
+func (s *store) reset() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ring = make([]*event, len(s.ring))
+	s.head = 0
+	s.size = 0
+	s.pending = nil
+	s.unmatchedSamples = nil
+	s.counters = counters{}
+}
+
 func (s *store) close() {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -233,7 +233,7 @@ function renderCards(s){
       sub:["输入含缓存命中部分"],spark:series.requests}),
     card({label:"缓存命中率",icon:"%",tint:"#34d399",tip:"上游网关口径：promptCacheHit/(hit+miss)；CPA 口径见副值",
       value:fixed(cacheRatio*100,2),unit:"%",
-      sub:["上游 hit "+scaled(pc.hit)+" / miss "+scaled(pc.miss),"CPA 缓存 "+fixed(n(s.cache_ratio)*100,2)+"%"],
+      sub:["上游口径 hit "+scaled(pc.hit)+" / miss "+scaled(pc.miss),"CPA 口径 "+fixed(n(s.cache_ratio)*100,2)+"%（cached/input）"],
       spark:series.cache_hits}),
     card({label:"总成本",icon:"$",tint:"#fbbf24",tip:"上游网关按请求返回的成本求和（美元）",
       value:"$ "+fixed(cost.total,6),unit:"",

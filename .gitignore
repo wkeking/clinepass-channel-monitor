@@ -11,3 +11,6 @@ dist/
 
 # 例外：C ABI 声明头需要随仓库发布
 !cdecl.h
+
+# go build 产物（插件仓库根目录不应出现二进制）
+/clinepass-channel-monitor

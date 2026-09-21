@@ -21,9 +21,6 @@ const (
 	// defaultJSONLDir is expressed relative to the CPA working directory so the
 	// default never depends on one particular deployment layout.
 	defaultJSONLDir = "logs/channel-monitor"
-	// defaultPlanManagementURL is CPA's own management API on the loopback interface. The
-	// plugin uses it only to discover which Cline credential this deployment uses.
-	defaultPlanManagementURL = "http://127.0.0.1:8317/v0/management"
 )
 
 // defaultHosts is the only value that carries a Cline assumption. It is a default,
@@ -64,10 +61,15 @@ type config struct {
 	PlanEnabled       bool     `yaml:"plan_enabled"`
 	PlanAPIKey        string   `yaml:"plan_api_key"`
 	PlanBaseURL       string   `yaml:"plan_base_url"`
-	PlanManagementURL string   `yaml:"plan_management_url"`
 	PlanConfigPath    string   `yaml:"plan_config_path"`
 	PlanRefresh       Duration `yaml:"plan_refresh"`
 	PlanDailyEnabled  bool     `yaml:"plan_daily_enabled"`
+	// PlanUsageEnabled switches the overview cards to Cline's official per-request
+	// records (request count, tokens, cache hit ratio) fetched from
+	// /users/{id}/usages. Latency and generation speed stay local: the official API
+	// does not expose them.
+	PlanUsageEnabled bool     `yaml:"plan_usage_enabled"`
+	PlanUsageRefresh Duration `yaml:"plan_usage_refresh"`
 }
 
 // Duration accepts both Go duration strings ("5s", "1m30s") and plain numbers,
@@ -125,9 +127,10 @@ func defaultConfig() config {
 		Timezone:           defaultTimezone,
 		PlanEnabled:        true,
 		PlanBaseURL:        planDefaultBaseURL,
-		PlanManagementURL:  defaultPlanManagementURL,
 		PlanRefresh:        Duration{Value: planDefaultRefresh, Set: true},
 		PlanDailyEnabled:   true,
+		PlanUsageEnabled:   true,
+		PlanUsageRefresh:   Duration{Value: planDefaultUsageRefresh, Set: true},
 	}
 }
 
@@ -215,8 +218,10 @@ func normalizeConfig(cfg *config) {
 	if strings.TrimSpace(cfg.PlanBaseURL) == "" {
 		cfg.PlanBaseURL = planDefaultBaseURL
 	}
-	if strings.TrimSpace(cfg.PlanManagementURL) == "" {
-		cfg.PlanManagementURL = defaultPlanManagementURL
+	if cfg.PlanUsageRefresh.Set && cfg.PlanUsageRefresh.Value < time.Minute {
+		// The official per-request endpoint is paginated; a sub-minute interval would mean
+		// dozens of upstream calls per cycle for no visible gain.
+		cfg.PlanUsageRefresh.Value = time.Minute
 	}
 }
 

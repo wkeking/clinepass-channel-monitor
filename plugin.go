@@ -13,10 +13,10 @@ import (
 
 const (
 	pluginID          = "clinepass-channel-monitor"
-	pluginName        = "Channel Monitor"
+	pluginName        = "Cline 渠道监控"
 	pluginAuthor      = "wkeking"
 	pluginRepository  = "https://github.com/wkeking/clinepass-channel-monitor"
-	pluginDescription = "Per-request Cline channel, usage, and cost monitoring with a management page."
+	pluginDescription = "逐条记录 Cline 请求实际命中的上游渠道、用量与成本，并提供管理页。"
 )
 
 // pluginVersion is a variable so release builds can stamp it with -ldflags.
@@ -209,28 +209,30 @@ func buildRegistration() registration {
 			Author:           pluginAuthor,
 			GitHubRepository: pluginRepository,
 			ConfigFields: []pluginapi.ConfigField{
-				{Name: "hosts", Type: pluginapi.ConfigFieldTypeArray, Description: "Base URL hosts whose requests are recorded. Entries starting with '.' match a domain suffix; an empty list records every request that carries gateway routing metadata."},
-				{Name: "require_routing_marker", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Require provider_metadata.gateway.routing to be present in the upstream response before a request is recorded."},
-				{Name: "unmatched_host_samples", Type: pluginapi.ConfigFieldTypeInteger, Description: "How many host-mismatch samples to keep for self-diagnosis."},
-				{Name: "ring_size", Type: pluginapi.ConfigFieldTypeInteger, Description: "In-memory ring buffer size for the management page."},
-				{Name: "jsonl_enabled", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Append one JSON object per recorded request to a daily JSONL file."},
-				{Name: "jsonl_dir", Type: pluginapi.ConfigFieldTypeString, Description: "Directory for JSONL files. Relative paths resolve against the CPA working directory."},
-				{Name: "retention_days", Type: pluginapi.ConfigFieldTypeInteger, Description: "Delete JSONL files older than this many days."},
-				{Name: "join_window", Type: pluginapi.ConfigFieldTypeString, Description: "Time window used to join a channel observation with its usage record (for example 5s)."},
-				{Name: "orphan_ttl", Type: pluginapi.ConfigFieldTypeString, Description: "How long an unconsumed channel observation is kept before it counts as an orphan (for example 60s)."},
-				{Name: "mask_api_key", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Store only the first and last four characters of the client API key."},
-				{Name: "log_events", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Also write one CPA log line per recorded request."},
-				{Name: "capture_cost", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Record gateway cost fields."},
-				{Name: "capture_cache", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Record cache counters."},
-				{Name: "store_planning_reasoning", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Store the gateway planning text. When false only its length is stored."},
-				{Name: "timezone", Type: pluginapi.ConfigFieldTypeString, Description: "Timezone used for display and timestamps."},
-				{Name: "sample_rate", Type: pluginapi.ConfigFieldTypeInteger, Description: "Record every Nth request (1-100)."},
-				{Name: "plan_enabled", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Show Cline's own subscription usage (plan, rolling limits, official token totals)."},
-				{Name: "plan_api_key", Type: pluginapi.ConfigFieldTypeString, Description: "Cline API key used for the subscription card. Leave empty to reuse CPA's own Cline credential."},
-				{Name: "plan_base_url", Type: pluginapi.ConfigFieldTypeString, Description: "Base URL of Cline's API. Default https://api.cline.bot/api/v1."},
-				{Name: "plan_config_path", Type: pluginapi.ConfigFieldTypeString, Description: "Path of CPA's config.yaml inside the container, used to read the Cline credential."},
-				{Name: "plan_refresh", Type: pluginapi.ConfigFieldTypeString, Description: "How often the subscription usage is refreshed (for example 5m)."},
-				{Name: "plan_daily_enabled", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Also fetch the official 31-day token totals and balance (at most once per hour)."},
+				{Name: "hosts", Type: pluginapi.ConfigFieldTypeArray, Description: "需要记录的请求所属的主机名（Base URL 的 host）。以 . 开头表示匹配域名后缀；留空表示记录所有携带网关路由元数据的请求。"},
+				{Name: "require_routing_marker", Type: pluginapi.ConfigFieldTypeBoolean, Description: "要求上游响应里出现 provider_metadata.gateway.routing 才记录该请求。"},
+				{Name: "unmatched_host_samples", Type: pluginapi.ConfigFieldTypeInteger, Description: "保留多少条主机名不匹配的样本，用于自诊断。"},
+				{Name: "ring_size", Type: pluginapi.ConfigFieldTypeInteger, Description: "管理页使用的内存环形缓冲区条数上限。"},
+				{Name: "jsonl_enabled", Type: pluginapi.ConfigFieldTypeBoolean, Description: "为每条已记录的请求追加一行 JSON 到按天切分的 JSONL 文件。"},
+				{Name: "jsonl_dir", Type: pluginapi.ConfigFieldTypeString, Description: "JSONL 文件所在目录。相对路径相对于 CPA 的工作目录解析。"},
+				{Name: "retention_days", Type: pluginapi.ConfigFieldTypeInteger, Description: "超过该天数的 JSONL 文件会被删除。"},
+				{Name: "join_window", Type: pluginapi.ConfigFieldTypeString, Description: "把渠道观测与用量记录关联起来的时间窗（例如 5s）。"},
+				{Name: "orphan_ttl", Type: pluginapi.ConfigFieldTypeString, Description: "未被消费的渠道观测保留多久后算作孤儿（例如 60s）。"},
+				{Name: "mask_api_key", Type: pluginapi.ConfigFieldTypeBoolean, Description: "只保留下游 API Key 的前后各四位字符。"},
+				{Name: "log_events", Type: pluginapi.ConfigFieldTypeBoolean, Description: "每记录一条请求的同时写一行 CPA 日志。"},
+				{Name: "capture_cost", Type: pluginapi.ConfigFieldTypeBoolean, Description: "记录上游网关返回的成本字段。"},
+				{Name: "capture_cache", Type: pluginapi.ConfigFieldTypeBoolean, Description: "记录缓存计数。"},
+				{Name: "store_planning_reasoning", Type: pluginapi.ConfigFieldTypeBoolean, Description: "保存网关的规划文本；关闭时只保存文本长度。"},
+				{Name: "timezone", Type: pluginapi.ConfigFieldTypeString, Description: "展示与时间戳使用的时区。"},
+				{Name: "sample_rate", Type: pluginapi.ConfigFieldTypeInteger, Description: "每 N 条请求记录一条（1-100）。"},
+				{Name: "plan_enabled", Type: pluginapi.ConfigFieldTypeBoolean, Description: "展示 Cline 官方套餐用量（套餐、滚动限额、官方 Token 总量）。"},
+				{Name: "plan_api_key", Type: pluginapi.ConfigFieldTypeString, Description: "用于官方套餐卡片的 Cline API Key；留空则复用 CPA 自己的 Cline 凭据。"},
+				{Name: "plan_base_url", Type: pluginapi.ConfigFieldTypeString, Description: "Cline API 的基础地址，默认 https://api.cline.bot/api/v1。"},
+				{Name: "plan_config_path", Type: pluginapi.ConfigFieldTypeString, Description: "容器内 CPA config.yaml 的路径，用于读取 Cline 凭据。"},
+				{Name: "plan_refresh", Type: pluginapi.ConfigFieldTypeString, Description: "官方套餐用量的刷新间隔（例如 5m）。"},
+				{Name: "plan_daily_enabled", Type: pluginapi.ConfigFieldTypeBoolean, Description: "同时拉取官方 Token 总量与余额（最多每小时一次）。"},
+				{Name: "plan_usage_enabled", Type: pluginapi.ConfigFieldTypeBoolean, Description: "概览卡片改用 Cline 官方逐条用量口径（请求数、Token、缓存命中率）；延时与生成速度仍为本机记录。"},
+				{Name: "plan_usage_refresh", Type: pluginapi.ConfigFieldTypeString, Description: "官方逐条用量的增量刷新间隔，最小 1 分钟（例如 5m）。"},
 			},
 		},
 		Capabilities: registrationCapability{

@@ -16,7 +16,8 @@ Cline 的请求打到网关后，由 **Cline 自己**决定这次请求最终落
 - 记录上游给出的实际成本：`gateway.cost` / `inputInferenceCost` / `outputInferenceCost` / `generationId`；
 - 记录 token 与缓存：`input/output/reasoning/total_tokens`、`cached_tokens`、`prompt_cache_hit_tokens` / `prompt_cache_miss_tokens`、`systemFingerprint`；
 - 按天切分 JSONL 落盘（默认开启）+ 内存环形缓冲供页面即时查询；
-- 管理中心页面：聚合卡片（请求数/失败数/渠道分布/延时/TTFT/缓存命中率/总成本）+ 可过滤分页明细表 + CSV 导出；
+- 管理中心页面：固定五个一行的概览卡片（请求数 / 平均延时 / 生成速度 / 总 Token 数 / 缓存命中率）+ 渠道分布 + 可过滤分页明细表 + CSV 导出；
+- **可选接入 Cline 官方用量**：套餐名与月费、5 小时/周/月限额进度、官方 Token 总量/成本/余额，并把概览的请求数、总 Token 数、缓存命中率切到官方口径（延时与生成速度仍为本机口径，官方接口没有这两项）；
 - 自诊断：`health` 暴露命中/未命中/解析失败/未关联/orphan/写盘错误等计数器，以及「带渠道证据但 host 不匹配」的样本，避免静默失效；
 - **fail-open**：观测钩子永远返回空 body（宿主视为「不修改」），任何解析或写盘异常都不改变响应字节、状态码与时序。
 
@@ -91,6 +92,14 @@ plugins:
       capture_cache: true
       store_planning_reasoning: false  # 默认只存 planningReasoning 的长度，不存文本
       timezone: "Asia/Shanghai"        # 页面展示时区
+      # ---- Cline 官方用量（套餐 / 限额 / 概览口径）----
+      plan_enabled: true               # 官方套餐卡片总开关
+      plan_api_key: ""                 # 留空则自动发现（不需要手填，见下文「官方用量」）
+      plan_config_path: "/CLIProxyAPI/config.yaml"   # 容器内 CPA config.yaml 路径，用于读 Cline 凭据
+      plan_refresh: 5m                 # 套餐与限额刷新间隔
+      plan_daily_enabled: true         # 官方 Token 总量 / 成本 / 余额（最多每小时一次）
+      plan_usage_enabled: true         # 概览的请求数 / 总 Token 数 / 缓存命中率改用官方逐条用量
+      plan_usage_refresh: 5m           # 官方逐条用量的增量拉取间隔（最小 1m）
 ```
 
 改动配置后 CPA 会自动重扫并热加载插件（`reconfigure`）。
@@ -115,6 +124,41 @@ plugins:
 | `capture_cost` / `capture_cache` | `true` | 是否记录成本字段 / 缓存字段 |
 | `store_planning_reasoning` | `false` | `false` 时只记 `planningReasoning` 长度，不记文本 |
 | `timezone` | `Asia/Shanghai` | 页面与时间戳展示时区 |
+| `plan_enabled` | `true` | 开启「Cline 套餐用量」区（套餐名、5 小时/周/月限额、官方 Token 总量）。需要能拿到 Cline API Key |
+| `plan_api_key` | 空 | 显式指定 Cline API Key。留空时按 `plan_config_path` → CPA 凭据接口 → 上游请求头依次自动发现 |
+| `plan_base_url` | `https://api.cline.bot/api/v1` | Cline API 基址 |
+| `plan_config_path` | `/CLIProxyAPI/config.yaml` | 容器内 CPA 配置文件路径。Cline 的 key 通常以 `openai-compatibility[].api-key-entries[].api-key` 存在这里 |
+| `plan_refresh` | `5m` | 套餐与限额刷新间隔（最小 1 分钟） |
+| `plan_daily_enabled` | `true` | 另拉官方 Token 总量 / 成本 / 余额，最多每小时一次 |
+| `plan_usage_enabled` | `true` | 概览的请求数 / 总 Token 数 / 缓存命中率改用官方逐条用量口径（延时与生成速度仍是本机口径） |
+| `plan_usage_refresh` | `5m` | 官方逐条用量的增量拉取间隔（最小 1 分钟） |
+
+## 官方用量（套餐、限额、概览口径）
+
+开启 `plan_enabled` 后，插件用同一个 Cline API Key 调用 Cline 控制台自己用的接口，页面上多出一块「Cline 套餐用量」，并把概览的部分卡片切到官方口径。
+
+| 接口 | 用途 | 备注 |
+|---|---|---|
+| `GET /api/v1/users/me` | 账号 id | |
+| `GET /api/v1/users/me/plan` | 套餐名与月费 | `pricePerSeatCents` |
+| `GET /api/v1/users/me/plan/usage-limits` | 5 小时滚动 / 本周 / 本月已用百分比与重置时间 | 页面顶部三张进度卡 |
+| `GET /api/v1/users/{id}/usages/daily?startDate&endDate` | 逐日逐模型的输入/输出 token 与成本 | 单次范围 **≤ 31 天（含端点，所以是今天-30 ~ 今天）**；金额为**微美元**（÷1e6） |
+| `GET /api/v1/users/{id}/usages?limit&cursor` | 逐条请求：`totalTokens` / `cachedTokens` / `costUsd` / `createdAt` | 每页上限 **200 条**，按时间**倒序**，**不支持按时间过滤** |
+| `GET /api/v1/users/{id}/balance` | 余额 | 微美元 |
+
+**套餐卡片里的数字**：`成本` 是 Cline 按上游 API 单价折算的**参考成本**（ClinePass 是包月，不按这条扣钱），5 小时/周/月限额百分比就是按这个口径算的；`余额` 是账号余额；`官方计费条目` 是逐日逐模型汇总的行数，**不是请求数**——请求数看概览里带「官方」标注的那张卡。
+
+**凭据发现顺序**：`plan_api_key` → CPA 凭据接口（`host.auth.list` / `host.auth.get`，若 CPA 把 Cline 注册成 auth 文件）→ CPA `config.yaml` 里的 `api-keys` / `api-key-entries` → 最近一次上游请求的 `Authorization`。key 只留在内存，不落盘、不打日志、不返回给页面。
+
+**概览两种口径**：
+
+- **官方口径**（请求数 / 总 Token 数 / 缓存命中率）：整个 Cline 账号在该时间窗内的计费记录，包含 Cline IDE 等其他客户端，因此会大于本机 CPA 的记录。**只覆盖近 1 小时 / 近 24 小时**这两个窗口（原因见下）。
+- **本机口径**（平均延时 / 生成速度，以及官方不可用或未覆盖窗口时的全部数值）：只统计经过本 CPA 的 Cline 请求。官方接口没有延时与生成速度字段，这两块永远是本机口径。
+- 页面在「概览」标题下写明当前口径；官方记录覆盖不到窗口起点时，会标出「官方数值偏低」；切到「近 7 天」时整套卡片回到本机口径并说明原因。
+
+**上游调用量与限流**：逐条明细接口不能按时间过滤，窗口内有多少条记录就要翻多少页（实测近 24 小时 3411 条 ≈ 17 页）。因此插件在内存里保留最近 **26 小时**的记录，稳态下每次只翻到已见过的记录为止（通常 1 页）；首次回填或覆盖不足时按 300ms/页 节流，最多 60 页，遇到 429 等错误会指数退避（上限 30 分钟），所以覆盖范围会在几个刷新周期内长满，而不是一次打满。近 7 天要多翻上百页，因此官方口径不覆盖 7 天窗口——长期官方总量看上方「Cline 套餐用量」里的 31 天汇总。
+
+插件重载后需要重新回填；采集状态（条数、覆盖起点、是否截断、失败次数、下次重试时间）见 `/health` 的 `plan_usage`。想完全避免这部分上游调用，可以设 `plan_usage_enabled: false`（概览回到本机口径）或 `plan_enabled: false`（整块官方数据关闭）。
 
 ## 适配你自己的 Cline 条目
 
@@ -163,7 +207,7 @@ curl -s -H "Authorization: Bearer $CPA_MANAGEMENT_KEY" \
 
 ## 页面与接口
 
-页面路径：管理中心的「插件 → Channel Monitor」，对应资源路由
+页面路径：管理中心的「插件 → Cline 渠道监控」，对应资源路由
 
 ```
 /v0/resource/plugins/clinepass-channel-monitor/index.html
@@ -175,9 +219,9 @@ curl -s -H "Authorization: Bearer $CPA_MANAGEMENT_KEY" \
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/v0/management/plugins/clinepass-channel-monitor/stats?window=1h\|24h\|7d` | 聚合：按渠道/模型/来源 |
+| GET | `/v0/management/plugins/clinepass-channel-monitor/stats?window=1h\|24h\|7d` | 聚合：按渠道/模型/来源，附带 `plan`（官方套餐、限额、`windows` 三个时间窗的官方口径） |
 | GET | `/v0/management/plugins/clinepass-channel-monitor/events?window=1h&limit=200&offset=0&channel=&model=&source=&result=` | 明细（分页 + 过滤） |
-| GET | `/v0/management/plugins/clinepass-channel-monitor/health` | 计数器与自诊断样本 |
+| GET | `/v0/management/plugins/clinepass-channel-monitor/health` | 计数器与自诊断样本（含 `plan_usage`：官方明细条数、覆盖起点、是否截断、最近一次错误） |
 | GET | `/v0/management/plugins/clinepass-channel-monitor/export?window=24h` | 当前筛选条件的 CSV |
 
 ## 字段说明

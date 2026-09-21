@@ -69,10 +69,19 @@ func TestIndexPageCarriesNoData(t *testing.T) {
 	}
 	// The detail table shows the recorded columns; the upstream address and the raw
 	// provider key stay out of the list and only appear in the expanded detail panel.
-	for _, needle := range []string{"思考等级", "延时 / TTFT", "生成速度", "缓存", "Token", "输入 / 输出 合计", "输入 / 输出 每请求", "sparkline", "cache-bar"} {
+	for _, needle := range []string{"思考等级", "延时 / TTFT", "生成速度", "缓存", "Token", "总 Token 数", "sparkline", "cache-bar"} {
 		if !strings.Contains(page, needle) {
 			t.Errorf("page is missing the %q column", needle)
 		}
+	}
+	// 概览固定五块：输入/输出 每请求与总成本已移除。
+	for _, needle := range []string{"输入 / 输出 每请求", "输入 / 输出 合计", "总成本"} {
+		if strings.Contains(page, needle) {
+			t.Errorf("page must not keep the %q card", needle)
+		}
+	}
+	if !strings.Contains(page, "grid-template-columns:repeat(5,minmax(0,1fr))") {
+		t.Errorf("the overview must render its five cards on a single row")
 	}
 	if strings.Contains(page, "<th>上游地址</th>") {
 		t.Errorf("the upstream address must not be a table column")

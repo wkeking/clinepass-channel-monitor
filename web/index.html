@@ -16,7 +16,9 @@ h1 span{color:var(--muted);font-weight:400;font-size:12px;margin-left:6px}
 main{padding:22px 24px 44px;max-width:1800px;margin:0 auto}
 section{margin-bottom:26px}
 h2{margin:0 0 12px;font-size:12px;font-weight:600;color:var(--muted);letter-spacing:.6px;text-transform:uppercase}
-.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(232px,1fr));gap:14px}
+/* 概览固定五个数据块，任何宽度下都排在同一行，不做换行 */
+.cards{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:14px}
+@media (max-width:1180px){.cards{gap:10px}.card{padding:13px 14px 12px}.card .k{font-size:12px}.card .v{margin-top:10px;font-size:24px}.card .v small{font-size:12px}.card .s{font-size:11.5px;gap:3px 10px}.card .spark,.card .spark svg{height:28px}}
 .card{position:relative;background:linear-gradient(180deg,color-mix(in srgb,var(--tint,var(--accent)) 7%,var(--card)) 0,var(--card) 58%);border:1px solid var(--line);border-radius:14px;padding:16px 18px 14px;overflow:hidden}
 .card::before{content:"";position:absolute;inset:0 0 auto 0;height:3px;background:var(--tint,var(--accent));opacity:.85}
 .card .top{display:flex;align-items:flex-start;justify-content:space-between;gap:10px}
@@ -116,6 +118,7 @@ td.num,th.num{text-align:right}
 
   <section>
     <h2>概览</h2>
+    <div class="sub" id="overview-note" style="margin:-4px 0 12px"></div>
     <div class="cards" id="cards"></div>
   </section>
 
@@ -227,38 +230,83 @@ function card(opt){
     "</div>";
 }
 
+// 概览的数据口径：请求数 / 总 Token 数 / 缓存命中率优先用 Cline 官方逐条用量
+// （stats.plan.windows[当前时间窗]），官方没有延时与生成速度，这两块始终是本机口径。
+function windowLabel(w){return w==="1h"?"近 1 小时":w==="7d"?"近 7 天":"近 24 小时"}
+
+function officialView(s){
+  const plan=s.plan||{}, usage=plan.usage||{};
+  const win=$("window").value||"24h";
+  return {win:win,usage:usage,fetchedAt:usage.fetched_at||"",off:(plan.windows||{})[win]||null};
+}
+
+function renderOverviewNote(view){
+  const el=$("overview-note");
+  if(!el)return;
+  const bits=[];
+  if(view.off){
+    bits.push("「请求数 / 总 Token 数 / 缓存命中率」为官方口径：Cline 账号（含 Cline IDE 等其他客户端）在"+windowLabel(view.win)+"内的计费记录。");
+    bits.push("「平均延时 / 生成速度」为本机口径：只统计经过本 CPA 的 Cline 请求。");
+    if(view.off.covered===false){
+      bits.push('<span class="plan-warn">官方逐条记录覆盖自 '+esc(fmtTime(view.usage.oldest||""))+'，该窗口更早的部分未统计，官方数值偏低。</span>');
+    }
+    if(view.usage.error)bits.push('<span class="plan-warn">官方用量刷新失败：'+esc(view.usage.error)+"</span>");
+  }else{
+    bits.push("「"+windowLabel(view.win)+"」使用本机口径：只统计经过本 CPA 的 Cline 请求。");
+    if(view.usage.enabled!==true)bits.push("官方用量未启用。");
+    else if(view.win==="7d")bits.push("官方逐条明细不支持按时间过滤，7 天要上百次分页，所以官方口径只覆盖近 1 小时 / 24 小时；长期官方总量见上方「Cline 套餐用量」。");
+    else if(view.usage.error)bits.push('<span class="plan-warn">官方用量不可用：'+esc(view.usage.error)+"</span>");
+    else bits.push("官方用量尚未取到。");
+  }
+  el.innerHTML=bits.join(" ");
+}
+
 function renderCards(s){
-  const tok=s.tokens||{}, cost=s.cost||{}, pc=s.prompt_cache||{}, series=s.series||{};
-  const requests=n(s.requests)||1;
+  const tok=s.tokens||{}, pc=s.prompt_cache||{}, series=s.series||{};
   const cacheRatio=ratio(pc.hit,pc.miss);
-  const perRequestCost=n(cost.total)/requests;
+  const view=officialView(s), off=view.off;
+  const fetched=view.fetchedAt?fmtTime(view.fetchedAt).slice(11,19):"—";
+  const localRequests=int(s.requests);
+  const successRate=fixed(100-n(s.error_rate)*100,2);
   const cards=[
-    card({label:"请求数",icon:"⇄",tint:"#60a5fa",tip:"当前时间窗内落盘的 Cline 请求数",
-      value:int(s.requests),unit:"条",
-      sub:[s.failed?("失败 "+int(s.failed)+"（"+fixed(n(s.error_rate)*100,2)+"%）"):"无失败","成功率 "+fixed(100-n(s.error_rate)*100,2)+"%"],
-      spark:series.requests}),
-    card({label:"平均延时",icon:"◷",tint:"#a78bfa",tip:"平均总延时；副值为平均首 token 延时（TTFT）",
+    off
+      ? card({label:"请求数",icon:"⇄",tint:"#60a5fa",tip:"官方口径：Cline 账号在该时间窗内的计费请求数（含其他客户端）。副行为本机 CPA 记录。",
+          value:int(off.requests),unit:"条",
+          sub:["官方 · 更新于 "+fetched,"本机 "+localRequests+" 条 · 成功率 "+successRate+"%"],
+          spark:off.series&&off.series.requests})
+      : card({label:"请求数",icon:"⇄",tint:"#60a5fa",tip:"当前时间窗内落盘的 Cline 请求数（本机口径）",
+          value:localRequests,unit:"条",
+          sub:[s.failed?("失败 "+int(s.failed)+"（"+fixed(n(s.error_rate)*100,2)+"%）"):"无失败","成功率 "+successRate+"%"],
+          spark:series.requests}),
+    card({label:"平均延时",icon:"◷",tint:"#a78bfa",tip:"本机口径：平均总延时；副值为平均首 token 延时（TTFT）",
       value:fixed(n(s.avg_latency_ms)/1000,2),unit:"s",
       sub:["平均 TTFT "+dur(s.avg_ttft_ms),"样本 "+int(s.ttft_requests)+" 条"],
       spark:series.latency_ms}),
-    card({label:"生成速度",icon:"⚡",tint:"#f59e0b",tip:"平均生成速度 = output_tokens / 生成耗时",
+    card({label:"生成速度",icon:"⚡",tint:"#f59e0b",tip:"本机口径：平均生成速度 = output_tokens / 生成耗时",
       value:fixed(s.tokens_per_second_avg,2),unit:"tok/s",sub:["越高越快"],spark:series.tokens_per_second}),
-    card({label:"输入 / 输出 合计",icon:"Σ",tint:"#38bdf8",tip:"时间窗内输入 token 与输出 token 的总量",
-      value:scaled(tok.input)+" / "+scaled(tok.output),unit:"入/出",
-      sub:["总计 "+scaled(tok.total),"推理 "+scaled(tok.reasoning)],spark:series.tokens}),
-    card({label:"输入 / 输出 每请求",icon:"÷",tint:"#22d3ee",tip:"平均每个请求消耗的输入 token 与输出 token",
-      value:scaled(tok.avg_input)+" / "+scaled(tok.avg_output),unit:"入/出",
-      sub:["输入含缓存命中部分"],spark:series.requests}),
-    card({label:"缓存命中率",icon:"%",tint:"#34d399",tip:"上游网关口径：promptCacheHit/(hit+miss)；CPA 口径见副值",
-      value:fixed(cacheRatio*100,2),unit:"%",
-      sub:["上游口径 hit "+scaled(pc.hit)+" / miss "+scaled(pc.miss),"CPA 口径 "+fixed(n(s.cache_ratio)*100,2)+"%（cached/input）"],
-      spark:series.cache_hits}),
-    card({label:"总成本",icon:"$",tint:"#fbbf24",tip:"上游网关按请求返回的成本求和（美元）",
-      value:"$ "+fixed(cost.total,6),unit:"",
-      sub:["每请求 $"+fixed(perRequestCost,6),cost.unparsed?("未解析 "+int(cost.unparsed)+" 条"):"全部可解析"],
-      spark:series.cost})
+    off
+      ? card({label:"总 Token 数",icon:"Σ",tint:"#38bdf8",tip:"官方口径：Cline 账号在该时间窗内的 token 总量（输入+输出）。副行为本机 CPA 记录。",
+          value:scaled(off.total_tokens),unit:"token",
+          sub:["官方 输入 "+scaled(off.input_tokens)+" / 输出 "+scaled(off.output_tokens),
+            "官方成本 $"+fixed(off.cost_usd,4),
+            "本机 "+scaled(tok.total)+"（入 "+scaled(tok.input)+" / 出 "+scaled(tok.output)+"）"],
+          spark:off.series&&off.series.tokens})
+      : card({label:"总 Token 数",icon:"Σ",tint:"#38bdf8",tip:"时间窗内输入 token 与输出 token 的总量（本机口径）",
+          value:scaled(tok.total),unit:"token",
+          sub:["输入 "+scaled(tok.input)+" / 输出 "+scaled(tok.output),"思考 "+scaled(tok.reasoning)],spark:series.tokens}),
+    off
+      ? card({label:"缓存命中率",icon:"%",tint:"#34d399",tip:"官方口径：cachedTokens / promptTokens。副行为本机 CPA 记录。",
+          value:fixed(n(off.cache_ratio)*100,2),unit:"%",
+          sub:["官方 cached "+scaled(off.cached_tokens)+" / prompt "+scaled(off.input_tokens),
+            "本机 上游口径 "+fixed(cacheRatio*100,2)+"% · CPA 口径 "+fixed(n(s.cache_ratio)*100,2)+"%"],
+          spark:off.series&&off.series.cached})
+      : card({label:"缓存命中率",icon:"%",tint:"#34d399",tip:"上游网关口径：promptCacheHit/(hit+miss)；CPA 口径见副值（本机口径）",
+          value:fixed(cacheRatio*100,2),unit:"%",
+          sub:["上游口径 hit "+scaled(pc.hit)+" / miss "+scaled(pc.miss),"CPA 口径 "+fixed(n(s.cache_ratio)*100,2)+"%（cached/input）"],
+          spark:series.cache_hits})
   ];
   $("cards").innerHTML=cards.join("");
+  renderOverviewNote(view);
 }
 
 let planSnapshot=null;
@@ -289,6 +337,7 @@ function renderPlan(plan){
   if(plan.plan_price)bits.push(esc(plan.plan_price));
   if(plan.account)bits.push("账号 "+esc(plan.account));
   if(plan.fetched_at)bits.push("更新于 "+esc(fmtTime(plan.fetched_at).slice(11,19)));
+  if(plan.tokens_error)bits.push('<span class="plan-warn">官方汇总未取到：'+esc(plan.tokens_error)+"</span>");
   head.innerHTML=bits.join(" · ");
 
   const blocks=(plan.limits||[]).map(function(limit){

@@ -125,6 +125,9 @@ type healthResponse struct {
 	InFlightIdentities   int      `json:"in_flight_identities"`
 	Uptime               string   `json:"uptime"`
 	PlanEnabled          bool     `json:"plan_enabled"`
+	// PlanUsage reports the official per-request collector that backs the overview cards
+	// (retained records, coverage, last error) without exposing any credential.
+	PlanUsage officialUsageState `json:"plan_usage"`
 	// RequestHeaderNames lists the header names seen on the last intercepted request and
 	// the length of its bearer token; it exists to diagnose credential discovery and
 	// never contains a credential value.
@@ -155,6 +158,10 @@ func buildHealthResponse() healthResponse {
 		PlanEnabled:          cfg.PlanEnabled,
 		RequestHeaderNames:   headerNames,
 		RequestBearerLen:     bearerLen,
+	}
+	resp.PlanUsage = officialUsageState{Enabled: cfg.PlanUsageEnabled}
+	if poller := currentPlan(); poller != nil {
+		resp.PlanUsage = poller.usage.state(cfg.PlanUsageEnabled)
 	}
 	if st == nil {
 		return resp

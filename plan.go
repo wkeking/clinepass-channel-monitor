@@ -31,9 +31,11 @@ const (
 	planDefaultBaseURL    = "https://api.cline.bot/api/v1"
 	planDefaultRefresh    = 5 * time.Minute
 	planDefaultDailyEvery = time.Hour
-	planRequestTimeout    = 20 * time.Second
-	planUsageWindowDays   = 31
-	microUSD              = 1_000_000.0
+	// planDefaultUsageRefresh is how often the official per-request records are paged.
+	planDefaultUsageRefresh = 5 * time.Minute
+	planRequestTimeout      = 20 * time.Second
+	planUsageWindowDays     = 31
+	microUSD                = 1_000_000.0
 )
 
 // quotaWindow is one rolling limit reported by the usage-limits endpoint.
@@ -66,8 +68,15 @@ type planQuota struct {
 	PlanPrice string        `json:"plan_price,omitempty"`
 	Limits    []quotaWindow `json:"limits"`
 	Tokens    quotaTokens   `json:"tokens"`
-	FetchedAt string        `json:"fetched_at,omitempty"`
-	Error     string        `json:"error,omitempty"`
+	// TokensError explains why the official token totals are missing instead of leaving the
+	// page to show zeros.
+	TokensError string `json:"tokens_error,omitempty"`
+	// Windows carries the official per-request aggregates for the page windows (1h/24h/7d).
+	Windows map[string]officialUsageWindow `json:"windows,omitempty"`
+	// Usage describes the official record collector behind Windows.
+	Usage     officialUsageState `json:"usage"`
+	FetchedAt string             `json:"fetched_at,omitempty"`
+	Error     string             `json:"error,omitempty"`
 }
 
 // planClient performs the upstream calls. It never logs the API key.
@@ -138,10 +147,12 @@ func (c *planClient) get(path string, out any) error {
 func (c *planClient) me() (struct {
 	ID          string `json:"id"`
 	DisplayName string `json:"displayName"`
+	CreatedAt   string `json:"createdAt"`
 }, error) {
 	var out struct {
 		ID          string `json:"id"`
 		DisplayName string `json:"displayName"`
+		CreatedAt   string `json:"createdAt"`
 	}
 	errGet := c.get("/users/me", &out)
 	return out, errGet
@@ -243,10 +254,19 @@ type planPoller struct {
 	stopped   chan struct{}
 	once      sync.Once
 	lastDaily time.Time
+	// usage holds the official per-request records behind the overview cards.
+	usage *officialUsageCollector
+	// userID is the account id of the last successful /users/me call. Only the poller
+	// goroutine touches it; it keeps the official records refreshable while /users/me is
+	// temporarily unavailable.
+	userID string
+	// accountCreated marks the account's birthday, which tells "the account had no usage
+	// in this window" apart from "the retained records do not reach back that far".
+	accountCreated time.Time
 }
 
 func newPlanPoller() *planPoller {
-	return &planPoller{stopped: make(chan struct{})}
+	return &planPoller{stopped: make(chan struct{}), usage: newOfficialUsageCollector()}
 }
 
 func (p *planPoller) snapshot() planQuota {
@@ -271,31 +291,56 @@ func (p *planPoller) stop() {
 	p.once.Do(func() { close(p.stopped) })
 }
 
+// storeQuota attaches the official per-request view and publishes the snapshot.
+func (p *planPoller) storeQuota(quota planQuota) {
+	cfg := currentConfig()
+	if cfg.PlanUsageEnabled {
+		now := time.Now()
+		quota.Windows = p.usage.aggregate(now, p.accountCreated)
+		quota.Usage = p.usage.state(true)
+	}
+	p.store(quota)
+}
+
 // refresh performs one round of upstream calls. Errors are reported in the snapshot so
 // the page can show why the quota is unavailable instead of silently showing zeros.
 func (p *planPoller) refresh(apiKey string) {
 	cfg := currentConfig()
 	client := newPlanClient(cfg.PlanBaseURL, apiKey)
+	now := time.Now()
 	quota := planQuota{Available: false, Source: "cline-api"}
 
 	user, errMe := client.me()
 	if errMe != nil {
-		quota.Error = errMe.Error()
-		quota.FetchedAt = time.Now().Format(time.RFC3339)
-		p.store(quota)
-		return
-	}
-	if len(user.ID) > 12 {
-		quota.Account = user.ID[:8] + "…" + user.ID[len(user.ID)-4:]
+		if p.userID == "" {
+			quota.Error = errMe.Error()
+			quota.FetchedAt = time.Now().Format(time.RFC3339)
+			p.storeQuota(quota)
+			return
+		}
 	} else {
-		quota.Account = user.ID
+		p.userID = user.ID
+		if createdAt, errParse := time.Parse(time.RFC3339Nano, user.CreatedAt); errParse == nil {
+			p.accountCreated = createdAt.UTC()
+		}
+		if len(user.ID) > 12 {
+			quota.Account = user.ID[:8] + "…" + user.ID[len(user.ID)-4:]
+		} else {
+			quota.Account = user.ID
+		}
+	}
+
+	// The official per-request records back the overview cards; they are paged at most
+	// once per plan_usage_refresh.
+	if cfg.PlanUsageEnabled {
+		p.usage.refreshIfDue(client, p.userID, cfg.PlanUsageRefresh.Or(planDefaultUsageRefresh), now)
 	}
 
 	limits, errLimits := client.usageLimits()
 	if errLimits != nil {
 		quota.Error = errLimits.Error()
 		quota.FetchedAt = time.Now().Format(time.RFC3339)
-		p.store(quota)
+		p.storeQuota(quota)
 		return
 	}
 	if plan, errPlan := client.plan(); errPlan == nil {
@@ -307,13 +352,14 @@ func (p *planPoller) refresh(apiKey string) {
 	quota.Limits = limits
 	quota.Available = true
 
-	// The daily endpoint rejects ranges above 31 days, so the totals cover the last
-	// 31 days. It is refreshed at most once per hour to stay polite with the upstream.
+	// The daily endpoint rejects ranges above 31 days (inclusive), so the window is
+	// today-30 .. today. It is refreshed at most once per hour to stay polite.
 	if cfg.PlanDailyEnabled && (p.lastDaily.IsZero() || time.Since(p.lastDaily) > planDefaultDailyEvery) {
-		now := time.Now().UTC()
-		from := now.AddDate(0, 0, -planUsageWindowDays).Format("2006-01-02")
-		to := now.Format("2006-01-02")
-		if items, errDaily := client.dailyUsage(user.ID, from, to); errDaily == nil {
+		utcNow := time.Now().UTC()
+		from := utcNow.AddDate(0, 0, -(planUsageWindowDays - 1)).Format("2006-01-02")
+		to := utcNow.Format("2006-01-02")
+		items, errDaily := client.dailyUsage(p.userID, from, to)
+		if errDaily == nil {
 			totals := quotaTokens{FromDate: from, ToDate: to}
 			for _, item := range items {
 				totals.InputTokens += item.PromptTokens
@@ -322,16 +368,20 @@ func (p *planPoller) refresh(apiKey string) {
 				totals.Requests++
 			}
 			totals.TotalTokens = totals.InputTokens + totals.OutputTokens
-			if balance, errBalance := client.balance(user.ID); errBalance == nil {
+			if balance, errBalance := client.balance(p.userID); errBalance == nil {
 				totals.BalanceUSD = balance
 			}
 			quota.Tokens = totals
+			quota.TokensError = ""
 			p.lastDaily = time.Now()
+		} else {
+			// 取不到时不要假装是 0：把原因交给页面显示。
+			quota.TokensError = errDaily.Error()
 		}
 	}
 	quota.FetchedAt = time.Now().Format(time.RFC3339)
 	quota.Error = ""
-	p.store(quota)
+	p.storeQuota(quota)
 }
 
 // latestUpstreamBearer remembers the bearer token that CPA sent upstream for the most
@@ -424,7 +474,7 @@ func startPlanPoller(apiKey string) *planPoller {
 				key = resolvePlanAPIKey()
 			}
 			if strings.TrimSpace(key) == "" {
-				poller.store(planQuota{Source: "cline-api", Error: "no Cline api key available yet"})
+				poller.storeQuota(planQuota{Source: "cline-api", Error: "no Cline api key available yet"})
 			} else {
 				poller.refresh(key)
 			}
@@ -523,9 +573,9 @@ func discoverClineAPIKey(cfg config) string {
 // openai-compatibility entry whose base URL is a Cline host.
 func clineAPIKeyFromConfigFile(cfg config) string {
 	attempts := make([]string, 0, len(planConfigPaths))
-	paths := planConfigPathOverride()
-	if len(paths) == 0 {
-		paths = planConfigPaths
+	paths := planConfigPaths
+	if override := strings.TrimSpace(cfg.PlanConfigPath); override != "" {
+		paths = []string{override}
 	}
 	for _, path := range paths {
 		raw, errRead := os.ReadFile(path)
@@ -564,12 +614,26 @@ func clineAPIKeyFromConfigFile(cfg config) string {
 			if !matches && !strings.EqualFold(strings.TrimSpace(entry.Name), "cline") {
 				continue
 			}
-			attempts[len(attempts)-1] += " keys[" + entry.Name + "]=" + strconv.Itoa(len(entry.APIKeys))
+			attempts[len(attempts)-1] += " keys[" + entry.Name + "]=" + strconv.Itoa(len(entry.APIKeys)) +
+				" entries=" + strconv.Itoa(len(entry.APIKeyEntries))
 			for _, key := range entry.APIKeys {
 				if trimmed := strings.TrimSpace(key); trimmed != "" {
 					hostLogAsync("info", pluginID+": using the Cline credential from CPA's configuration file", map[string]string{
 						"source": "config-file",
 						"host":   host,
+						"field":  "api-keys",
+					})
+					return trimmed
+				}
+			}
+			// CPA injects the credentials it is configured with through the management API
+			// into api-key-entries, so this is the field that usually carries the key.
+			for _, keyEntry := range entry.APIKeyEntries {
+				if trimmed := strings.TrimSpace(keyEntry.APIKey); trimmed != "" {
+					hostLogAsync("info", pluginID+": using the Cline credential from CPA's configuration file", map[string]string{
+						"source": "config-file",
+						"host":   host,
+						"field":  "api-key-entries",
 					})
 					return trimmed
 				}
@@ -587,15 +651,6 @@ func clineAPIKeyFromConfigFile(cfg config) string {
 var planConfigPaths = []string{
 	"/CLIProxyAPI/config.yaml",
 	"/app/config.yaml",
-}
-
-// planConfigPathOverride is set from the plugin configuration so a deployment can point
-// at wherever CPA keeps its configuration file inside the container.
-func planConfigPathOverride() []string {
-	if path := strings.TrimSpace(currentConfig().PlanConfigPath); path != "" {
-		return []string{path}
-	}
-	return nil
 }
 
 // apiKeyFromAuthJSON pulls the upstream key out of a credential document.
@@ -636,8 +691,3 @@ func entryMatchesCline(entry hostAuthFileEntry, cfg config) bool {
 	}
 	return strings.Contains(haystack, "cline")
 }
-
-// entryMatchesCline decides whether an auth entry belongs to Cline. The base URL host is
-// the deciding factor; the provider/name is only a fallback hint.
-
-// planPoller keeps one cached snapshot of the upstream subscription state.

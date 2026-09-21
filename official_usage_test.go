@@ -355,3 +355,45 @@ func TestOfficialUsagePrunesRetentionWindow(t *testing.T) {
 		t.Errorf("清理后的 24h 窗口 = %+v，期望 requests=1", window)
 	}
 }
+
+// TestOfficialDailyWindowGroupsByNaturalDay checks the 7-day window built from the daily
+// totals: rows are bucketed by UTC day, rows outside the window are ignored, and the
+// window reports Detail=false because the daily totals carry no request or cache data.
+func TestOfficialDailyWindowGroupsByNaturalDay(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	day := func(offset int) string { return now.AddDate(0, 0, offset).Format("2006-01-02") }
+	rows := []dailyUsageItem{
+		{Date: day(0), CostUnits: 1_000_000, PromptTokens: 1000, CompletionTokens: 100},
+		{Date: day(-1), CostUnits: 500_000, PromptTokens: 2000, CompletionTokens: 200},
+		{Date: day(-6), CostUnits: 250_000, PromptTokens: 400, CompletionTokens: 40},
+		// 窗口之外：7 天窗口是今天-6 ~ 今天
+		{Date: day(-7), CostUnits: 99_000_000, PromptTokens: 999_999, CompletionTokens: 9},
+		{Date: "bad-date", CostUnits: 1, PromptTokens: 1},
+	}
+	window := officialDailyWindow(rows, now, now.AddDate(0, 0, -30))
+
+	if window.Detail {
+		t.Errorf("按日汇总窗口的 detail 应为 false")
+	}
+	if window.Window != "7d" || len(window.Series.Tokens) != 7 {
+		t.Fatalf("7d 窗口结构不对: %+v", window)
+	}
+	if window.TotalTokens != 3740 || window.InputTokens != 3400 || window.OutputTokens != 340 {
+		t.Errorf("7d 汇总 = %+v，期望 input=3400 output=340 total=3740（不含窗口外与非法日期）", window)
+	}
+	if math.Abs(window.CostUSD-1.75) > 1e-9 {
+		t.Errorf("7d 成本 = %v，期望 1.75 USD（微美元换算）", window.CostUSD)
+	}
+	if !window.Covered {
+		t.Errorf("账号创建于窗口之前，covered 应为 true")
+	}
+	if today := window.Series.Tokens[6]; today != 1100 {
+		t.Errorf("今天所在桶 = %d，期望 1100", today)
+	}
+	if yesterday := window.Series.Tokens[5]; yesterday != 2200 {
+		t.Errorf("昨天所在桶 = %d，期望 2200", yesterday)
+	}
+	if older := officialDailyWindow(rows, now, time.Time{}); older.Covered {
+		t.Errorf("不知道账号创建时间时不应声称已覆盖")
+	}
+}

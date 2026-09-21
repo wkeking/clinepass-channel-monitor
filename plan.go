@@ -256,6 +256,9 @@ type planPoller struct {
 	lastDaily time.Time
 	// usage holds the official per-request records behind the overview cards.
 	usage *officialUsageCollector
+	// dailyWindow is the 7-day window built from the daily totals, kept until the next
+	// daily refresh (at most once per hour).
+	dailyWindow *officialUsageWindow
 	// userID is the account id of the last successful /users/me call. Only the poller
 	// goroutine touches it; it keeps the official records refreshable while /users/me is
 	// temporarily unavailable.
@@ -297,6 +300,9 @@ func (p *planPoller) storeQuota(quota planQuota) {
 	if cfg.PlanUsageEnabled {
 		now := time.Now()
 		quota.Windows = p.usage.aggregate(now, p.accountCreated)
+		if p.dailyWindow != nil {
+			quota.Windows["7d"] = *p.dailyWindow
+		}
 		quota.Usage = p.usage.state(true)
 	}
 	p.store(quota)
@@ -373,6 +379,8 @@ func (p *planPoller) refresh(apiKey string) {
 			}
 			quota.Tokens = totals
 			quota.TokensError = ""
+			window7 := officialDailyWindow(items, time.Now(), p.accountCreated)
+			p.dailyWindow = &window7
 			p.lastDaily = time.Now()
 		} else {
 			// 取不到时不要假装是 0：把原因交给页面显示。

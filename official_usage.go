@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/url"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -90,6 +91,9 @@ type officialUsageWindow struct {
 	// Covered is false when the retained records do not reach back to the start of the
 	// window, which makes the numbers below a lower bound rather than a total.
 	Covered bool `json:"covered"`
+	// Detail is false for a window built from the daily totals: those carry tokens and cost
+	// only, so requests and cache stay on the local view.
+	Detail bool `json:"detail"`
 }
 
 // officialUsageState describes the collector itself, so the page and /health can explain
@@ -398,6 +402,7 @@ func (c *officialUsageCollector) aggregate(now time.Time, accountCreated time.Ti
 			From:    from.UTC().Format(time.RFC3339),
 			To:      now.UTC().Format(time.RFC3339),
 			Covered: true,
+			Detail:  true,
 			Series: officialUsageSeries{
 				Requests: make([]int64, spec.Buckets),
 				Tokens:   make([]int64, spec.Buckets),
@@ -468,4 +473,46 @@ func (c *officialUsageCollector) state(enabled bool) officialUsageState {
 		out.RetryAt = c.retryAt.UTC().Format(time.RFC3339)
 	}
 	return out
+}
+
+// officialDailyWindow builds the 7-day window from the daily totals. The per-request
+// endpoint ignores date filters, so covering 7 days there would need hundreds of pages;
+// the daily rows are one request for the whole range. They carry tokens and cost only,
+// which is why this window reports Detail=false and the page keeps requests and cache on
+// the local view. Days are natural UTC days, so the range is today-6 .. today.
+func officialDailyWindow(rows []dailyUsageItem, now time.Time, accountCreated time.Time) officialUsageWindow {
+	const days = 7
+	utcNow := now.UTC()
+	from := time.Date(utcNow.Year(), utcNow.Month(), utcNow.Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, -(days - 1))
+	window := officialUsageWindow{
+		Window: "7d",
+		From:   from.Format("2006-01-02"),
+		To:     utcNow.Format("2006-01-02"),
+		// The daily endpoint returns every day it has rows for, so the window is complete as
+		// long as the account is known (an account younger than the window simply has no
+		// older usage).
+		Covered: !accountCreated.IsZero(),
+		Detail:  false,
+		Series: officialUsageSeries{
+			Requests: make([]int64, days),
+			Tokens:   make([]int64, days),
+			Cached:   make([]int64, days),
+		},
+	}
+	for _, row := range rows {
+		date, errParse := time.Parse("2006-01-02", strings.TrimSpace(row.Date))
+		if errParse != nil {
+			continue
+		}
+		index := int(date.UTC().Sub(from).Hours() / 24)
+		if index < 0 || index >= days {
+			continue
+		}
+		window.InputTokens += row.PromptTokens
+		window.OutputTokens += row.CompletionTokens
+		window.TotalTokens += row.PromptTokens + row.CompletionTokens
+		window.CostUSD += float64(row.CostUnits) / microUSD
+		window.Series.Tokens[index] += row.PromptTokens + row.CompletionTokens
+	}
+	return window
 }

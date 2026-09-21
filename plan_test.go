@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -47,7 +48,11 @@ func fakeClineAPI(t *testing.T, now time.Time) *httptest.Server {
 		}
 		switch {
 		case r.URL.Path == "/users/me":
-			write(map[string]any{"id": "usr-test-0001", "displayName": "Test"})
+			write(map[string]any{
+				"id":          "usr-test-0001",
+				"displayName": "Test",
+				"createdAt":   now.AddDate(0, 0, -30).Format(time.RFC3339Nano),
+			})
 		case r.URL.Path == "/users/me/plan":
 			write(map[string]any{"plan": map[string]any{"displayName": "Cline Pass (Monthly)", "pricePerSeatCents": 999}})
 		case r.URL.Path == "/users/me/plan/usage-limits":
@@ -77,6 +82,7 @@ func fakeClineAPI(t *testing.T, now time.Time) *httptest.Server {
 			}
 			write(map[string]any{"items": []map[string]any{
 				{"date": to.Format("2006-01-02"), "operation": "chat_completion", "costUsd": 1_000_000, "promptTokens": 1000, "completionTokens": 100},
+				{"date": to.AddDate(0, 0, -3).Format("2006-01-02"), "operation": "chat_completion", "costUsd": 500_000, "promptTokens": 2000, "completionTokens": 200},
 			}})
 		case r.URL.Path == "/users/usr-test-0001/balance":
 			write(map[string]any{"balance": 499865})
@@ -117,14 +123,14 @@ func TestPlanPollerRefreshServesOfficialWindows(t *testing.T) {
 		t.Errorf("套餐 = %q %q", quota.PlanName, quota.PlanPrice)
 	}
 	totals := quota.Tokens
-	if totals.TotalTokens != 1100 || totals.InputTokens != 1000 || totals.OutputTokens != 100 {
-		t.Errorf("官方总量 = %+v", totals)
+	if totals.TotalTokens != 3300 || totals.InputTokens != 3000 || totals.OutputTokens != 300 {
+		t.Errorf("官方总量 = %+v，期望 input=3000 output=300", totals)
 	}
-	if totals.Requests != 1 {
-		t.Errorf("官方计费条目 = %d，期望 1", totals.Requests)
+	if totals.Requests != 2 {
+		t.Errorf("官方计费条目 = %d，期望 2（按日逐模型的行数）", totals.Requests)
 	}
-	if totals.CostUSD != 1.0 {
-		t.Errorf("官方成本 = %v，期望 1.0 USD（微美元换算）", totals.CostUSD)
+	if math.Abs(totals.CostUSD-1.5) > 1e-9 {
+		t.Errorf("官方成本 = %v，期望 1.5 USD（微美元换算）", totals.CostUSD)
 	}
 	if totals.BalanceUSD != 0.499865 {
 		t.Errorf("余额 = %v，期望 0.499865", totals.BalanceUSD)
@@ -144,6 +150,23 @@ func TestPlanPollerRefreshServesOfficialWindows(t *testing.T) {
 	}
 	if hour := quota.Windows["1h"]; hour.Requests != 1 {
 		t.Errorf("1h 官方窗口 = %+v，期望只有 10 分钟前的那条", hour)
+	}
+	// 7 天窗口来自官方按自然日汇总：只有 token 与成本，明细字段留给本机口径。
+	week, ok := quota.Windows["7d"]
+	if !ok {
+		t.Fatalf("缺少 7d 官方窗口: %+v", quota.Windows)
+	}
+	if week.Detail {
+		t.Errorf("7d 窗口来自按日汇总，detail 应为 false: %+v", week)
+	}
+	if week.TotalTokens != 3300 || math.Abs(week.CostUSD-1.5) > 1e-9 {
+		t.Errorf("7d 官方窗口 = %+v，期望 tokens=3300 cost=1.5", week)
+	}
+	if !week.Covered {
+		t.Errorf("账号创建于 30 天前，7d 窗口应标记 covered: %+v", week)
+	}
+	if len(week.Series.Tokens) != 7 {
+		t.Errorf("7d 折线桶数 = %d，期望 7（按自然日）", len(week.Series.Tokens))
 	}
 }
 

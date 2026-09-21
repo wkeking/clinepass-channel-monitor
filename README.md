@@ -1,0 +1,295 @@
+# clinepass-channel-monitor
+
+CLIProxyAPI (CPA) 插件：逐请求记录 **Cline 订阅实际服务的上游渠道**，并把用量、成本、缓存命中一起落到本地 JSONL + 内存环形缓冲，在 CPA 管理中心提供一个自带页面查看。
+
+## 它解决什么问题
+
+Cline 的请求打到网关后，由 **Cline 自己**决定这次请求最终落到哪个后端渠道（`deepseek`、`alibaba`……）。这个决策不能靠客户端参数钉住（`payload.params.providerOptions.gateway.only` 已失效），但响应体里仍然带着网关给的渠道元数据。
+
+问题在于：`/v1/responses` 这类端点在 CPA 内部会把上游 openai 协议**翻译**成客户端协议，翻译过程中 `provider_metadata` 被丢弃，普通的响应拦截钩子（`response.intercept_*`）拿到的是翻译后的 body，什么都看不到。
+
+本插件使用 CPA 的 **`response.normalize_before`**（能力 `response_before_translator`）钩子，运行在「翻译之前」，因此对 `/v1/chat/completions`、`/v1/responses` 等端点都能拿到原始的 `provider_metadata.gateway.routing.finalProvider`，再用 `usage.handle` 钩子拿到用量记录，两者关联成一行落盘。
+
+## 能力一览
+
+- 逐请求记录最终渠道：`final_provider` / `resolved_provider` / `canonical_slug` / 尝试次数 / 兜底候选数量；
+- 记录上游给出的实际成本：`gateway.cost` / `inputInferenceCost` / `outputInferenceCost` / `generationId`；
+- 记录 token 与缓存：`input/output/reasoning/total_tokens`、`cached_tokens`、`prompt_cache_hit_tokens` / `prompt_cache_miss_tokens`、`systemFingerprint`；
+- 按天切分 JSONL 落盘（默认开启）+ 内存环形缓冲供页面即时查询；
+- 管理中心页面：聚合卡片（请求数/失败数/渠道分布/延时/TTFT/缓存命中率/总成本）+ 可过滤分页明细表 + CSV 导出；
+- 自诊断：`health` 暴露命中/未命中/解析失败/未关联/orphan/写盘错误等计数器，以及「带渠道证据但 host 不匹配」的样本，避免静默失效；
+- **fail-open**：观测钩子永远返回空 body（宿主视为「不修改」），任何解析或写盘异常都不改变响应字节、状态码与时序。
+
+## 环境要求
+
+| 项 | 要求 |
+|---|---|
+| CPA | **≥ v7.3.8**，且构建带插件支持（响应头 `X-Cpa-Support-Plugin: 1`）。官方带 CGO 的 Linux 构建才有插件支持 |
+| 插件 ABI | `abi_version = 1` |
+| 插件 schema | `schema_version = 6` |
+| 平台 | `linux/amd64`、`linux/arm64` |
+| 上游 | 需要上游（Cline 网关）在响应里返回 `provider_metadata`，否则本插件只会记录用量、渠道列留空 |
+
+> 版本兼容声明：本插件按 CPA v7.3.8 的 SDK 契约开发，已在 v7.3.10 上核对 `sdk/pluginapi`、`sdk/pluginabi`、`sdk/translator` 与插件宿主适配层均无差异。CPA 大版本升级后请回到本文「排障」一节按表自查。
+
+## 安装
+
+### 方式 A：手动放置 `.so`
+
+1. 从 [Releases](https://github.com/wkeking/clinepass-channel-monitor/releases) 下载对应架构的压缩包（`linux_amd64` / `linux_arm64`），解压得到 `clinepass-channel-monitor.so`；
+2. 放进 CPA 的插件目录：`<plugins.dir>/<goos>/<goarch>/clinepass-channel-monitor.so`
+   （`plugins.dir` 由 CPA 配置里的 `plugins.dir` 决定，默认 `plugins`，相对 CPA 工作目录；也支持直接放 `<plugins.dir>/clinepass-channel-monitor.so`）；
+3. 在 CPA 配置里加上配置块（见下节），或改一次配置文件触发重扫。**换 `.so` 不需要重启容器**：CPA 在配置变更时会重新扫描插件目录并热加载。
+4. 用管理接口确认加载成功：
+
+   ```bash
+   curl -s -H "Authorization: Bearer $CPA_MANAGEMENT_KEY" \
+     http://127.0.0.1:8317/v0/management/plugins
+   ```
+
+   看到本插件 `"registered": true` 即为加载成功。
+
+### 方式 B：插件商店
+
+如果 CPA 配置了插件商店源（`plugins.store-sources`），把本仓库的 `registry.json` 地址加进去，即可在管理中心「插件商店」里一键安装，或直接调用：
+
+```bash
+curl -s -X POST -H "Authorization: Bearer $CPA_MANAGEMENT_KEY" \
+  http://127.0.0.1:8317/v0/management/plugin-store/clinepass-channel-monitor/install
+```
+
+> ⚠️ 商店安装的 `.so` 落在容器内插件目录，**容器重建会丢失**。想持久化，请给插件目录挂一个宿主卷（bind mount），或重建后重装一次。方式 A 放在挂载卷里则不受重建影响。
+
+## 配置
+
+配置写在 CPA 配置文件的 `plugins.configs.clinepass-channel-monitor` 下：
+
+```yaml
+plugins:
+  enabled: true
+  dir: "plugins"
+  configs:
+    clinepass-channel-monitor:
+      enabled: true
+      priority: 1
+      # ---- 判定规则 ----
+      hosts: ["api.cline.bot"]        # 主判据：usage 记录 BaseURL 的 host（支持 ".cline.bot" 后缀写法）
+      require_routing_marker: true     # 强制：响应里必须真的出现过 provider_metadata.gateway.routing
+      unmatched_host_samples: 20       # 「带渠道证据但 host 未命中」的样本保留条数
+      # ---- 存储 ----
+      ring_size: 5000                  # 内存环形缓冲条数（页面即时查询用）
+      jsonl_enabled: true              # 默认开启 JSONL 落盘
+      jsonl_dir: "/var/log/clinepass-channel-monitor"   # 按你的部署改成可写目录
+      retention_days: 30               # 过期 JSONL 自动删除
+      # ---- 关联 ----
+      join_window: 5s                  # 渠道记录与用量记录的关联时间窗
+      orphan_ttl: 60s                  # 渠道记录未被消费的判定时长
+      # ---- 展示与隐私 ----
+      mask_api_key: false              # true 时下游 key 只留前后 4 位
+      log_events: false                # true 时每条落盘行额外打一行 CPA 日志
+      capture_cost: true
+      capture_cache: true
+      store_planning_reasoning: false  # 默认只存 planningReasoning 的长度，不存文本
+      timezone: "Asia/Shanghai"        # 页面展示时区
+```
+
+改动配置后 CPA 会自动重扫并热加载插件（`reconfigure`）。
+
+### 配置项说明
+
+| 键 | 默认值 | 说明 |
+|---|---|---|
+| `enabled` | `true` | 关闭后不再注册任何路由、不再写盘、不再计数 |
+| `priority` | `1` | 插件优先级 |
+| `hosts` | `["api.cline.bot"]` | 判定用 host 列表。匹配规则：用 `net/url` 解析 `UsageRecord.BaseURL` 取 host 后**小写精确比较**；以 `.` 开头的项按**域名后缀**匹配（`".cline.bot"` 命中 `api.cline.bot`，不命中 `evil-cline.bot`）。显式留空 `[]` → 退化为只看渠道证据（marker-only） |
+| `require_routing_marker` | `true` | 要求该请求的响应里真的出现过 `provider_metadata.gateway.routing`。建议保持开启 |
+| `unmatched_host_samples` | `20` | `health` 里保留的「带渠道证据但 host 未命中」样本条数 |
+| `ring_size` | `5000` | 内存环形缓冲条数，决定页面能查的最近数据量（JSONL 里保留全量） |
+| `jsonl_enabled` | `true` | 是否落盘 |
+| `jsonl_dir` | 见配置块 | JSONL 目录。需是 CPA 进程可写目录；默认值按常见部署给出，**请按自己的部署环境确认可写** |
+| `retention_days` | `30` | 超过天数的 `channel-monitor-YYYY-MM-DD.jsonl` 会被删除 |
+| `join_window` | `5s` | 渠道记录与用量记录的关联时间窗 |
+| `orphan_ttl` | `60s` | 渠道记录在该时长内未被任何用量记录消费 → 计入 `orphan_channel`（不落盘） |
+| `mask_api_key` | `false` | 掩码下游 key |
+| `log_events` | `false` | 额外把落盘行写进 CPA 日志 |
+| `capture_cost` / `capture_cache` | `true` | 是否记录成本字段 / 缓存字段 |
+| `store_planning_reasoning` | `false` | `false` 时只记 `planningReasoning` 长度，不记文本 |
+| `timezone` | `Asia/Shanghai` | 页面与时间戳展示时区 |
+
+## 适配你自己的 Cline 条目
+
+插件**不依赖**你在 CPA 里给上游条目起的名字（`openai-compatibility[].name` 派生的内部 provider key 只作为诊断字段落盘，不参与任何判定），因此改名、换模型别名都不影响记录。
+
+判定只看两件事：**① usage 记录的 base_url host 在 `hosts` 里** 且 **② 该请求响应里出现过渠道证据**。
+
+### 形态 1：直连 `api.cline.bot`
+
+默认配置即可，无需改动：
+
+```yaml
+hosts: ["api.cline.bot"]
+require_routing_marker: true
+```
+
+### 形态 2：自建反代 / 中转 / 自建 PaaS（host 不是 `api.cline.bot`）
+
+两种做法，任选其一：
+
+- 把自己的域名加进列表（推荐，保留 host 判据）：
+
+  ```yaml
+  hosts: ["api.cline.bot", "cline-proxy.example.com", ".example.com"]
+  ```
+
+  `".example.com"` 这种写法会命中该域名下的所有子域。
+- 或者直接退化为「只看渠道证据」：`hosts: []`。此时只要响应里带渠道元数据就记录，`health` 会显示 `mode: "marker-only"`。适合无法确定 host 或中转层会改写 base_url 的场景。
+
+### 形态 3：条目名不是 `Cline`（例如叫 `ClinePass`、`CP`）
+
+**不需要任何改动**。判定与条目名无关；落盘里的 `provider` 字段只是用来排障时对账「这条走的是哪个配置条目」。
+
+### 怎么确认自己配对了
+
+先发一发真实的 Cline 请求，然后看 `health`：
+
+```bash
+curl -s -H "Authorization: Bearer $CPA_MANAGEMENT_KEY" \
+  http://127.0.0.1:8317/v0/management/plugins/clinepass-channel-monitor/health
+```
+
+- `skipped_unmatched_host > 0` 且 `unmatched_host_samples` 非空 → 说明请求**确实走了 Cline 网关**（有渠道证据），只是 host 不在 `hosts` 里。样本里直接给出 `host`/`provider`/`model`/时间，把那串 host 加进 `hosts`（或清空 `hosts`）即可；
+- `marker_missing > 0` → host 命中但响应里没有渠道证据：可能是该请求没走 Cline 网关，也可能是上游改了字段名（见「排障」）；
+- 两者都是 `0` 且 `recorded > 0` → 正常工作中。
+
+## 页面与接口
+
+页面路径：管理中心的「插件 → Channel Monitor」，对应资源路由
+
+```
+/v0/resource/plugins/clinepass-channel-monitor/index.html
+```
+
+该资源路由**不含任何数据**，只返回静态页面壳。页面里有一个「管理密钥」输入框，密钥存在浏览器 `localStorage`，由前端带着 `Authorization` 头去调下面的管理接口渲染数据。页面为单文件静态 HTML，**不引用任何 CDN 或外网资源**，内网环境可用。
+
+数据接口（都需要 `Authorization: Bearer <management-key>`，未带密钥返回 401/403）：
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/v0/management/plugins/clinepass-channel-monitor/stats?window=1h\|24h\|7d` | 聚合：按渠道/模型/来源 |
+| GET | `/v0/management/plugins/clinepass-channel-monitor/events?window=1h&limit=200&offset=0&channel=&model=&source=&result=` | 明细（分页 + 过滤） |
+| GET | `/v0/management/plugins/clinepass-channel-monitor/health` | 计数器与自诊断样本 |
+| GET | `/v0/management/plugins/clinepass-channel-monitor/export?window=24h` | 当前筛选条件的 CSV |
+
+## 字段说明
+
+JSONL 每行一个 JSON 对象，按天切分：`<jsonl_dir>/channel-monitor-YYYY-MM-DD.jsonl`（文件权限 0644，追加写，行尾 `\n`）。
+
+页面列：
+
+| 页面列 | 字段 | 来源 | 说明 |
+|---|---|---|---|
+| 时间 | `timestamp` | usage 记录 `RequestedAt` | 按 `timezone` 展示 |
+| 来源 | `api_key` | usage 记录 `APIKey` | 下游 key，可掩码 |
+| 模型 | `model_alias` / `model` | usage 记录 | 别名与实际模型都记 |
+| 上游地址 | `base_url` | usage 记录 `BaseURL` | 判定用 host 的来源，也方便自查 |
+| 推理强度 | `reasoning_effort` | usage 记录 | |
+| 结果 | `failed` / `status_code` / `error` | usage 记录 | 失败请求没有渠道，`channel_missing=true` 属正常 |
+| 延时 | `latency_ms` | usage 记录 `Latency` | |
+| 生成速度 | `tokens_per_second` / `tokens_per_second_after_ttft` | 计算 | 后者用 `output_tokens / ((latency - ttft)/1000)` |
+| TTFT | `ttft_ms` | usage 记录 `TTFT` | |
+| token | `input_tokens` / `output_tokens` / `reasoning_tokens` / `total_tokens` | usage 记录 `Detail` | |
+| 缓存 | `cached_tokens` / `cache_read_tokens` / `cache_creation_tokens` | usage 记录 `Detail` | CPA 侧统计 |
+| 缓存（渠道） | `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens` / `system_fingerprint` | 渠道元数据 | 上游侧统计，与上一组来源不同 |
+| 渠道 | `final_provider` / `resolved_provider` / `canonical_slug` / `original_model_id` | 渠道元数据 | 本次实际服务的上游渠道 |
+| 成本 | `cost` / `input_cost` / `output_cost` / `generation_id` | 渠道元数据 `gateway.*` | 上游按请求给出的实际美元成本 |
+| 渠道尝试 | `model_attempt_count` / `total_provider_attempt_count` / `fallbacks_available_count` | 渠道元数据 | 用来看是否发生兜底；只记候选数量，不记候选全量 |
+| 协议 | `client_protocol` / `upstream_protocol` / `stream` | 渠道钩子 | 例如 `openai-response` / `openai` |
+| 其它 | `service_tier` / `endpoint` | usage 记录 | `endpoint` 拿不到时留空并计数 |
+
+仅落盘/内存保留、不出现在页面上（用于排障对账）：`schema`、`event_id`（幂等去重键）、`session_id`、`parent_session_id`、`auth_index`、`auth_type`、`provider`（CPA 内部 provider key，如 `openai-compatible-<你的条目名>`）、`channel_missing`、`planning_reasoning`（按配置只存长度）。
+
+JSONL 行示例：
+
+```json
+{"schema":1,"event_id":"…","timestamp":"2026-09-21T15:54:50+08:00","provider":"openai-compatible-cline",
+ "base_url":"https://api.cline.bot/api/v1",
+ "model":"cline-pass/deepseek-v4.1-flash","model_alias":"deepseek-flash","api_key":"sk-…","session_id":"…",
+ "failed":false,"status_code":0,"error":"","latency_ms":2380,"ttft_ms":410,"tokens_per_second":16.4,
+ "tokens_per_second_after_ttft":19.8,"input_tokens":333738,"output_tokens":859,"reasoning_tokens":603,
+ "total_tokens":334597,"cached_tokens":333568,"cache_read_tokens":333568,"cache_creation_tokens":0,
+ "prompt_cache_hit_tokens":0,"prompt_cache_miss_tokens":33,
+ "final_provider":"deepseek","resolved_provider":"deepseek","canonical_slug":"deepseek/deepseek-v4.1-flash",
+ "cost":"0.0000447","input_cost":"0.0000099","output_cost":"0.0000348","generation_id":"gen_…",
+ "model_attempt_count":1,"total_provider_attempt_count":1,"fallbacks_available_count":15,
+ "client_protocol":"openai-response","upstream_protocol":"openai","stream":true,"reasoning_effort":"high",
+ "service_tier":"","channel_missing":false}
+```
+
+### `health` 计数器
+
+| 字段 | 含义 |
+|---|---|
+| `mode` | `host+marker`（正常）或 `marker-only`（`hosts: []`） |
+| `recorded` | 已落盘的请求数 |
+| `skipped_unmatched_host` | 出现渠道证据但 host 未命中而跳过的请求数（配错 `hosts` 的信号） |
+| `unmatched_host_samples` | 上述跳过的最近样本（host/provider/model/时间） |
+| `marker_missing` | host 命中但响应里没有渠道证据的次数 |
+| `parse_error` | 渠道元数据解析失败次数（不影响响应） |
+| `orphan_channel` | 渠道记录在 `orphan_ttl` 内未被任何用量记录消费的次数 |
+| `channel_missing` | 落盘行里渠道列留空的行数（失败请求等） |
+| `write_error` | JSONL 写入失败次数 |
+| `fused` | 插件是否被宿主 fuse（插件 panic 后宿主会禁用它，CPA 日志有 error 记录） |
+
+## 隐私
+
+- 默认**不落任何 prompt / 响应正文**，只记元数据（渠道、用量、成本、缓存）；
+- `planningReasoning` 是上游网关的规划文本，默认**只记长度**（`store_planning_reasoning: false`），页面里折叠展示，开启后才会落盘文本；
+- `api_key` 是**下游**（调用 CPA 的）key。默认与 CPA 用量记录保持一致原样落盘，可用 `mask_api_key: true` 只留前后 4 位；
+- 插件**不会**打印或返回 CPA 管理密钥、上游 API key 或 auth 文件内容；
+- 数据只出现在两个地方：鉴权过的管理接口，以及你配置的 `jsonl_dir` 下的 JSONL 文件。资源页面路由是静态壳，**不含任何数据**。
+
+## 排障
+
+| 现象 | 可能原因与处理 |
+|---|---|
+| `GET /v0/management/plugins` 里本插件 `registered: false`、`path: ""` | `.so` 没被扫描到：确认文件名是 `clinepass-channel-monitor.so` 或 `clinepass-channel-monitor-v<version>.so`，且位于 `<plugins.dir>/<goos>/<goarch>/` 或 `<plugins.dir>/` 下；确认 CPA 配置里 `plugins.enabled: true`，且 `plugins.configs` 的键名与插件 id 完全一致 |
+| 加载失败、日志提示 ABI 不符 | 需要 CPA ≥ v7.3.8 的**带插件支持**构建（`X-Cpa-Support-Plugin: 1`）；插件声明 `abi_version = 1`、`schema_version = 6` |
+| 插件在 `plugins` 列表里但页面 404 | 检查 CPA 版本是否满足；改一次配置触发重扫；确认资源路由路径为 `/v0/resource/plugins/clinepass-channel-monitor/index.html` |
+| 页面能开但一直空 | 页面里的管理密钥没填或填错（管理接口会返回 401/403）；或窗口内确实没有命中记录，先看 `health` |
+| 有请求但一条都没记录 | 看 `health`：`skipped_unmatched_host > 0` → host 不匹配，按「适配你自己的 Cline 条目」处理；全是 `marker_missing` → 该请求没走 Cline 网关，或上游不再返回 `provider_metadata` |
+| `final_provider` 一直是空 | 该请求在 Cline 网关侧没有产出渠道元数据（例如失败请求）；失败请求 `channel_missing=true` 是预期状态 |
+| 渠道列有值但用量/缓存列是 0 | 关联失败或该请求确实没有 token 统计；看 `channel_missing` 与 CPA 侧用量记录对账 |
+| JSONL 没有生成 | `jsonl_enabled: false`、`jsonl_dir` 不可写（看 `health.write_error`）、或宿主与容器目录映射不一致 |
+| 插件突然不出数据了 | 看 `health.fused`；插件 panic 会被宿主 fuse，CPA 日志里会有对应 error |
+| 升级 CPA 后行为变化 | 回到本文「环境要求」，核对 `X-Cpa-Support-Plugin` 头、`abi_version`/`schema_version`，并重新跑一次发请求→看 `health`→看 JSONL 的链路 |
+
+常用命令（管理密钥用环境变量传入，不要写进脚本或文档）：
+
+```bash
+export CPA_MANAGEMENT_KEY='<your-management-key>'
+curl -s -H "Authorization: Bearer $CPA_MANAGEMENT_KEY" http://127.0.0.1:8317/v0/management/plugins
+curl -s -H "Authorization: Bearer $CPA_MANAGEMENT_KEY" http://127.0.0.1:8317/v0/management/plugins/clinepass-channel-monitor/health
+curl -s -H "Authorization: Bearer $CPA_MANAGEMENT_KEY" http://127.0.0.1:8317/v0/management/plugins/clinepass-channel-monitor/stats?window=24h
+```
+
+> 管理接口有暴力破解防护：**只打确定存在的路径 + 正确密钥**，错误探测会累计失败并临时封禁来源 IP。
+
+## 升级与回滚
+
+- **升级**：用新版本 `.so` 覆盖旧文件（文件名带版本号时删掉旧的），改一次 CPA 配置触发重扫，然后在 `plugins` 列表确认 `registered: true`、版本正确；
+- **回滚**：把 `plugins.configs.clinepass-channel-monitor.enabled` 设为 `false`（插件不再注册路由、不再写盘），或直接删掉 `.so` 后触发重扫；
+- **卸载残留**：插件本身不在 CPA 配置之外写任何文件。需要彻底清理时删除：① 插件配置块，② `.so` 文件，③ `jsonl_dir` 下的 `channel-monitor-*.jsonl`（这一步是删数据，按需保留备份）。
+
+## 构建与开发
+
+```bash
+make build      # 构建本机架构的 .so（CGO，-buildmode=c-shared）
+make test       # 单元测试（解析器/关联器/环形缓冲，含真实响应片段 fixture）
+make install    # 安装到本地 CPA 插件目录（路径可通过变量覆盖）
+```
+
+跨平台产物由 GitHub Actions 在 tag 推送时构建：`linux/amd64`、`linux/arm64` 各打一个 zip，zip 内文件名固定为 `clinepass-channel-monitor.so`，并附 `checksums.txt`。
+
+## 许可证
+
+MIT，见 [LICENSE](LICENSE)。

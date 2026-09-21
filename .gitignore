@@ -1,0 +1,10 @@
+# 本机资料（调研报告、实测响应、CPA 源码副本）——不随仓库发布
+.reference/
+# 需求文档（含本机路径/容器名等内部细节）——只留本地，不发布
+/clinepass-channel-monitor-requirements.md
+# 本地 Go 工具链
+.toolchain/
+# 构建产物
+dist/
+*.so
+*.h

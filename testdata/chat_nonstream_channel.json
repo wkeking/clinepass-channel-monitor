@@ -1,0 +1,103 @@
+{
+ "choices": [
+  {
+   "finish_reason": "stop",
+   "index": 0,
+   "logprobs": null,
+   "message": {
+    "provider_metadata": {
+     "deepseek": {
+      "choiceIndex": 0,
+      "messageRole": "assistant",
+      "promptCacheHitTokens": 0,
+      "promptCacheMissTokens": 33,
+      "responseObject": "chat.completion.chunk",
+      "systemFingerprint": "fp_fixture0000000000000000000001"
+     },
+     "gateway": {
+      "cost": "0.0000447",
+      "gatewayCost": "0.0000447",
+      "generationId": "gen_FIXTURE0000000000000000006",
+      "inferenceCost": "0.0000447",
+      "inputInferenceCost": "0.0000099",
+      "marketCost": "0.0000447",
+      "outputInferenceCost": "0.0000348",
+      "routing": {
+       "canonicalSlug": "deepseek/deepseek-v4.1-flash",
+       "fallbacksAvailable": [
+        "alibaba",
+        "baseten",
+        "fireworks",
+        "runware",
+        "relace",
+        "particle",
+        "novita",
+        "togetherai",
+        "deepinfra",
+        "wafer",
+        "parasail",
+        "gmicloud",
+        "modal",
+        "morph",
+        "boundless"
+       ],
+       "finalProvider": "deepseek",
+       "modelAttemptCount": 1,
+       "modelAttempts": [
+        {
+         "canonicalSlug": "deepseek/deepseek-v4.1-flash",
+         "providerAttemptCount": 1,
+         "providerAttempts": [
+          {
+           "credentialType": "system",
+           "endTime": 1789976869024,
+           "provider": "deepseek",
+           "providerRequestId": "5b03783d4acc11829cd0389ba9ab6ca4",
+           "providerResponseId": "3084e9f0-f8af-47b9-9f34-ece120ce9c26",
+           "startTime": 1789976868102,
+           "statusCode": 200,
+           "success": true
+          }
+         ],
+         "success": true
+        }
+       ],
+       "originalModelId": "deepseek/deepseek-v4.1-flash",
+       "planningReasoning": "System credentials planned for: fixture provider (synthetic test data).",
+       "resolvedProvider": "deepseek",
+       "totalProviderAttemptCount": 1
+      },
+      "surchargeCost": "0"
+     }
+    },
+    "content": "ok"
+   }
+  }
+ ],
+ "created": 1789976868,
+ "generationId": "gen_FIXTURE0000000000000000006",
+ "id": "gen_FIXTURE0000000000000000006",
+ "model": "deepseek/deepseek-v4.1-flash",
+ "object": "chat.completion",
+ "system_fingerprint": "fp_fixture0000000000000000000002",
+ "usage": {
+  "cache_creation_input_tokens": 0,
+  "completion_tokens": 29,
+  "completion_tokens_details": {
+   "image_tokens": 0,
+   "reasoning_tokens": 27
+  },
+  "cost": 2.235e-05,
+  "cost_details": null,
+  "gateway_cost": 4.47e-05,
+  "is_byok": false,
+  "market_cost": 4.47e-05,
+  "prompt_tokens": 33,
+  "prompt_tokens_details": {
+   "audio_tokens": 0,
+   "cached_tokens": 0,
+   "video_tokens": 0
+  },
+  "total_tokens": 62
+ }
+}

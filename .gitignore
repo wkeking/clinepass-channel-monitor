@@ -8,3 +8,6 @@
 dist/
 *.so
 *.h
+
+# 例外：C ABI 声明头需要随仓库发布
+!cdecl.h

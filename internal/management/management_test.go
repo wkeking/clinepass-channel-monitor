@@ -1,13 +1,13 @@
 package management
 
 import (
-	"os"
-	"path/filepath"
 	"github.com/wkeking/clinepass-channel-monitor/internal/buildinfo"
 	"github.com/wkeking/clinepass-channel-monitor/internal/config"
 	"github.com/wkeking/clinepass-channel-monitor/internal/plan"
 	"github.com/wkeking/clinepass-channel-monitor/internal/state"
 	"github.com/wkeking/clinepass-channel-monitor/internal/store"
+	"os"
+	"path/filepath"
 
 	"encoding/json"
 	"net/url"

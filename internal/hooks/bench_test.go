@@ -178,11 +178,11 @@ func BenchmarkEventMarshal(b *testing.B) {
 		InputTokens: 428070, OutputTokens: 2020, ReasoningTokens: 194, TotalTokens: 430090,
 		CachedTokens: 427780, PromptCacheHitTokens: 0, PromptCacheMissTokens: 33,
 		SystemFingerprint: "fp_fixture0000000000000000000001",
-		FinalProvider: "deepseek", ResolvedProvider: "deepseek",
+		FinalProvider:     "deepseek", ResolvedProvider: "deepseek",
 		CanonicalSlug: "deepseek/deepseek-v4.1-flash", OriginalModelID: "deepseek/deepseek-v4.1-flash",
 		ModelAttemptCount: 1, TotalProviderAttemptCount: 1,
 		Cost: "0.0000447", InputCost: "0.0000099", OutputCost: "0.0000348",
-		GenerationID: "gen_FIXTURE0000000000000000008",
+		GenerationID:   "gen_FIXTURE0000000000000000008",
 		ClientProtocol: "openai-response", UpstreamProtocol: "openai", Stream: true,
 		ReasoningEffort: "high", ServiceTier: "default", PlanningReasoningLen: 214,
 	}

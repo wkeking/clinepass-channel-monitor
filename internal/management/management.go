@@ -274,11 +274,11 @@ func resolveWindow(raw string) (time.Duration, string) {
 }
 
 type eventsResponse struct {
-	Window  string   `json:"window"`
-	Total   int      `json:"total"`
-	Offset  int      `json:"offset"`
-	Limit   int      `json:"limit"`
-	Filters filters  `json:"filters"`
+	Window  string         `json:"window"`
+	Total   int            `json:"total"`
+	Offset  int            `json:"offset"`
+	Limit   int            `json:"limit"`
+	Filters filters        `json:"filters"`
 	Events  []*store.Event `json:"events"`
 }
 

@@ -2,7 +2,6 @@
 // totals and the per-request records behind the overview cards.
 package plan
 
-
 import (
 	"crypto/sha256"
 	"encoding/hex"
@@ -61,10 +60,10 @@ const (
 	// do not page the same upstream endpoint back to back.
 	planAccountStagger = 500 * time.Millisecond
 	// planMaxCredentials bounds how many credentials are polled at all.
-	planMaxCredentials = 8
-	planRequestTimeout      = 20 * time.Second
-	planUsageWindowDays     = 31
-	microUSD                = 1_000_000.0
+	planMaxCredentials  = 8
+	planRequestTimeout  = 20 * time.Second
+	planUsageWindowDays = 31
+	microUSD            = 1_000_000.0
 )
 
 // Window is one rolling limit reported by the usage-limits endpoint.
@@ -97,32 +96,32 @@ type Tokens struct {
 type AccountSnapshot struct {
 	// ID is a stable, key-derived identifier (never the key itself); the page uses it to
 	// remember which account the user selected.
-	ID          string                         `json:"id"`
-	Label       string                         `json:"label"`
-	Source      string                         `json:"source,omitempty"`
-	Available   bool                           `json:"available"`
+	ID        string `json:"id"`
+	Label     string `json:"label"`
+	Source    string `json:"source,omitempty"`
+	Available bool   `json:"available"`
 	// Rejected marks a credential the upstream refused (401/403). The page hides those from
 	// the account picker; /health still lists them for diagnosis.
-	Rejected    bool                           `json:"rejected,omitempty"`
-	Account     string                         `json:"account,omitempty"`
-	PlanName    string                         `json:"plan_name,omitempty"`
-	PlanPrice   string                         `json:"plan_price,omitempty"`
-	Limits      []Window                  `json:"limits,omitempty"`
-	Tokens      Tokens                    `json:"tokens"`
-	TokensError string                         `json:"tokens_error,omitempty"`
+	Rejected    bool                   `json:"rejected,omitempty"`
+	Account     string                 `json:"account,omitempty"`
+	PlanName    string                 `json:"plan_name,omitempty"`
+	PlanPrice   string                 `json:"plan_price,omitempty"`
+	Limits      []Window               `json:"limits,omitempty"`
+	Tokens      Tokens                 `json:"tokens"`
+	TokensError string                 `json:"tokens_error,omitempty"`
 	Windows     map[string]UsageWindow `json:"windows,omitempty"`
 	Usage       UsageState             `json:"usage"`
-	FetchedAt   string                         `json:"fetched_at,omitempty"`
-	Error       string                         `json:"error,omitempty"`
+	FetchedAt   string                 `json:"fetched_at,omitempty"`
+	Error       string                 `json:"error,omitempty"`
 }
 
 // Quota is the cached view served to the page.
 type Quota struct {
-	Available bool          `json:"available"`
-	Source    string        `json:"source"`
-	Account   string        `json:"account,omitempty"`
-	PlanName  string        `json:"plan_name,omitempty"`
-	PlanPrice string        `json:"plan_price,omitempty"`
+	Available bool     `json:"available"`
+	Source    string   `json:"source"`
+	Account   string   `json:"account,omitempty"`
+	PlanName  string   `json:"plan_name,omitempty"`
+	PlanPrice string   `json:"plan_price,omitempty"`
 	Limits    []Window `json:"limits"`
 	Tokens    Tokens   `json:"tokens"`
 	// TokensError explains why the official token totals are missing instead of leaving the
@@ -132,8 +131,8 @@ type Quota struct {
 	Windows map[string]UsageWindow `json:"windows,omitempty"`
 	// Usage describes the official record collector behind Windows.
 	Usage     UsageState `json:"usage"`
-	FetchedAt string             `json:"fetched_at,omitempty"`
-	Error     string             `json:"error,omitempty"`
+	FetchedAt string     `json:"fetched_at,omitempty"`
+	Error     string     `json:"error,omitempty"`
 	// Accounts lists every configured Cline credential. The fields above mirror the primary
 	// account (the first one that answered) so single-account clients keep working.
 	Accounts []AccountSnapshot `json:"accounts,omitempty"`
@@ -365,7 +364,7 @@ func newPlanAccount(cred planCredential) *planAccount {
 // one entry, and each key can belong to a different Cline account with its own quota, so
 // every credential is polled as its own account.
 type Poller struct {
-	mu       sync.RWMutex
+	mu sync.RWMutex
 	// cfg is the configuration the poller was started with; the plugin restarts the poller
 	// on every reconfigure, so it never reads a stale one.
 	cfg      config.Config

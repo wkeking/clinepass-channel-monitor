@@ -280,8 +280,8 @@ func TestBodyShapeMentionsChannelFields(t *testing.T) {
 
 func TestMaskAPIKey(t *testing.T) {
 	cases := map[string]string{
-		"":                  "",
-		"short":             "****",
+		"":                     "",
+		"short":                "****",
 		"sk-TESTKEY1234567890": "sk-T****7890",
 	}
 	for input, want := range cases {

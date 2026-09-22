@@ -22,10 +22,10 @@ const (
 	// DefaultPlanUsageRefresh how often the official per-request records are paged. The
 	// usage interval is the longer one on purpose: the quota calls are cheap, while the
 	// per-request endpoint is cursor paginated and rate limited.
-	DefaultPlanRefresh      = 5 * time.Minute
-	DefaultPlanUsageRefresh = 10 * time.Minute
-	defaultPlanRefresh      = DefaultPlanRefresh
-	defaultPlanUsageRefresh = DefaultPlanUsageRefresh
+	DefaultPlanRefresh         = 5 * time.Minute
+	DefaultPlanUsageRefresh    = 10 * time.Minute
+	defaultPlanRefresh         = DefaultPlanRefresh
+	defaultPlanUsageRefresh    = DefaultPlanUsageRefresh
 	DefaultRingSize            = 5000
 	defaultRingSize            = DefaultRingSize
 	defaultRetentionDays       = 30
@@ -89,12 +89,12 @@ type Config struct {
 	// their defaults and are not shown in the configuration panel. Only the two knobs a
 	// deployment may genuinely need to move are exposed: where to read CPA's config from,
 	// and how often to poll it.
-	PlanEnabled       bool     `yaml:"plan_enabled"`
-	PlanAPIKey        string   `yaml:"plan_api_key"`
-	PlanBaseURL       string   `yaml:"plan_base_url"`
-	PlanConfigPath    string   `yaml:"plan_config_path"`
-	PlanRefresh       Duration `yaml:"plan_refresh"`
-	PlanDailyEnabled  bool     `yaml:"plan_daily_enabled"`
+	PlanEnabled      bool     `yaml:"plan_enabled"`
+	PlanAPIKey       string   `yaml:"plan_api_key"`
+	PlanBaseURL      string   `yaml:"plan_base_url"`
+	PlanConfigPath   string   `yaml:"plan_config_path"`
+	PlanRefresh      Duration `yaml:"plan_refresh"`
+	PlanDailyEnabled bool     `yaml:"plan_daily_enabled"`
 	// PlanUsageEnabled switches the overview cards to Cline's official per-request
 	// records (request count, tokens, cache hit ratio) fetched from
 	// /users/{id}/usages. Latency and generation speed stay local: the official API

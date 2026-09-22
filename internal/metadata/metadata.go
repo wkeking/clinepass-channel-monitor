@@ -115,6 +115,24 @@ type upstreamUsage struct {
 	CompletionTokens        int64   `json:"completion_tokens"`
 	CacheCreationInputToken int64   `json:"cache_creation_input_tokens"`
 	GatewayCost             float64 `json:"gateway_cost"`
+	// Cost is the per-request cost of the usage block itself, in USD. Responses that carry
+	// no provider_metadata report the cost here and nowhere else.
+	Cost float64 `json:"cost"`
+}
+
+// usageCost reads the per-request cost of a usage block: the gateway's own accounting when
+// it is there, otherwise the usage block's cost field.
+func usageCost(usage *upstreamUsage) string {
+	if usage == nil {
+		return ""
+	}
+	if usage.GatewayCost != 0 {
+		return FormatCost(usage.GatewayCost)
+	}
+	if usage.Cost != 0 {
+		return FormatCost(usage.Cost)
+	}
+	return ""
 }
 
 // rawProviderMetadata decodes provider_metadata with whichever case the upstream uses.
@@ -280,7 +298,7 @@ func channelMetadataOf(envelope *upstreamEnvelope) *ChannelMetadata {
 	if provider == "" {
 		return nil
 	}
-	meta := &ChannelMetadata{FinalProvider: provider}
+	meta := &ChannelMetadata{FinalProvider: provider, Cost: usageCost(envelope.Usage)}
 	if envelope != nil {
 		meta.UpstreamModel = rawString(envelope.Model)
 		if envelope.Usage != nil {
@@ -350,8 +368,9 @@ func normalizeChannelMetadata(raw *rawProviderMetadata, envelope *upstreamEnvelo
 			meta.UpstreamPromptTokens = envelope.Usage.PromptTokens
 			meta.UpstreamCompletionTokens = envelope.Usage.CompletionTokens
 			meta.UpstreamCacheCreationTokens = envelope.Usage.CacheCreationInputToken
-			if meta.Cost == "" && envelope.Usage.GatewayCost != 0 {
-				meta.Cost = FormatCost(envelope.Usage.GatewayCost)
+			if meta.Cost == "" {
+				// The gateway routing block had no cost: take the usage block's own cost.
+				meta.Cost = usageCost(envelope.Usage)
 			}
 		}
 	}

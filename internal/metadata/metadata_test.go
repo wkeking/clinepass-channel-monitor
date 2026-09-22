@@ -143,25 +143,71 @@ func TestExtractChannelFallsBackToServingProvider(t *testing.T) {
 	if meta == nil {
 		t.Fatal("a response without gateway routing must still be labelled by its serving provider")
 	}
-	if meta.FinalProvider != "Relace" {
-		t.Errorf("final_provider = %q, want Relace", meta.FinalProvider)
+	if meta.FinalProvider != "Crusoe" {
+		t.Errorf("final_provider = %q, want Crusoe", meta.FinalProvider)
 	}
-	if meta.ResolvedProvider != "" || meta.Cost != "" {
-		t.Errorf("routing-only fields must stay empty, got %q/%q", meta.ResolvedProvider, meta.Cost)
+	if meta.ResolvedProvider != "" {
+		t.Errorf("routing-only fields must stay empty, got resolved_provider %q", meta.ResolvedProvider)
 	}
-	if meta.UpstreamModel != "z-ai/glm-5.3-flash" || meta.UpstreamCompletionTokens != 45 {
+	if meta.Cost != "0.00002385" {
+		t.Errorf("cost = %q, want the usage block's own cost 0.00002385", meta.Cost)
+	}
+	if meta.UpstreamModel != "z-ai/glm-5.3-flash" || meta.UpstreamCompletionTokens != 42 {
 		t.Errorf("upstream model/usage = %q/%d", meta.UpstreamModel, meta.UpstreamCompletionTokens)
+	}
+}
+
+func TestExtractChannelCostSourceOrder(t *testing.T) {
+	// The gateway block wins, then the usage block's gateway_cost, then its own cost field.
+	cases := map[string]struct {
+		body []byte
+		want string
+	}{
+		"gateway block": {
+			[]byte(`{"choices":[{"delta":{"provider_metadata":{"gateway":{"cost":"0.00001995",` +
+				`"routing":{"finalProvider":"deepseek"}}}}}],"usage":{"gateway_cost":0.5,"cost":0.9}}`),
+			"0.00001995",
+		},
+		"usage gateway_cost": {
+			[]byte(`{"choices":[{"delta":{"provider_metadata":{"gateway":{"routing":{"finalProvider":"deepseek"}}}}}]` +
+				`,"usage":{"gateway_cost":0.0000123,"cost":0.9}}`),
+			"0.0000123",
+		},
+		"usage cost": {
+			[]byte(`{"choices":[{"delta":{"provider_metadata":{"gateway":{"routing":{"finalProvider":"deepseek"}}}}}]` +
+				`,"usage":{"cost":0.0000999}}`),
+			"0.0000999",
+		},
+		"no cost anywhere": {
+			[]byte(`{"choices":[{"delta":{"provider_metadata":{"gateway":{"routing":{"finalProvider":"deepseek"}}}}}]` +
+				`,"usage":{"prompt_tokens":3}}`),
+			"",
+		},
+	}
+	for name, tc := range cases {
+		meta := ExtractChannelFromBody(tc.body, false)
+		if meta == nil {
+			t.Fatalf("%s: expected channel metadata", name)
+		}
+		if meta.Cost != tc.want {
+			t.Errorf("%s: cost = %q, want %q", name, meta.Cost, tc.want)
+		}
 	}
 }
 
 func TestExtractChannelFromProviderFrame(t *testing.T) {
 	frames := strings.Split(strings.TrimSpace(string(readFixture(t, "sse_provider_frames.jsonl"))), "\n")
 	meta := ExtractChannelFromBody([]byte(frames[0]), false)
-	if meta == nil || meta.FinalProvider != "Relace" {
+	if meta == nil || meta.FinalProvider != "Crusoe" {
 		t.Fatalf("an SSE frame carrying a serving provider must produce an observation, got %+v", meta)
 	}
 	if meta.UpstreamModel != "z-ai/glm-5.3-flash" {
 		t.Errorf("upstream model = %q", meta.UpstreamModel)
+	}
+	// The frame that carries usage must also carry the cost of the request.
+	last := ExtractChannelFromBody([]byte(frames[1]), false)
+	if last == nil || last.Cost != "0.00002035" {
+		t.Errorf("frame cost = %+v, want 0.00002035", last)
 	}
 	if done := ExtractChannelFromBody([]byte(frames[len(frames)-1]), false); done != nil {
 		t.Errorf("[DONE] must not produce an observation, got %+v", done)

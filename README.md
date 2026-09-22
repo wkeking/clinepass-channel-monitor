@@ -10,12 +10,12 @@ Cline 的请求打到网关后，由 **Cline 自己**决定这次请求最终落
 
 本插件使用 CPA 的 **`response.normalize_before`**（能力 `response_before_translator`）钩子，运行在「翻译之前」，因此对 `/v1/chat/completions`、`/v1/responses` 等端点都能拿到原始的 `provider_metadata.gateway.routing.finalProvider`，再用 `usage.handle` 钩子拿到用量记录，两者关联成一行落盘。
 
-渠道列取值的顺序是 **`finalProvider` → 上游响应的 `provider` 字段 → 空**。走 Cline 自己网关的模型（如 `cline-pass/deepseek-v4.1-flash`、`cline-pass/kimi-k3`）响应里带 `provider_metadata.gateway.routing`；走 OpenRouter 一类后端的模型（如 `cline-pass/glm-5.3-flash`）不带它，只给一个 `provider`（`Relace`、`Photon`、`CoreWeave`……），这些请求同样记录、同样进渠道分布，只是值来自另一个字段。两个字段都没有时该行渠道列留空，页面显示 `—`。**host 命中 `hosts` 就落一行**，不要求必须有渠道证据（`require_routing_marker: true` 可以把记录收窄回严格口径）。
+渠道列取值的顺序是 **`finalProvider` → 上游响应的 `provider` 字段 → 空**。走 Cline 自己网关的模型（如 `cline-pass/deepseek-v4.1-flash`、`cline-pass/kimi-k3`）响应里带 `provider_metadata.gateway.routing`；走 OpenRouter 一类后端的模型（如 `cline-pass/glm-5.3-flash`）不带它，只给一个 `provider`（`Relace`、`Crusoe`、`CoreWeave`……），这些请求同样记录、同样进渠道分布，只是渠道值与成本都来自另一个字段（成本取该响应的 `usage.cost`，只有总额）。两个字段都没有时该行渠道列留空，页面显示 `—`。**host 命中 `hosts` 就落一行**，不要求必须有渠道证据（`require_routing_marker: true` 可以把记录收窄回严格口径）。
 
 ## 能力一览
 
 - 逐请求记录最终渠道：`final_provider`（优先 `finalProvider`，缺失时用上游响应的 `provider` 字段）/ `resolved_provider` / `canonical_slug` / 尝试次数 / 兜底候选数量；
-- 记录上游给出的实际成本：`gateway.cost` / `inputInferenceCost` / `outputInferenceCost` / `generationId`；
+- 记录上游给出的实际成本：优先渠道元数据里的 `gateway.cost` / `inputInferenceCost` / `outputInferenceCost` / `generationId`；响应里没有渠道元数据时退回上游 `usage.cost`（OpenRouter 一类后端只给这一个总成本，没有输入/输出拆分）；
 - 记录 token 与缓存：`input/output/reasoning/total_tokens`、`cached_tokens`、`prompt_cache_hit_tokens` / `prompt_cache_miss_tokens`、`systemFingerprint`；
 - 按天切分 JSONL 落盘（默认开启）+ 内存环形缓冲供页面即时查询；
 - 管理中心页面：固定五个一行的概览卡片（请求数 / 平均延时 / 生成速度 / 总 Token 数 / 缓存命中率）+ 渠道分布 + 可过滤分页明细表 + CSV 导出；
@@ -259,7 +259,7 @@ JSONL 每行一个 JSON 对象，按天切分：`<jsonl_dir>/channel-monitor-YYY
 | 缓存 | `cached_tokens` / `cache_read_tokens` / `cache_creation_tokens` | usage 记录 `Detail` | CPA 侧统计 |
 | 缓存（渠道） | `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens` / `system_fingerprint` | 渠道元数据 | 上游侧统计，与上一组来源不同 |
 | 渠道 | `final_provider` / `resolved_provider` / `canonical_slug` / `original_model_id` | 渠道元数据 | 本次实际服务的上游渠道（`final_provider` 优先取 `finalProvider`，缺失时取上游响应的 `provider`） |
-| 成本 | `cost` / `input_cost` / `output_cost` / `generation_id` | 渠道元数据 `gateway.*` | 上游按请求给出的实际美元成本 |
+| 成本 | `cost` / `input_cost` / `output_cost` / `generation_id` | 渠道元数据 `gateway.*`，缺失时取上游 `usage.cost` | 上游按请求给出的实际美元成本；回退来源只有总成本，`input_cost`/`output_cost`/`generation_id` 留空 |
 | 渠道尝试 | `model_attempt_count` / `total_provider_attempt_count` / `fallbacks_available_count` | 渠道元数据 | 用来看是否发生兜底；只记候选数量，不记候选全量 |
 | 协议 | `client_protocol` / `upstream_protocol` / `stream` | 渠道钩子 | 例如 `openai-response` / `openai` |
 | 其它 | `service_tier` / `endpoint` | usage 记录 | `endpoint` 拿不到时留空并计数 |

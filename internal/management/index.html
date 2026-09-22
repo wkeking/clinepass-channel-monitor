@@ -69,7 +69,6 @@ td.num,th.num{text-align:right}
 .detail pre{margin:0;max-height:260px;overflow:auto;font-size:12px;line-height:1.5;background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:11px}
 .msg{color:var(--muted);padding:16px}
 .hidden{display:none}
-.mode{font-size:12px;padding:3px 10px;border-radius:999px;border:1px solid var(--line);color:var(--muted)}
 .empty-row td{text-align:center;color:var(--muted);padding:20px}
 .plan{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:14px}
 .pcard{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px 16px}
@@ -90,7 +89,6 @@ td.num,th.num{text-align:right}
     <div class="sub" id="statusline">加载中…</div>
   </div>
   <div class="bar" style="margin:0">
-    <span class="mode" id="mode">-</span>
     <select id="window">
       <option value="1h">近 1 小时</option>
       <option value="24h" selected>近 24 小时</option>
@@ -524,7 +522,6 @@ async function load(){
   try{
     const health=await api("/health");
     $("ver").textContent="v"+health.version;
-    $("mode").textContent=(health.mode||"-")+" · "+(health.hosts&&health.hosts.length?health.hosts.join(", "):"hosts 为空");
     const bits=["记录 "+int(health.recorded)+" 条","已索引 "+int(health.ring_used)+"/"+int(health.ring_size),
       "marker 缺失 "+int(health.marker_missing),"host 未命中 "+int(health.skipped_unmatched_host),
       "解析失败 "+int(health.parse_errors),"写盘失败 "+int(health.write_error)];

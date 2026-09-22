@@ -6,7 +6,10 @@
 SHELL := /bin/bash
 
 REPO_ROOT  := $(patsubst %/,%,$(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
-GO_VERSION ?= 1.26.0
+# Exact toolchain version installed into .toolchain/go by `make tools` and used by
+# every other target. Keep it in sync with the toolchain that is actually installed
+# (`$(GO_BIN) version`) and with the default in scripts/install-go.sh.
+GO_VERSION ?= 1.27.1
 GO_BIN     ?= $(REPO_ROOT)/.toolchain/go/bin/go
 GOFLAGS    ?=
 # Caches stay inside the repository: the host filesystem is not always writable.
@@ -37,7 +40,7 @@ LDFLAGS    := -s -w -X github.com/wkeking/clinepass-channel-monitor/internal/bui
 # Where the CPA container reads plugins from. Override for your own deployment.
 INSTALL_DIR ?= /opt/cpa/plugins/$(GOOS)/$(GOARCH)
 
-.PHONY: all deps build strip test bench vet fmt lint clean install uninstall tools help
+.PHONY: all deps build strip test bench vet fmt lint clean clean-cache install uninstall tools help
 
 all: build
 
@@ -75,6 +78,14 @@ fmt:
 clean:
 	rm -rf $(BUILD_DIR)
 
+## clean-cache: empty the Go build cache and temp dir (keeps the toolchain, the module cache and dist/)
+clean-cache:
+	@freed=$$(du -sm $(GOCACHE) $(GOTMPDIR) 2>/dev/null | awk '{s+=$$1} END {print s+0}'); \
+	rm -rf $(GOCACHE) $(GOTMPDIR); \
+	mkdir -p $(GOCACHE) $(GOTMPDIR); \
+	echo "clean-cache: freed $${freed} MB (.toolchain/gocache, .toolchain/gotmp)"
+	@echo "clean-cache: kept $(GO_BIN) and $(GOMODCACHE), so the next build stays offline-capable"
+
 ## install: install the plugin into the CPA plugins directory and reload CPA
 install: build
 	@if [ ! -d "$(INSTALL_DIR)" ]; then \
@@ -92,7 +103,7 @@ uninstall:
 	rm -f $(INSTALL_DIR)/$(LIB_NAME)
 	@echo "removed $(INSTALL_DIR)/$(LIB_NAME)"
 
-## tools: install the Go toolchain into .toolchain/go (no root required)
+## tools: install the pinned Go toolchain (GO_VERSION = 1.27.1) into .toolchain/go (no root required)
 tools:
 	@bash $(REPO_ROOT)/scripts/install-go.sh $(GO_VERSION)
 

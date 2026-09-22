@@ -359,11 +359,16 @@ internal/plugin/                 注册、生命周期与方法分发（把上�
 ## 构建与开发
 
 ```bash
-make build      # 构建本机架构的 .so（CGO，-buildmode=c-shared）
-make test       # 单元测试（解析器/关联器/环形缓冲，含真实响应片段 fixture）
-make bench      # 请求路径开销基准（钩子载荷解码、请求指纹、事件序列化）
-make install    # 安装到本地 CPA 插件目录（路径可通过变量覆盖）
+make build       # 构建本机架构的 .so（CGO，-buildmode=c-shared）到 dist/
+make test        # 单元测试（解析器/关联器/环形缓冲，含真实响应片段 fixture）
+make bench       # 请求路径开销基准（钩子载荷解码、请求指纹、事件序列化）
+make install     # 安装到本地 CPA 插件目录（路径可通过变量覆盖）
+make tools       # 安装固定版本的 Go 工具链（1.27.1）到 .toolchain/go，无需 root
+make clean-cache # 清空 Go 构建缓存（.toolchain/gocache、gotmp）
+make clean       # 删掉构建产物 dist/
 ```
+
+工具链版本由 `Makefile` 的 `GO_VERSION` 固定为 `1.27.1`（`scripts/install-go.sh` 的默认值与之相同），和 `go.mod` 里 `go 1.26.0` 的语言下限是两件事。工具链、模块缓存、构建缓存都在 `.toolchain/` 下并且已 gitignore：`make clean-cache` 只清构建缓存与临时目录，工具链和模块缓存保持不动，所以清完仍能离线构建（第一次构建是冷编译，会慢一些，缓存会重新长出来）；连工具链一起删就直接删掉 `.toolchain/`，之后需要 `make tools` + `go mod download` 重新拉取。
 
 跨平台产物由 GitHub Actions 在 tag 推送时构建：`linux/amd64`、`linux/arm64` 各打一个 zip，zip 内文件名固定为 `clinepass-channel-monitor.so`，并附 `checksums.txt`。
 

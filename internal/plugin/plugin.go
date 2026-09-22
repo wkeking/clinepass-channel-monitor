@@ -171,7 +171,7 @@ func buildRegistration() registration {
 				{Name: "capture_cache", Type: pluginapi.ConfigFieldTypeBoolean, Description: "记录缓存计数。"},
 				{Name: "timezone", Type: pluginapi.ConfigFieldTypeString, Description: "展示与时间戳使用的时区。"},
 				{Name: "plan_config_path", Type: pluginapi.ConfigFieldTypeString, Description: "容器内 CPA config.yaml 的路径，用于读取 Cline 凭据。"},
-				{Name: "plan_refresh", Type: pluginapi.ConfigFieldTypeString, Description: "官方套餐用量的刷新间隔（例如 5m）。"},
+				{Name: "plan_refresh", Type: pluginapi.ConfigFieldTypeString, Description: "官方套餐、限额与官方用量的轮询周期（例如 5m）。留空即用默认 5m，最小 1 分钟。"},
 			},
 		},
 		Capabilities: registrationCapability{

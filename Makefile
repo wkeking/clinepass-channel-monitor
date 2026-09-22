@@ -37,7 +37,7 @@ LDFLAGS    := -s -w -X main.pluginVersion=$(BUILD_VER)
 # Where the CPA container reads plugins from. Override for your own deployment.
 INSTALL_DIR ?= /opt/cpa/plugins/$(GOOS)/$(GOARCH)
 
-.PHONY: all deps build strip test vet fmt lint clean install uninstall tools help
+.PHONY: all deps build strip test bench vet fmt lint clean install uninstall tools help
 
 all: build
 
@@ -58,6 +58,10 @@ $(BUILD_DIR)/$(LIB_NAME): $(wildcard $(REPO_ROOT)/*.go) $(REPO_ROOT)/go.mod $(RE
 ## test: run unit tests
 test:
 	$(GO_BIN) test ./...
+
+## bench: run the request-path benchmarks (hook cost, hashing, event marshalling)
+bench:
+	$(GO_BIN) test -run '^$$' -bench . -benchmem -benchtime 200x .
 
 ## vet: run go vet
 vet:

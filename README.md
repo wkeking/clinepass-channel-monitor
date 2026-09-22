@@ -308,7 +308,8 @@ JSONL 行示例：
 - `planningReasoning` 是上游网关的规划文本，默认**只记长度**（`store_planning_reasoning: false`，面板里不再暴露），页面里折叠展示，手工改成 `true` 才会落盘文本；
 - `api_key` 是**下游**（调用 CPA 的）key。默认与 CPA 用量记录保持一致原样落盘（面板里不再暴露），手工改成 `mask_api_key: true` 则只留前后 4 位；页面上永远只显示前 4 位…后 4 位（鼠标悬停可见完整值）;
 - 插件**不会**打印或返回 CPA 管理密钥、上游 API key 或 auth 文件内容；
-- 数据只出现在两个地方：鉴权过的管理接口，以及你配置的 `jsonl_dir` 下的 JSONL 文件。资源页面路由是静态壳，**不含任何数据**。
+- 数据只出现在两个地方：鉴权过的管理接口，以及你配置的 `jsonl_dir` 下的 JSONL 文件。资源页面路由是静态壳，**不含任何数据**；
+- 仓库里不出现任何真实凭据或抓包标识：`scripts/check-secrets.sh` 扫描工作区**和整个 git 历史**，只放行 `sk-TESTKEY…` / `gen_FIXTURE…` / `fp_fixture…` / `codex-fixture…` 这类明显合成的值，CI 每次推送都会跑一遍。测试里要造 key 就用这些前缀，别用真 key 的前几位。
 
 ## 排障
 

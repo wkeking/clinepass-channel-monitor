@@ -282,7 +282,7 @@ func TestMaskAPIKey(t *testing.T) {
 	cases := map[string]string{
 		"":                  "",
 		"short":             "****",
-		"sk-FIXTURE0000000100": "sk-1****abcd",
+		"sk-TESTKEY1234567890": "sk-T****7890",
 	}
 	for input, want := range cases {
 		if got := MaskAPIKey(input); got != want {

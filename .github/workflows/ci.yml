@@ -16,6 +16,8 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
+      - name: Check for committed credentials
+        run: scripts/check-secrets.sh
       - name: Install the pinned Go toolchain
         run: make tools
       - name: Check formatting

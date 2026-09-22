@@ -69,6 +69,9 @@ td.num,th.num{text-align:right}
 .detail pre{margin:0;max-height:260px;overflow:auto;font-size:12px;line-height:1.5;background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:11px}
 .msg{color:var(--muted);padding:16px}
 .hidden{display:none}
+/* 标题旁的说明图标：口径说明挂在 title 上，悬停显示 */
+.info{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;margin-left:6px;border-radius:50%;border:1px solid var(--line);color:var(--muted);font-size:11px;font-weight:700;line-height:1;vertical-align:middle;cursor:help;user-select:none}
+.info:hover{border-color:var(--accent);color:var(--accent)}
 .empty-row td{text-align:center;color:var(--muted);padding:20px}
 .plan{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:14px}
 .pcard{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px 16px}
@@ -121,8 +124,8 @@ td.num,th.num{text-align:right}
   </section>
 
   <section>
-    <h2>概览</h2>
-    <div class="sub" id="overview-note" style="margin:-4px 0 12px"></div>
+    <h2>概览<span class="info" id="overview-info" role="img" aria-label="概览口径说明" title="概览口径说明">!</span></h2>
+    <div class="sub hidden" id="overview-warn" style="margin:-4px 0 12px"></div>
     <div class="cards" id="cards"></div>
   </section>
 
@@ -283,31 +286,35 @@ function officialView(s){
   return {win:win,account:account,usage:usage,fetchedAt:usage.fetched_at||"",off:(account.windows||{})[win]||null};
 }
 
+// 概览口径说明挂在「概览」标题旁的感叹号上（悬停显示）；真正需要留意的告警仍然
+// 显示在标题下方，不能藏进 tooltip。
 function renderOverviewNote(view){
-  const el=$("overview-note");
-  if(!el)return;
-  const off=view.off, bits=[];
+  const icon=$("overview-info"), warn=$("overview-warn");
+  if(!icon||!warn)return;
+  const off=view.off, notes=[], warns=[];
   const acctTokens=(view.account&&view.account.tokens)||{};
   const cumRange=acctTokens.total_tokens?("（"+(acctTokens.from_date||"")+" ~ "+(acctTokens.to_date||"")+"）"):"";
   if(off&&off.detail!==false){
-    bits.push("「请求数 / 缓存命中率」为官方口径：Cline 账号（含 Cline IDE 等其他客户端）在"+windowLabel(view.win)+"内的计费记录。");
-    bits.push("「总 Token 数」为官方累计"+cumRange+"，与上方套餐区同口径，不是该时间窗的量。");
-    bits.push("「平均延时 / 生成速度」为本机口径：只统计经过本 CPA 的 Cline 请求。");
+    notes.push("「请求数 / 缓存命中率」为官方口径：Cline 账号（含 Cline IDE 等其他客户端）在"+windowLabel(view.win)+"内的计费记录。");
+    notes.push("「总 Token 数」为官方累计"+cumRange+"，与上方套餐区同口径，不是该时间窗的量。");
+    notes.push("「平均延时 / 生成速度」为本机口径：只统计经过本 CPA 的 Cline 请求。");
     if(off.covered===false){
-      bits.push('<span class="plan-warn">官方逐条记录覆盖自 '+esc(fmtTime(view.usage.oldest||""))+'，该窗口更早的部分未统计，官方数值偏低。</span>');
+      warns.push("官方逐条记录覆盖自 "+fmtTime(view.usage.oldest||"")+"，该窗口更早的部分未统计，官方数值偏低。");
     }
-    if(view.usage.error)bits.push('<span class="plan-warn">官方用量刷新失败：'+esc(view.usage.error)+"</span>");
+    if(view.usage.error)warns.push("官方用量刷新失败："+view.usage.error);
   }else if(off){
-    bits.push("「总 Token 数」为官方累计"+esc(cumRange||("（"+(off.from||"")+" ~ "+(off.to||"")+"）"))+"。");
-    bits.push("「请求数 / 缓存命中率 / 平均延时 / 生成速度」为本机口径：官方逐条明细不支持按时间过滤，7 天要上百次分页，因此这个窗口的明细仍取本机记录。");
-    if(off.covered===false)bits.push('<span class="plan-warn">官方汇总的覆盖范围待确认，数值可能偏低。</span>');
+    notes.push("「总 Token 数」为官方累计"+(cumRange||("（"+(off.from||"")+" ~ "+(off.to||"")+"）"))+"。");
+    notes.push("「请求数 / 缓存命中率 / 平均延时 / 生成速度」为本机口径：官方逐条明细不支持按时间过滤，7 天要上百次分页，因此这个窗口的明细仍取本机记录。");
+    if(off.covered===false)warns.push("官方汇总的覆盖范围待确认，数值可能偏低。");
   }else{
-    bits.push("「"+windowLabel(view.win)+"」使用本机口径：只统计经过本 CPA 的 Cline 请求。");
-    if(view.usage.enabled!==true)bits.push("官方用量未启用。");
-    else if(view.usage.error)bits.push('<span class="plan-warn">官方用量不可用：'+esc(view.usage.error)+"</span>");
-    else bits.push("官方用量尚未取到。");
+    notes.push("「"+windowLabel(view.win)+"」使用本机口径：只统计经过本 CPA 的 Cline 请求。");
+    if(view.usage.enabled!==true)warns.push("官方用量未启用。");
+    else if(view.usage.error)warns.push("官方用量不可用："+view.usage.error);
+    else warns.push("官方用量尚未取到。");
   }
-  el.innerHTML=bits.join(" ");
+  icon.title=notes.join("\n");
+  warn.innerHTML=warns.map(text=>'<span class="plan-warn">'+esc(text)+"</span>").join(" ");
+  warn.classList.toggle("hidden",warns.length===0);
 }
 
 function renderCards(s){

@@ -19,9 +19,11 @@ const (
 	// DefaultPlanBaseURL is Cline's public API. It is a default, never a hard requirement.
 	DefaultPlanBaseURL = "https://api.cline.bot/api/v1"
 	// DefaultPlanRefresh is how often the subscription quota is refreshed, and
-	// DefaultPlanUsageRefresh how often the official per-request records are paged.
+	// DefaultPlanUsageRefresh how often the official per-request records are paged. The
+	// usage interval is the longer one on purpose: the quota calls are cheap, while the
+	// per-request endpoint is cursor paginated and rate limited.
 	DefaultPlanRefresh      = 5 * time.Minute
-	DefaultPlanUsageRefresh = 5 * time.Minute
+	DefaultPlanUsageRefresh = 10 * time.Minute
 	defaultPlanRefresh      = DefaultPlanRefresh
 	defaultPlanUsageRefresh = DefaultPlanUsageRefresh
 	DefaultRingSize            = 5000
@@ -70,19 +72,23 @@ type Config struct {
 	JoinWindow Duration `yaml:"join_window"`
 	OrphanTTL  Duration `yaml:"orphan_ttl"`
 
+	// MaskAPIKey, LogEvents, StorePlanningReasoning, CaptureCost and CaptureCache have fixed
+	// defaults and are deliberately absent from the host's configuration panel: a deployment
+	// has no reason to change them. The YAML keys stay readable so an existing configuration
+	// block that still carries them keeps working.
 	MaskAPIKey             bool   `yaml:"mask_api_key"`
 	LogEvents              bool   `yaml:"log_events"`
 	CaptureCost            bool   `yaml:"capture_cost"`
 	CaptureCache           bool   `yaml:"capture_cache"`
 	StorePlanningReasoning bool   `yaml:"store_planning_reasoning"`
 	Timezone               string `yaml:"timezone"`
-	// SampleRate stores channel metadata for every Nth request (1-100, 100 = every request).
-	SampleRate int `yaml:"sample_rate"`
 
 	// ---- Cline 订阅用量（官方接口）----
-	// PlanEnabled turns the subscription quota card on. It needs a Cline API key:
-	// either plan_api_key below, or CPA's own Cline credential discovered through the
-	// management API on the loopback interface.
+	// The card is always on and the credential is discovered automatically, so PlanEnabled,
+	// PlanAPIKey, PlanBaseURL, PlanDailyEnabled, PlanUsageEnabled and PlanUsageRefresh keep
+	// their defaults and are not shown in the configuration panel. Only the two knobs a
+	// deployment may genuinely need to move are exposed: where to read CPA's config from,
+	// and how often to poll it.
 	PlanEnabled       bool     `yaml:"plan_enabled"`
 	PlanAPIKey        string   `yaml:"plan_api_key"`
 	PlanBaseURL       string   `yaml:"plan_base_url"`
@@ -147,6 +153,7 @@ func Default() Config {
 		JoinWindow:         Duration{Value: defaultJoinWindow, Set: true},
 		OrphanTTL:          Duration{Value: defaultOrphanTTL, Set: true},
 		MaskAPIKey:         false,
+		LogEvents:          true,
 		CaptureCost:        true,
 		CaptureCache:       true,
 		Timezone:           defaultTimezone,
@@ -229,9 +236,6 @@ func normalize(cfg *Config) {
 	}
 	if cfg.UnmatchedHostSmpl < 0 {
 		cfg.UnmatchedHostSmpl = defaultUnmatchedHostSample
-	}
-	if cfg.SampleRate < 1 || cfg.SampleRate > 100 {
-		cfg.SampleRate = 100
 	}
 	if strings.TrimSpace(cfg.JSONLDir) == "" {
 		cfg.JSONLDir = defaultJSONLDir

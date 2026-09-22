@@ -87,21 +87,16 @@ plugins:
       # ---- 关联 ----
       join_window: 5s                  # 渠道记录与用量记录的关联时间窗
       orphan_ttl: 60s                  # 渠道记录未被消费的判定时长
-      # ---- 展示与隐私 ----
-      mask_api_key: false              # true 时下游 key 只留前后 4 位
-      log_events: false                # true 时每条落盘行额外打一行 CPA 日志
+      # ---- 展示与隐私（下列带 # 的项是固定默认，不再出现在插件配置面板里）----
+      # mask_api_key: false             # 下游 key 原样落盘（改 true 则只留前后 4 位）
+      # log_events: true                # 每条落盘行额外打一行 CPA 日志
       capture_cost: true
       capture_cache: true
-      store_planning_reasoning: false  # 默认只存 planningReasoning 的长度，不存文本
+      # store_planning_reasoning: false # 只存 planningReasoning 的长度，不存文本
       timezone: "Asia/Shanghai"        # 页面展示时区
-      # ---- Cline 官方用量（套餐 / 限额 / 概览口径）----
-      plan_enabled: true               # 官方套餐卡片总开关
-      plan_api_key: ""                 # 留空则自动发现（不需要手填，见下文「官方用量」）
+      # ---- Cline 官方用量（套餐 / 限额 / 概览口径，恒定开启）----
       plan_config_path: "/CLIProxyAPI/config.yaml"   # 容器内 CPA config.yaml 路径，用于读 Cline 凭据
       plan_refresh: 5m                 # 套餐与限额刷新间隔
-      plan_daily_enabled: true         # 官方 Token 总量 / 成本 / 余额（最多每小时一次）
-      plan_usage_enabled: true         # 概览的请求数 / 总 Token 数 / 缓存命中率改用官方逐条用量
-      plan_usage_refresh: 5m           # 官方逐条用量的增量拉取间隔（最小 1m）
 ```
 
 改动配置后 CPA 会自动重扫并热加载插件（`reconfigure`）。
@@ -121,23 +116,32 @@ plugins:
 | `retention_days` | `30` | 超过天数的 `channel-monitor-YYYY-MM-DD.jsonl` 会被删除 |
 | `join_window` | `5s` | 渠道记录与用量记录的关联时间窗 |
 | `orphan_ttl` | `60s` | 渠道记录在该时长内未被任何用量记录消费 → 计入 `orphan_channel`（不落盘） |
-| `mask_api_key` | `false` | 掩码下游 key |
-| `log_events` | `false` | 额外把落盘行写进 CPA 日志 |
 | `capture_cost` / `capture_cache` | `true` | 是否记录成本字段 / 缓存字段 |
-| `store_planning_reasoning` | `false` | `false` 时只记 `planningReasoning` 长度，不记文本 |
 | `timezone` | `Asia/Shanghai` | 页面与时间戳展示时区 |
-| `plan_enabled` | `true` | 开启「Cline 套餐用量」区（套餐名、5 小时/周/月限额、官方 Token 总量）。需要能拿到 Cline API Key |
-| `plan_api_key` | 空 | 显式指定一把 Cline API Key。**留空即可**：插件会按 `plan_config_path` → CPA 凭据接口 → 上游请求头自动发现（实测留空时从 CPA 供应商配置的 `api-key-entries` 读到 key）；填了会与自动发现的 key 一起参与轮询（同一把 key 只算一次） |
-| `plan_base_url` | `https://api.cline.bot/api/v1` | Cline API 基址 |
 | `plan_config_path` | `/CLIProxyAPI/config.yaml` | 容器内 CPA 配置文件路径。Cline 的 key 通常以 `openai-compatibility[].api-key-entries[].api-key` 存在这里 |
-| `plan_refresh` | `5m` | 套餐与限额刷新间隔（最小 1 分钟） |
+| `plan_refresh` | `5m` | 套餐、限额与官方用量的轮询周期（最小 1 分钟） |
+
+### 固定值（不在插件配置面板里显示）
+
+这些键在插件配置面板里已经隐藏，值由插件固定给默认值；确实需要改时直接写进 CPA `config.yaml` 的插件配置块再重载即可（YAML 键仍然有效）。
+
+| 键 | 固定值 | 说明 |
+|---|---|---|
+| `mask_api_key` | `false` | 下游 key 原样落盘。改 `true` 只留前后 4 位 |
+| `log_events` | `true` | 每条落盘行额外写一行 CPA 日志 |
+| `store_planning_reasoning` | `false` | 只记 `planningReasoning` 长度，不记文本 |
+| `plan_enabled` | `true` | 「Cline 套餐用量」区始终开启 |
+| `plan_api_key` | 空 | 不手填；插件自动发现 Cline 凭据（见下文「凭据发现顺序」） |
+| `plan_base_url` | `https://api.cline.bot/api/v1` | 只有走代理 / 自建 Cline API 时才需要改 |
 | `plan_daily_enabled` | `true` | 另拉官方 Token 总量 / 成本 / 余额，最多每小时一次 |
-| `plan_usage_enabled` | `true` | 概览的请求数 / 总 Token 数 / 缓存命中率改用官方逐条用量口径（延时与生成速度仍是本机口径） |
-| `plan_usage_refresh` | `5m` | 官方逐条用量的增量拉取间隔（最小 1 分钟） |
+| `plan_usage_enabled` | `true` | 概览的请求数 / 总 Token 数 / 缓存命中率用官方逐条用量口径（延时与生成速度仍是本机口径） |
+| `plan_usage_refresh` | `10m` | 官方逐条用量的增量拉取间隔（最小 1 分钟；只有大于 `plan_refresh` 时才起作用） |
+
+`sample_rate` 已删除：这个键从未生效过（插件从第一天起就是"命中即记录"，采样从未接线），面板和 YAML 里的旧值都会被忽略。
 
 ## 官方用量（套餐、限额、概览口径）
 
-开启 `plan_enabled` 后，插件用同一个 Cline API Key 调用 Cline 控制台自己用的接口，页面上多出一块「Cline 套餐用量」，并把概览的部分卡片切到官方口径。
+插件用 CPA 自己的 Cline API Key 调用 Cline 控制台自己用的接口，页面上多出一块「Cline 套餐用量」，并把概览的部分卡片切到官方口径。这块数据始终开启，不需要配置。
 
 | 接口 | 用途 | 备注 |
 |---|---|---|
@@ -160,7 +164,7 @@ plugins:
 - 被上游拒绝的凭据（401/403，例如误把下游客户端 key 当成 Cline key）不进账号下拉，只在 `/health` 的 `plan_accounts` 里保留（带 `rejected: true`）；
 - 上游调用量按账号叠加：账号之间串行并间隔 0.5s，每个账号有自己的 26 小时保留窗口、分页预算与退避。
 
-**凭据发现顺序**：`plan_api_key` → CPA `config.yaml` 里的 `openai-compatibility[].api-keys` / `api-key-entries` → CPA 凭据接口（`host.auth.list` / `host.auth.get`）→ 最近一次上游请求的 `Authorization`（只接受形如 Cline key 的长 `sk_…` 值；下游客户端 key 是 20 字符的 `sk-…`，会被忽略，避免多出一个永远不可用的账号）。多数部署走到第三步就够了：CPA 会把你在供应商配置里填的 key 持久化到 `openai-compatibility[].api-key-entries[].api-key`，所以 `plan_api_key` 可以一直留空（少一份密钥副本），只有把配置文件放到容器外读不到时才需要显式填。key 只留在内存，不落盘、不打日志、不返回给页面。
+**凭据发现顺序**：CPA `config.yaml` 里的 `openai-compatibility[].api-keys` / `api-key-entries` → CPA 凭据接口（`host.auth.list` / `host.auth.get`）→ 最近一次上游请求的 `Authorization`（只接受形如 Cline key 的长 `sk_…` 值；下游客户端 key 是 20 字符的 `sk-…`，会被忽略，避免多出一个永远不可用的账号）。多数部署走到第一步就够了：CPA 会把你在供应商配置里填的 key 持久化到 `openai-compatibility[].api-key-entries[].api-key`，不需要手填任何 key（少一份密钥副本）；只有把配置文件放到容器外读不到时才需要手工写 `plan_api_key`。key 只留在内存，不落盘、不打日志、不返回给页面。
 
 **概览五块**（顺序：请求数 · 总 Token 数 · 缓存命中率 · 平均延时 · 生成速度，固定一行不换行）：
 
@@ -172,7 +176,7 @@ plugins:
 
 **上游调用量与限流**：逐条明细接口不能按时间过滤，窗口内有多少条记录就要翻多少页（实测近 24 小时约 3500 条 ≈ 17 页）。因此插件在内存里保留最近 **26 小时**的记录，稳态下每次只翻到已见过的记录为止（通常 1 页）；首次回填或覆盖不足时按 300ms/页 节流，最多 60 页，遇到 429 等错误会指数退避（上限 30 分钟），所以覆盖范围会在几个刷新周期内长满，而不是一次打满。近 7 天要多翻上百页，所以这个窗口的明细不取官方，改用 `/usages/daily` 一次请求拿到的逐日汇总（token 与成本）。
 
-插件重载后需要重新回填；采集状态（条数、覆盖起点、是否截断、失败次数、下次重试时间）见 `/health` 的 `plan_usage`。想完全避免这部分上游调用，可以设 `plan_usage_enabled: false`（概览回到本机口径）或 `plan_enabled: false`（整块官方数据关闭）。
+插件重载后需要重新回填；采集状态（条数、覆盖起点、是否截断、失败次数、下次重试时间）见 `/health` 的 `plan_usage`。逐条用量的增量拉取默认每 **10 分钟**一次（`plan_usage_refresh`，只有大于 `plan_refresh` 的 5 分钟轮询周期时才起作用），官方 Token 总量与余额最多每小时一次。要彻底停掉这部分上游调用，只能手工在插件配置块里写 `plan_usage_enabled: false`（概览回到本机口径）或 `plan_enabled: false`（整块官方数据关闭）——这两个键已不在配置面板里。
 
 ## 适配你自己的 Cline 条目
 
@@ -301,8 +305,8 @@ JSONL 行示例：
 ## 隐私
 
 - 默认**不落任何 prompt / 响应正文**，只记元数据（渠道、用量、成本、缓存）；
-- `planningReasoning` 是上游网关的规划文本，默认**只记长度**（`store_planning_reasoning: false`），页面里折叠展示，开启后才会落盘文本；
-- `api_key` 是**下游**（调用 CPA 的）key。默认与 CPA 用量记录保持一致原样落盘，可用 `mask_api_key: true` 只留前后 4 位；
+- `planningReasoning` 是上游网关的规划文本，默认**只记长度**（`store_planning_reasoning: false`，面板里不再暴露），页面里折叠展示，手工改成 `true` 才会落盘文本；
+- `api_key` 是**下游**（调用 CPA 的）key。默认与 CPA 用量记录保持一致原样落盘（面板里不再暴露），手工改成 `mask_api_key: true` 则只留前后 4 位；页面上永远只显示前 4 位…后 4 位（鼠标悬停可见完整值）;
 - 插件**不会**打印或返回 CPA 管理密钥、上游 API key 或 auth 文件内容；
 - 数据只出现在两个地方：鉴权过的管理接口，以及你配置的 `jsonl_dir` 下的 JSONL 文件。资源页面路由是静态壳，**不含任何数据**。
 
@@ -319,6 +323,7 @@ JSONL 行示例：
 | 渠道列有值但用量/缓存列是 0 | 关联失败或该请求确实没有 token 统计；看 `channel_missing` 与 CPA 侧用量记录对账 |
 | JSONL 没有生成 | `jsonl_enabled: false`、`jsonl_dir` 不可写（看 `health.write_error`）、或宿主与容器目录映射不一致 |
 | 插件突然不出数据了 | 看 `health.fused`；插件 panic 会被宿主 fuse，CPA 日志里会有对应 error |
+| 套餐卡片提示「插件拿不到 Cline API Key」 | 插件读的是 CPA 自己的 Cline 凭据：确认 CPA 里有指向 `api.cline.bot` 的 `openai-compatibility` 条目，且 `plan_config_path` 指向容器内可读的 `config.yaml`；`/health` 的 `plan_accounts` 会列出每个凭据的来源、可用性与错误 |
 | 升级 CPA 后行为变化 | 回到本文「环境要求」，核对 `X-Cpa-Support-Plugin` 头、`abi_version`/`schema_version`，并重新跑一次发请求→看 `health`→看 JSONL 的链路 |
 
 常用命令（管理密钥用环境变量传入，不要写进脚本或文档）：

@@ -392,10 +392,11 @@ function renderPlan(plan){
     msg.className="msg plan-err";
     const error=(view&&view.error)||(plan&&plan.error)||"";
     if(error.indexOf("no Cline api key")>=0){
-      msg.innerHTML='未取到官方用量：插件拿不到 Cline API Key。请二选一：'+
-        '① 在插件配置里填 <code>plan_api_key</code>（就是配置 Cline 条目时用的那个 key）；'+
-        '② 保持 <code>plan_enabled: false</code> 关闭这张卡片。'+
-        '<br>读取顺序：插件配置 <code>plan_api_key</code> → CPA 的 config.yaml（<code>openai-compatibility[].api-key-entries</code>）→ CPA 凭据接口 → 最近一次上游请求的 Authorization 头。';
+      msg.innerHTML='未取到官方用量：插件拿不到 Cline API Key。'+
+        '插件会自动读取 CPA 自己的 Cline 凭据，通常不需要配置：确认 CPA 里有 Cline 供应商条目'+
+        '（<code>openai-compatibility</code>，条目名是 <code>Cline</code> 或 base-url 命中插件配置的 <code>hosts</code>），'+
+        '并确认 <code>plan_config_path</code> 指向容器内可读的 config.yaml。'+
+        '<br>读取顺序：CPA config.yaml（<code>openai-compatibility[].api-key-entries</code>）→ CPA 凭据接口 → 最近一次上游请求的 Authorization 头。';
     }else if(list.length>1&&error){
       msg.textContent="该账号官方用量暂不可用（"+(view.label||"")+"）："+error;
     }else{

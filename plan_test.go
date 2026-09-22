@@ -346,3 +346,56 @@ func TestPlanPollerMarksRejectedCredential(t *testing.T) {
 		t.Errorf("被拒绝的凭据不应可用")
 	}
 }
+
+// TestClineCredentialsMatchByHostOrName locks the rule that answers "which provider config
+// does the official usage key come from": an entry matches when its base-url host is in
+// hosts (default api.cline.bot) or when its name is exactly Cline (self-hosted relay), and
+// disabled entries are skipped.
+func TestClineCredentialsMatchByHostOrName(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	content := "openai-compatibility:\n" +
+		"  - name: CP\n" +
+		"    base-url: https://api.cline.bot/api/v1\n" +
+		"    api-key-entries:\n" +
+		"      - api-key: key-by-host\n" +
+		"  - name: Cline\n" +
+		"    base-url: https://relay.example.com/v1\n" +
+		"    api-key-entries:\n" +
+		"      - api-key: key-by-name\n" +
+		"  - name: Other\n" +
+		"    base-url: https://opencode.ai/zen/go/v1\n" +
+		"    api-keys: [key-not-cline]\n" +
+		"  - name: Cline\n" +
+		"    base-url: https://api.cline.bot/api/v1\n" +
+		"    disabled: true\n" +
+		"    api-keys: [key-disabled]\n"
+	if errWrite := os.WriteFile(path, []byte(content), 0o600); errWrite != nil {
+		t.Fatalf("write fixture: %v", errWrite)
+	}
+	cfg := defaultConfig()
+	cfg.PlanConfigPath = path
+	creds := clineCredentialsFromConfigFile(cfg)
+	got := map[string]string{}
+	for _, cred := range creds {
+		got[cred.Key] = cred.Label
+	}
+	if len(creds) != 2 {
+		t.Fatalf("creds = %+v，期望按 host 与 name 各命中一个（disabled 与非 Cline 条目跳过）", creds)
+	}
+	if _, ok := got["key-by-host"]; !ok {
+		t.Errorf("base-url host 命中 hosts 的条目应被采纳: %v", got)
+	}
+	if _, ok := got["key-by-name"]; !ok {
+		t.Errorf("条目名是 Cline 的条目应被采纳（自建反代）: %v", got)
+	}
+	if _, ok := got["key-not-cline"]; ok {
+		t.Errorf("不相关条目不应被采纳")
+	}
+	if _, ok := got["key-disabled"]; ok {
+		t.Errorf("disabled 条目不应被采纳")
+	}
+	if label := got["key-by-host"]; label != "CP #1 · key…host" {
+		t.Errorf("label = %q，期望用条目名做前缀", label)
+	}
+}

@@ -10,9 +10,11 @@ Cline 的请求打到网关后，由 **Cline 自己**决定这次请求最终落
 
 本插件使用 CPA 的 **`response.normalize_before`**（能力 `response_before_translator`）钩子，运行在「翻译之前」，因此对 `/v1/chat/completions`、`/v1/responses` 等端点都能拿到原始的 `provider_metadata.gateway.routing.finalProvider`，再用 `usage.handle` 钩子拿到用量记录，两者关联成一行落盘。
 
+渠道列取值的顺序是 **`finalProvider` → 上游响应的 `provider` 字段 → 空**。走 Cline 自己网关的模型（如 `cline-pass/deepseek-v4.1-flash`、`cline-pass/kimi-k3`）响应里带 `provider_metadata.gateway.routing`；走 OpenRouter 一类后端的模型（如 `cline-pass/glm-5.3-flash`）不带它，只给一个 `provider`（`Relace`、`Photon`、`CoreWeave`……），这些请求同样记录、同样进渠道分布，只是值来自另一个字段。两个字段都没有时该行渠道列留空，页面显示 `—`。**host 命中 `hosts` 就落一行**，不要求必须有渠道证据（`require_routing_marker: true` 可以把记录收窄回严格口径）。
+
 ## 能力一览
 
-- 逐请求记录最终渠道：`final_provider` / `resolved_provider` / `canonical_slug` / 尝试次数 / 兜底候选数量；
+- 逐请求记录最终渠道：`final_provider`（优先 `finalProvider`，缺失时用上游响应的 `provider` 字段）/ `resolved_provider` / `canonical_slug` / 尝试次数 / 兜底候选数量；
 - 记录上游给出的实际成本：`gateway.cost` / `inputInferenceCost` / `outputInferenceCost` / `generationId`；
 - 记录 token 与缓存：`input/output/reasoning/total_tokens`、`cached_tokens`、`prompt_cache_hit_tokens` / `prompt_cache_miss_tokens`、`systemFingerprint`；
 - 按天切分 JSONL 落盘（默认开启）+ 内存环形缓冲供页面即时查询；
@@ -29,7 +31,7 @@ Cline 的请求打到网关后，由 **Cline 自己**决定这次请求最终落
 | 插件 ABI | `abi_version = 1` |
 | 插件 schema | `schema_version = 6` |
 | 平台 | `linux/amd64`、`linux/arm64` |
-| 上游 | 需要上游（Cline 网关）在响应里返回 `provider_metadata`，否则本插件只会记录用量、渠道列留空 |
+| 上游 | 响应里带 `provider_metadata.gateway.routing` 或 `provider` 字段时渠道列有值；两者都没有（失败请求常见）时渠道列留空，页面显示 `—` |
 
 > 版本兼容声明：本插件按 CPA v7.3.8 的 SDK 契约开发，已在 v7.3.10 上核对 `sdk/pluginapi`、`sdk/pluginabi`、`sdk/translator` 与插件宿主适配层均无差异。CPA 大版本升级后请回到本文「排障」一节按表自查。
 
@@ -74,9 +76,9 @@ plugins:
       enabled: true
       priority: 1
       # ---- 判定规则 ----
-      hosts: ["api.cline.bot"]        # 主判据：usage 记录 BaseURL 的 host（支持 ".cline.bot" 后缀写法）
-      require_routing_marker: true     # 强制：响应里必须真的出现过 provider_metadata.gateway.routing
-      unmatched_host_samples: 20       # 「带渠道证据但 host 未命中」的样本保留条数
+      hosts: ["api.cline.bot"]         # 唯一的判据：usage 记录 BaseURL 的 host（支持 ".cline.bot" 后缀写法）
+      require_routing_marker: false    # 严格模式（默认关）：开启后只记录响应带 provider_metadata.gateway.routing 的请求
+      unmatched_host_samples: 20       # host 未命中而跳过的样本保留条数
       # ---- 存储 ----
       ring_size: 5000                  # 内存环形缓冲条数（页面即时查询用）
       jsonl_enabled: true              # 默认开启 JSONL 落盘
@@ -110,9 +112,9 @@ plugins:
 |---|---|---|
 | `enabled` | `true` | 关闭后不再注册任何路由、不再写盘、不再计数 |
 | `priority` | `1` | 插件优先级 |
-| `hosts` | `["api.cline.bot"]` | 判定用 host 列表。匹配规则：用 `net/url` 解析 `UsageRecord.BaseURL` 取 host 后**小写精确比较**；以 `.` 开头的项按**域名后缀**匹配（`".cline.bot"` 命中 `api.cline.bot`，不命中 `evil-cline.bot`）。显式留空 `[]` → 退化为只看渠道证据（marker-only） |
-| `require_routing_marker` | `true` | 要求该请求的响应里真的出现过 `provider_metadata.gateway.routing`。建议保持开启 |
-| `unmatched_host_samples` | `20` | `health` 里保留的「带渠道证据但 host 未命中」样本条数 |
+| `hosts` | `["api.cline.bot"]` | 唯一的判定项：请求的 host 列表。匹配规则：用 `net/url` 解析 `UsageRecord.BaseURL` 取 host 后**小写精确比较**；以 `.` 开头的项按**域名后缀**匹配（`".cline.bot"` 命中 `api.cline.bot`，不命中 `evil-cline.bot`）。显式留空 `[]` → 不再看 host，所有请求都记录（`health` 里 `mode: "marker-only"`） |
+| `require_routing_marker` | `false` | 严格模式。开启后只记录响应里出现过 `provider_metadata.gateway.routing` 的请求；关闭时（默认）host 命中即记录，渠道值按 `finalProvider` → `provider` → 空 的顺序取 |
+| `unmatched_host_samples` | `20` | `health` 里保留的 host 未命中样本条数 |
 | `ring_size` | `5000` | 内存环形缓冲条数，决定页面能查的最近数据量（JSONL 里保留全量） |
 | `jsonl_enabled` | `true` | 是否落盘 |
 | `jsonl_dir` | 见配置块 | JSONL 目录。需是 CPA 进程可写目录；默认值按常见部署给出，**请按自己的部署环境确认可写** |
@@ -176,7 +178,7 @@ plugins:
 
 插件**不依赖**你在 CPA 里给上游条目起的名字（`openai-compatibility[].name` 派生的内部 provider key 只作为诊断字段落盘，不参与任何判定），因此改名、换模型别名都不影响记录。
 
-判定只看两件事：**① usage 记录的 base_url host 在 `hosts` 里** 且 **② 该请求响应里出现过渠道证据**。
+判定只看一件事：**usage 记录的 base_url host 在 `hosts` 里**，命中即记录一行。行里的渠道值按 **`finalProvider` → 上游响应的 `provider` 字段 → 空** 的顺序取，两个都没有时留空、页面显示 `—`。想要「只记走 Cline 网关的请求」就打开 `require_routing_marker: true`。
 
 ### 形态 1：直连 `api.cline.bot`
 
@@ -184,7 +186,7 @@ plugins:
 
 ```yaml
 hosts: ["api.cline.bot"]
-require_routing_marker: true
+require_routing_marker: false
 ```
 
 ### 形态 2：自建反代 / 中转 / 自建 PaaS（host 不是 `api.cline.bot`）
@@ -198,7 +200,7 @@ require_routing_marker: true
   ```
 
   `".example.com"` 这种写法会命中该域名下的所有子域。
-- 或者直接退化为「只看渠道证据」：`hosts: []`。此时只要响应里带渠道元数据就记录，`health` 会显示 `mode: "marker-only"`。适合无法确定 host 或中转层会改写 base_url 的场景。
+- 或者直接不看 host：`hosts: []`。此时所有经过 CPA 的请求都会记录（含非 Cline 流量），`health` 会显示 `mode: "marker-only"`。适合无法确定 host 或中转层会改写 base_url 的场景。
 
 ### 形态 3：条目名不是 `Cline`（例如叫 `ClinePass`、`CP`）
 
@@ -213,9 +215,9 @@ curl -s -H "Authorization: Bearer $CPA_MANAGEMENT_KEY" \
   http://127.0.0.1:8317/v0/management/plugins/clinepass-channel-monitor/health
 ```
 
-- `skipped_unmatched_host > 0` 且 `unmatched_host_samples` 非空 → 说明请求**确实走了 Cline 网关**（有渠道证据），只是 host 不在 `hosts` 里。样本里直接给出 `host`/`provider`/`model`/时间，把那串 host 加进 `hosts`（或清空 `hosts`）即可；
-- `marker_missing > 0` → host 命中但响应里没有渠道证据：可能是该请求没走 Cline 网关，也可能是上游改了字段名（见「排障」）；
-- 两者都是 `0` 且 `recorded > 0` → 正常工作中。
+- `skipped_unmatched_host > 0` 且 `unmatched_host_samples` 非空 → 有请求走了 `hosts` 之外的 host 而被跳过。样本里给出 `host`/`provider`/`model`/时间，把那串 host 加进 `hosts`（或把 `hosts` 清空）即可；
+- `requests` 与 `recorded` 基本相等 → 正常。只有开了 `require_routing_marker: true` 才会出现 `marker_missing`（响应里没有 `provider_metadata.gateway.routing` 而被跳过）；
+- 明细里渠道列是 `—` → 该行上游既没给 `provider_metadata.gateway.routing` 也没给 `provider` 字段（失败请求常见），`channel_missing` 计数与之对应。
 
 ## 页面与接口
 
@@ -256,7 +258,7 @@ JSONL 每行一个 JSON 对象，按天切分：`<jsonl_dir>/channel-monitor-YYY
 | token | `input_tokens` / `output_tokens` / `reasoning_tokens` / `total_tokens` | usage 记录 `Detail` | |
 | 缓存 | `cached_tokens` / `cache_read_tokens` / `cache_creation_tokens` | usage 记录 `Detail` | CPA 侧统计 |
 | 缓存（渠道） | `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens` / `system_fingerprint` | 渠道元数据 | 上游侧统计，与上一组来源不同 |
-| 渠道 | `final_provider` / `resolved_provider` / `canonical_slug` / `original_model_id` | 渠道元数据 | 本次实际服务的上游渠道 |
+| 渠道 | `final_provider` / `resolved_provider` / `canonical_slug` / `original_model_id` | 渠道元数据 | 本次实际服务的上游渠道（`final_provider` 优先取 `finalProvider`，缺失时取上游响应的 `provider`） |
 | 成本 | `cost` / `input_cost` / `output_cost` / `generation_id` | 渠道元数据 `gateway.*` | 上游按请求给出的实际美元成本 |
 | 渠道尝试 | `model_attempt_count` / `total_provider_attempt_count` / `fallbacks_available_count` | 渠道元数据 | 用来看是否发生兜底；只记候选数量，不记候选全量 |
 | 协议 | `client_protocol` / `upstream_protocol` / `stream` | 渠道钩子 | 例如 `openai-response` / `openai` |
@@ -285,14 +287,14 @@ JSONL 行示例：
 
 | 字段 | 含义 |
 |---|---|
-| `mode` | `host+marker`（正常）或 `marker-only`（`hosts: []`） |
-| `recorded` | 已落盘的请求数 |
-| `skipped_unmatched_host` | 出现渠道证据但 host 未命中而跳过的请求数（配错 `hosts` 的信号） |
+| `mode` | `host+marker`（`hosts` 非空）或 `marker-only`（`hosts: []`） |
+| `recorded` | 已落盘的请求数（host 命中即落盘，`requests - recorded` 就是被跳过的数量） |
+| `skipped_unmatched_host` | host 未命中而跳过的请求数（配错 `hosts` 的信号） |
 | `unmatched_host_samples` | 上述跳过的最近样本（host/provider/model/时间） |
-| `marker_missing` | host 命中但响应里没有渠道证据的次数 |
+| `marker_missing` | 严格模式（`require_routing_marker: true`）下因响应缺少 `gateway.routing` 而跳过的次数 |
 | `parse_error` | 渠道元数据解析失败次数（不影响响应） |
 | `orphan_channel` | 渠道记录在 `orphan_ttl` 内未被任何用量记录消费的次数 |
-| `channel_missing` | 落盘行里渠道列留空的行数（失败请求等） |
+| `channel_missing` | 落盘行里渠道列为空的行数（上游两个字段都没有，或请求失败） |
 | `write_error` | JSONL 写入失败次数 |
 | `fused` | 插件是否被宿主 fuse（插件 panic 后宿主会禁用它，CPA 日志有 error 记录） |
 
@@ -312,8 +314,8 @@ JSONL 行示例：
 | 加载失败、日志提示 ABI 不符 | 需要 CPA ≥ v7.3.8 的**带插件支持**构建（`X-Cpa-Support-Plugin: 1`）；插件声明 `abi_version = 1`、`schema_version = 6` |
 | 插件在 `plugins` 列表里但页面 404 | 检查 CPA 版本是否满足；改一次配置触发重扫；确认资源路由路径为 `/v0/resource/plugins/clinepass-channel-monitor/index.html` |
 | 页面能开但一直空 | 页面里的管理密钥没填或填错（管理接口会返回 401/403）；或窗口内确实没有命中记录，先看 `health` |
-| 有请求但一条都没记录 | 看 `health`：`skipped_unmatched_host > 0` → host 不匹配，按「适配你自己的 Cline 条目」处理；全是 `marker_missing` → 该请求没走 Cline 网关，或上游不再返回 `provider_metadata` |
-| `final_provider` 一直是空 | 该请求在 Cline 网关侧没有产出渠道元数据（例如失败请求）；失败请求 `channel_missing=true` 是预期状态 |
+| 有请求但一条都没记录 | 看 `health`：`skipped_unmatched_host > 0` → host 不匹配，按「适配你自己的 Cline 条目」处理；开了 `require_routing_marker` 且 `marker_missing` 在涨 → 这些响应没有 `provider_metadata.gateway.routing`，关掉严格模式即可 |
+| `final_provider` 一直是空 | 上游响应里既没有 `provider_metadata.gateway.routing` 也没有 `provider` 字段（失败请求常见）；该行渠道列显示 `—`，并在 `channel_missing` 里计数 |
 | 渠道列有值但用量/缓存列是 0 | 关联失败或该请求确实没有 token 统计；看 `channel_missing` 与 CPA 侧用量记录对账 |
 | JSONL 没有生成 | `jsonl_enabled: false`、`jsonl_dir` 不可写（看 `health.write_error`）、或宿主与容器目录映射不一致 |
 | 插件突然不出数据了 | 看 `health.fused`；插件 panic 会被宿主 fuse，CPA 日志里会有对应 error |

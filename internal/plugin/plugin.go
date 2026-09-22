@@ -159,7 +159,7 @@ func buildRegistration() registration {
 			GitHubRepository: buildinfo.Repository,
 			ConfigFields: []pluginapi.ConfigField{
 				{Name: "hosts", Type: pluginapi.ConfigFieldTypeArray, Description: "需要记录的请求所属的主机名（Base URL 的 host）。以 . 开头表示匹配域名后缀；留空表示记录所有携带网关路由元数据的请求。"},
-				{Name: "require_routing_marker", Type: pluginapi.ConfigFieldTypeBoolean, Description: "要求上游响应里出现 provider_metadata.gateway.routing 才记录该请求。"},
+				{Name: "require_routing_marker", Type: pluginapi.ConfigFieldTypeBoolean, Description: "严格模式：只有响应里出现过 provider_metadata.gateway.routing 的请求才记录。默认关闭，此时所有命中 hosts 的请求都会记录，渠道值优先取 finalProvider，其次取上游响应的 provider 字段，两者都没有时留空。"},
 				{Name: "unmatched_host_samples", Type: pluginapi.ConfigFieldTypeInteger, Description: "保留多少条主机名不匹配的样本，用于自诊断。"},
 				{Name: "ring_size", Type: pluginapi.ConfigFieldTypeInteger, Description: "管理页使用的内存环形缓冲区条数上限。"},
 				{Name: "jsonl_enabled", Type: pluginapi.ConfigFieldTypeBoolean, Description: "为每条已记录的请求追加一行 JSON 到按天切分的 JSONL 文件。"},

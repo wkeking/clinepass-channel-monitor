@@ -110,19 +110,90 @@ func TestExtractChannelRejectsMalformedJSON(t *testing.T) {
 	}
 }
 
-func TestExtractChannelRequiresGatewayRouting(t *testing.T) {
+func TestExtractChannelIgnoresMetadataWithoutRoutingOrProvider(t *testing.T) {
 	body := []byte(`{"choices":[{"delta":{"provider_metadata":{"gateway":{"cost":"0.1"}}}}]}`)
 	if meta := ExtractChannelFromBody(body, false); meta != nil {
-		t.Fatalf("provider_metadata without gateway.routing is not routing evidence, got %+v", meta)
+		t.Fatalf("neither gateway.routing nor a serving provider is a channel value, got %+v", meta)
+	}
+}
+
+func TestExtractChannelFromWrappedNonStreamBody(t *testing.T) {
+	body := readFixture(t, "chat_nonstream_wrapped_channel.json")
+	meta := ExtractChannelFromBody(body, false)
+	if meta == nil {
+		t.Fatal("expected channel metadata inside Cline's non-streaming wrapper")
+	}
+	if meta.FinalProvider != "baseten" {
+		t.Errorf("final_provider = %q, want baseten", meta.FinalProvider)
+	}
+	if meta.ResolvedProvider != "baseten" || meta.CanonicalSlug != "zai/glm-5.3" {
+		t.Errorf("resolved_provider/canonical_slug = %q/%q", meta.ResolvedProvider, meta.CanonicalSlug)
+	}
+	if meta.Cost != "0.000248" || meta.GenerationID == "" {
+		t.Errorf("cost/generation_id = %q/%q", meta.Cost, meta.GenerationID)
+	}
+	if meta.UpstreamModel != "zai/glm-5.3" || meta.UpstreamPromptTokens != 33 {
+		t.Errorf("upstream model/usage = %q/%d", meta.UpstreamModel, meta.UpstreamPromptTokens)
+	}
+}
+
+func TestExtractChannelFallsBackToServingProvider(t *testing.T) {
+	body := readFixture(t, "chat_nonstream_wrapped_provider.json")
+	meta := ExtractChannelFromBody(body, false)
+	if meta == nil {
+		t.Fatal("a response without gateway routing must still be labelled by its serving provider")
+	}
+	if meta.FinalProvider != "Relace" {
+		t.Errorf("final_provider = %q, want Relace", meta.FinalProvider)
+	}
+	if meta.ResolvedProvider != "" || meta.Cost != "" {
+		t.Errorf("routing-only fields must stay empty, got %q/%q", meta.ResolvedProvider, meta.Cost)
+	}
+	if meta.UpstreamModel != "z-ai/glm-5.3-flash" || meta.UpstreamCompletionTokens != 45 {
+		t.Errorf("upstream model/usage = %q/%d", meta.UpstreamModel, meta.UpstreamCompletionTokens)
+	}
+}
+
+func TestExtractChannelFromProviderFrame(t *testing.T) {
+	frames := strings.Split(strings.TrimSpace(string(readFixture(t, "sse_provider_frames.jsonl"))), "\n")
+	meta := ExtractChannelFromBody([]byte(frames[0]), false)
+	if meta == nil || meta.FinalProvider != "Relace" {
+		t.Fatalf("an SSE frame carrying a serving provider must produce an observation, got %+v", meta)
+	}
+	if meta.UpstreamModel != "z-ai/glm-5.3-flash" {
+		t.Errorf("upstream model = %q", meta.UpstreamModel)
+	}
+	if done := ExtractChannelFromBody([]byte(frames[len(frames)-1]), false); done != nil {
+		t.Errorf("[DONE] must not produce an observation, got %+v", done)
+	}
+}
+
+func TestExtractChannelPrefersGatewayRoutingOverProvider(t *testing.T) {
+	body := []byte(`{"provider":"alibaba","model":"deepseek/deepseek-v4.1-flash",` +
+		`"choices":[{"delta":{"provider_metadata":{"gateway":{"routing":{"finalProvider":"deepseek"}}}}}]}`)
+	meta := ExtractChannelFromBody(body, false)
+	if meta == nil || meta.FinalProvider != "deepseek" {
+		t.Fatalf("finalProvider must win over the serving provider, got %+v", meta)
+	}
+}
+
+func TestExtractChannelWithoutAnyChannelField(t *testing.T) {
+	body := []byte(`{"success":true,"data":{"id":"x","model":"m",` +
+		`"choices":[{"message":{"role":"assistant","content":"ok"}}]}}`)
+	if meta := ExtractChannelFromBody(body, false); meta != nil {
+		t.Errorf("a body with neither field must not produce an observation, got %+v", meta)
 	}
 }
 
 func TestHasChannelMarkerEarlyExit(t *testing.T) {
 	if HasChannelMarker([]byte(`{"choices":[{"delta":{"content":"no channel info"}}]}`)) {
-		t.Error("body without the marker needle must be rejected")
+		t.Error("body without either needle must be rejected")
 	}
 	if !HasChannelMarker([]byte(`{"provider_metadata":{}}`)) {
-		t.Error("body with the marker needle must pass the early-out")
+		t.Error("body with the provider_metadata needle must pass the early-out")
+	}
+	if !HasChannelMarker([]byte(`{"provider":"Relace","model":"z-ai/glm-5.3-flash"}`)) {
+		t.Error("body with the serving-provider needle must pass the early-out")
 	}
 }
 

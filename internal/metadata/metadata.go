@@ -12,10 +12,16 @@ import (
 	"strings"
 )
 
-// markerNeedle is the cheapest possible early-out: every payload that carries channel
-// information contains this byte sequence, so a body without it is rejected before
-// any JSON is parsed.
-var markerNeedle = []byte("provider_metadata")
+// The two needles below are the cheapest possible early-out: a body that carries channel
+// information contains at least one of them, so a body that contains neither is rejected
+// before any JSON is parsed.
+var (
+	// markerNeedle matches Cline's own channel evidence (provider_metadata).
+	markerNeedle = []byte("provider_metadata")
+	// providerNeedle matches the serving-provider field that the routes Cline does not
+	// serve through its own gateway report instead of provider_metadata.
+	providerNeedle = []byte(`"provider"`)
+)
 
 // routingMarkerNeedle is the hard evidence that a request really carried gateway
 // routing information: provider_metadata.gateway.routing.
@@ -66,19 +72,27 @@ type ChannelMetadata struct {
 
 // upstreamEnvelope is the subset of an upstream completion payload that this plugin
 // reads. Streaming (choices[].delta) and non-streaming (choices[].message) shapes are
-// both accepted, with a top-level provider_metadata fallback.
+// both accepted, with a top-level provider_metadata fallback. Cline's non-streaming
+// wrapper ({"success":true,"data":{…}}) is unwrapped before the fields are read.
 type upstreamEnvelope struct {
+	// Data holds the completion when the upstream answered through Cline's wrapper.
+	Data *upstreamEnvelope `json:"data"`
+
 	Choices []struct {
 		Message *choicePayload `json:"message"`
 		Delta   *choicePayload `json:"delta"`
 	} `json:"choices"`
 	ProviderMetadata *rawProviderMetadata `json:"provider_metadata"`
-	Model            string               `json:"model"`
-	Usage            *upstreamUsage       `json:"usage"`
+	// Provider is the serving provider that OpenRouter-shaped responses report instead
+	// of provider_metadata, e.g. "baseten" or "Relace".
+	Provider string         `json:"provider"`
+	Model    string         `json:"model"`
+	Usage    *upstreamUsage `json:"usage"`
 }
 
 type choicePayload struct {
 	ProviderMetadata *rawProviderMetadata `json:"provider_metadata"`
+	Provider         string               `json:"provider"`
 }
 
 type upstreamUsage struct {
@@ -137,9 +151,10 @@ type rawRouting struct {
 	PlanningReasoning         string   `json:"planningReasoning"`
 }
 
-// hasChannelMarker reports whether a body could contain channel information.
+// HasChannelMarker reports whether a body could contain channel information: Cline's
+// provider_metadata or the serving-provider field of an OpenRouter-shaped response.
 func HasChannelMarker(body []byte) bool {
-	return bytes.Contains(body, markerNeedle)
+	return bytes.Contains(body, markerNeedle) || bytes.Contains(body, providerNeedle)
 }
 
 // hasRoutingMarker reports whether a body contains the routing evidence required by
@@ -157,11 +172,13 @@ func trimSSEFrame(body []byte) []byte {
 	return trimmed
 }
 
-// extractChannelFromBody parses one upstream response body or SSE frame.
+// ExtractChannelFromBody parses one upstream response body or SSE frame.
 //
-// A nil result means "nothing observed" - either the frame carries no channel
-// metadata or it could not be decoded. Callers must never turn that into an error
-// that reaches the client.
+// The channel value prefers Cline's gateway routing (finalProvider) and falls back to the
+// serving-provider field of OpenRouter-shaped responses, so every model gets a value as
+// long as the upstream reported one. A nil result means "nothing observed": the body
+// carries neither field, or it could not be decoded. Callers must never turn that into an
+// error that reaches the client.
 func ExtractChannelFromBody(body []byte, storePlanningReasoning bool) *ChannelMetadata {
 	if !HasChannelMarker(body) {
 		return nil
@@ -174,16 +191,77 @@ func ExtractChannelFromBody(body []byte, storePlanningReasoning bool) *ChannelMe
 	if errUnmarshal := json.Unmarshal(payload, &envelope); errUnmarshal != nil {
 		return nil
 	}
-	raw := pickProviderMetadata(&envelope)
-	if raw == nil || raw.Gateway == nil || raw.Gateway.Routing == nil {
+	if inner := unwrapEnvelope(&envelope); inner != nil {
+		envelope = *inner
+	}
+	meta := channelMetadataOf(&envelope)
+	if meta == nil {
 		return nil
 	}
-	meta := normalizeChannelMetadata(raw, &envelope)
 	if !storePlanningReasoning {
 		meta.PlanningReasoningLength = len([]rune(meta.PlanningReasoningText))
 		meta.PlanningReasoningText = ""
 	}
 	return meta
+}
+
+// unwrapEnvelope returns the nested completion of Cline's non-streaming wrapper
+// {"success":true,"data":{…}}, or nil when the body already is the completion itself.
+func unwrapEnvelope(envelope *upstreamEnvelope) *upstreamEnvelope {
+	if envelope == nil || envelope.Data == nil {
+		return nil
+	}
+	if len(envelope.Choices) > 0 || envelope.ProviderMetadata != nil || envelope.Provider != "" {
+		return nil
+	}
+	return envelope.Data
+}
+
+// channelMetadataOf builds the observation from whichever channel evidence the envelope
+// carries: gateway routing first, then the serving provider.
+func channelMetadataOf(envelope *upstreamEnvelope) *ChannelMetadata {
+	raw := pickProviderMetadata(envelope)
+	if raw != nil && raw.Gateway != nil && raw.Gateway.Routing != nil {
+		meta := normalizeChannelMetadata(raw, envelope)
+		if meta.FinalProvider == "" {
+			// Routing without a final provider still names the serving channel.
+			meta.FinalProvider = servingProvider(envelope)
+		}
+		return meta
+	}
+	provider := servingProvider(envelope)
+	if provider == "" {
+		return nil
+	}
+	meta := &ChannelMetadata{FinalProvider: provider}
+	if envelope != nil {
+		meta.UpstreamModel = envelope.Model
+		if envelope.Usage != nil {
+			meta.UpstreamPromptTokens = envelope.Usage.PromptTokens
+			meta.UpstreamCompletionTokens = envelope.Usage.CompletionTokens
+			meta.UpstreamCacheCreationTokens = envelope.Usage.CacheCreationInputToken
+		}
+	}
+	return meta
+}
+
+// servingProvider reads the provider reported by an OpenRouter-shaped envelope.
+func servingProvider(envelope *upstreamEnvelope) string {
+	if envelope == nil {
+		return ""
+	}
+	if provider := strings.TrimSpace(envelope.Provider); provider != "" {
+		return provider
+	}
+	for i := range envelope.Choices {
+		if delta := envelope.Choices[i].Delta; delta != nil && strings.TrimSpace(delta.Provider) != "" {
+			return strings.TrimSpace(delta.Provider)
+		}
+		if message := envelope.Choices[i].Message; message != nil && strings.TrimSpace(message.Provider) != "" {
+			return strings.TrimSpace(message.Provider)
+		}
+	}
+	return ""
 }
 
 func pickProviderMetadata(envelope *upstreamEnvelope) *rawProviderMetadata {

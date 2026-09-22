@@ -51,11 +51,16 @@ var defaultHosts = []string{"api.cline.bot"}
 // plugin as YAML (see pluginhost.runtimeConfigYAML), so the tags below are the
 // public configuration contract.
 type Config struct {
-	Enabled            bool     `yaml:"enabled"`
-	Priority           int      `yaml:"priority"`
-	Hosts              []string `yaml:"hosts"`
-	RequireRoutingMark bool     `yaml:"require_routing_marker"`
-	UnmatchedHostSmpl  int      `yaml:"unmatched_host_samples"`
+	Enabled  bool     `yaml:"enabled"`
+	Priority int      `yaml:"priority"`
+	Hosts    []string `yaml:"hosts"`
+	// RequireRoutingMark switches on the strict mode: only requests whose response
+	// carried provider_metadata.gateway.routing are recorded. It is off by default so
+	// that models served through other routes are recorded too - their channel value
+	// then falls back to the serving provider (and stays empty if the upstream reported
+	// neither).
+	RequireRoutingMark bool `yaml:"require_routing_marker"`
+	UnmatchedHostSmpl  int  `yaml:"unmatched_host_samples"`
 
 	RingSize      int    `yaml:"ring_size"`
 	JSONLEnabled  bool   `yaml:"jsonl_enabled"`
@@ -133,7 +138,7 @@ func Default() Config {
 		Enabled:            true,
 		Priority:           1,
 		Hosts:              append([]string(nil), defaultHosts...),
-		RequireRoutingMark: true,
+		RequireRoutingMark: false,
 		UnmatchedHostSmpl:  defaultUnmatchedHostSample,
 		RingSize:           defaultRingSize,
 		JSONLEnabled:       true,

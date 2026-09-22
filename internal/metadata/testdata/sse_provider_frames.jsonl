@@ -1,0 +1,3 @@
+data: {"id":"gen-0000000003-abcdefghijklmnop","object":"chat.completion.chunk","created":1790048308,"model":"z-ai/glm-5.3-flash","provider":"Relace","choices":[{"index":0,"delta":{"content":"","role":"assistant"}}]}
+data: {"id":"gen-0000000003-abcdefghijklmnop","object":"chat.completion.chunk","created":1790048308,"model":"z-ai/glm-5.3-flash","provider":"Relace","choices":[{"index":0,"delta":{"content":"ok"}}],"usage":{"prompt_tokens":28,"completion_tokens":45,"total_tokens":73}}
+data: [DONE]

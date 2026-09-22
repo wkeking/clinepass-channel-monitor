@@ -180,11 +180,52 @@ func (s *Store) Events(filter Filter) []*Event {
 	return out
 }
 
+// AddChannel registers one channel observation for a request.
+//
+// A streaming response reports the same request once per frame, so an unconsumed
+// observation with the same request hash is updated in place instead of being appended:
+// duplicates would otherwise pile up until the orphan TTL and be counted as orphans.
 func (s *Store) AddChannel(c *PendingChannel) {
+	if c == nil {
+		return
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if c.RequestHash != "" {
+		for _, existing := range s.pending {
+			if existing.consumed || existing.RequestHash != c.RequestHash {
+				continue
+			}
+			mergePendingChannel(existing, c)
+			return
+		}
+	}
 	s.pending = append(s.pending, c)
 	s.trimPendingLocked()
+}
+
+// mergePendingChannel keeps the strongest evidence of one request: the strongest routing
+// state, the newest observation and whatever identity fields are known.
+func mergePendingChannel(target, source *PendingChannel) {
+	if source.Routing > target.Routing {
+		target.Routing = source.Routing
+	}
+	if source.Meta != nil {
+		target.Meta = source.Meta
+	}
+	if source.Identity.SessionID != "" {
+		target.Identity.SessionID = source.Identity.SessionID
+	}
+	if source.Identity.Model != "" {
+		target.Identity.Model = source.Identity.Model
+	}
+	if source.Identity.Source != "" {
+		target.Identity.Source = source.Identity.Source
+	}
+	target.Identity.Stream = target.Identity.Stream || source.Identity.Stream
+	if source.CreatedAt.After(target.CreatedAt) {
+		target.CreatedAt = source.CreatedAt
+	}
 }
 
 // ConsumeChannel finds the channel observation matching a usage record and marks it

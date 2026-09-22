@@ -9,6 +9,13 @@ import (
 	"github.com/wkeking/clinepass-channel-monitor/internal/plan"
 )
 
+// Bucket labels for rows without a value of their own: the channel column shows the same
+// dash as the detail table, while models and client keys keep the existing label.
+const (
+	unknownChannel = "—"
+	unknownKey     = "(unknown)"
+)
+
 // parseCost turns a gateway cost string into a number. The gateway sends plain
 // decimal strings such as "0.0000447"; anything unparseable is counted instead of
 // being silently dropped.
@@ -253,9 +260,9 @@ func (s *Store) StatsWindow(window time.Duration, label string, now time.Time, q
 				stats.Series.Failed[bucket]++
 			}
 		}
-		accumulate(channels, e.FinalProvider, e)
-		accumulate(models, e.Model, e)
-		accumulate(sources, e.APIKey, e)
+		accumulate(channels, e.FinalProvider, unknownChannel, e)
+		accumulate(models, e.Model, unknownKey, e)
+		accumulate(sources, e.APIKey, unknownKey, e)
 	}
 	if oldest.After(cutoff) && s.size >= len(s.ring) && len(s.ring) > 0 {
 		// The ring wrapped, so the requested window may be truncated.
@@ -332,9 +339,9 @@ func SeriesBucket(window time.Duration) (int64, int) {
 	return bucket, count
 }
 
-func accumulate(target map[string]*channelStat, key string, e *event) {
+func accumulate(target map[string]*channelStat, key, fallback string, e *event) {
 	if key == "" {
-		key = "(unknown)"
+		key = fallback
 	}
 	stat, ok := target[key]
 	if !ok {

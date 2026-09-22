@@ -166,6 +166,16 @@ func TestPlanPollerRefreshServesOfficialWindows(t *testing.T) {
 	if week.Detail {
 		t.Errorf("7d 窗口来自按日汇总，detail 应为 false: %+v", week)
 	}
+	if len(totals.Series) != 31 {
+		t.Errorf("31 天逐日序列长度 = %d，期望 31", len(totals.Series))
+	} else {
+		if totals.Series[30] != 1100 {
+			t.Errorf("序列最后一位 = %d，期望今天的 1100", totals.Series[30])
+		}
+		if totals.Series[27] != 2200 {
+			t.Errorf("序列倒数第四位 = %d，期望三天前的 2200", totals.Series[27])
+		}
+	}
 	if week.TotalTokens != 3300 || math.Abs(week.CostUSD-1.5) > 1e-9 {
 		t.Errorf("7d 官方窗口 = %+v，期望 tokens=3300 cost=1.5", week)
 	}
@@ -277,5 +287,62 @@ func TestPlanPollerPollsEveryConfiguredCredential(t *testing.T) {
 	}
 	if len(quota.Windows) != 0 {
 		t.Errorf("plan_usage_enabled=false 时不应有官方窗口: %+v", quota.Windows)
+	}
+}
+
+// TestResolvePlanCredentialsSkipsClientBearer guards the last-resort credential source: the
+// bearer observed on an intercepted request is the client's key for CPA, not a Cline key, so
+// accepting it produced a second, permanently unavailable account in the picker.
+func TestResolvePlanCredentialsSkipsClientBearer(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.PlanConfigPath = filepath.Join(t.TempDir(), "missing.yaml")
+	resetBearer := func() {
+		latestUpstreamBearer.Lock()
+		latestUpstreamBearer.value = ""
+		latestUpstreamBearer.Unlock()
+	}
+	defer resetBearer()
+
+	headers := http.Header{}
+	headers.Set("Authorization", "Bearer sk-TESTKEY00000000001") // 20 字符的下游 key
+	rememberUpstreamBearer(headers)
+	if creds := resolvePlanCredentials(cfg); len(creds) != 0 {
+		t.Fatalf("下游客户端 key 不应被当成 Cline 凭据: %+v", creds)
+	}
+
+	clineKey := "sk_" + strings.Repeat("a", 64) // 67 字符
+	headers = http.Header{}
+	headers.Set("Authorization", "Bearer "+clineKey)
+	rememberUpstreamBearer(headers)
+	creds := resolvePlanCredentials(cfg)
+	if len(creds) != 1 || creds[0].Source != "observed-header" {
+		t.Fatalf("形如 Cline key 的 bearer 应被采用: %+v", creds)
+	}
+	if strings.Contains(creds[0].Label, clineKey) {
+		t.Errorf("label 不应包含完整 key: %q", creds[0].Label)
+	}
+	resetBearer()
+}
+
+// TestPlanPollerMarksRejectedCredential checks that a credential the upstream refuses is
+// flagged so the page can hide it from the account picker.
+func TestPlanPollerMarksRejectedCredential(t *testing.T) {
+	rejected := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer rejected.Close()
+	loadConfig([]byte(fmt.Sprintf("plan_enabled: false\nplan_api_key: bad-key\nplan_base_url: %s\n", rejected.URL)))
+
+	poller := newPlanPoller()
+	poller.refresh()
+	quota := poller.snapshot()
+	if len(quota.Accounts) != 1 {
+		t.Fatalf("accounts = %+v", quota.Accounts)
+	}
+	if !quota.Accounts[0].Rejected {
+		t.Errorf("401 应标记 rejected: %+v", quota.Accounts[0])
+	}
+	if quota.Accounts[0].Available {
+		t.Errorf("被拒绝的凭据不应可用")
 	}
 }

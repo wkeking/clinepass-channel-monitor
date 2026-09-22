@@ -147,6 +147,8 @@ type planAccountHealth struct {
 	Label     string `json:"label"`
 	Source    string `json:"source,omitempty"`
 	Available bool   `json:"available"`
+	// Rejected marks a credential the upstream refused (401/403).
+	Rejected  bool   `json:"rejected,omitempty"`
 	Account   string `json:"account,omitempty"`
 	Items     int    `json:"items"`
 	Oldest    string `json:"oldest,omitempty"`
@@ -198,6 +200,7 @@ func buildHealthResponse() healthResponse {
 				Label:     account.Label,
 				Source:    account.Source,
 				Available: account.Available,
+				Rejected:  account.Rejected,
 				Account:   account.Account,
 				Items:     account.Usage.Items,
 				Oldest:    account.Usage.Oldest,

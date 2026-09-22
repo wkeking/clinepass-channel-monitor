@@ -19,7 +19,7 @@ h2{margin:0 0 12px;font-size:12px;font-weight:600;color:var(--muted);letter-spac
 /* 概览固定五个数据块，任何宽度下都排在同一行，不做换行 */
 .cards{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:14px}
 @media (max-width:1180px){.cards{gap:10px}.card{padding:13px 14px 12px}.card .k{font-size:12px}.card .v{margin-top:10px;font-size:24px}.card .v small{font-size:12px}.card .s{font-size:11.5px;gap:3px 10px}.card .spark,.card .spark svg{height:28px}}
-.card{position:relative;background:linear-gradient(180deg,color-mix(in srgb,var(--tint,var(--accent)) 7%,var(--card)) 0,var(--card) 58%);border:1px solid var(--line);border-radius:14px;padding:16px 18px 14px;overflow:hidden}
+.card{position:relative;background:linear-gradient(180deg,color-mix(in srgb,var(--tint,var(--accent)) 7%,var(--card)) 0,var(--card) 58%);border:1px solid var(--line);border-radius:14px;padding:16px 18px 14px;overflow:hidden;display:flex;flex-direction:column}
 .card::before{content:"";position:absolute;inset:0 0 auto 0;height:3px;background:var(--tint,var(--accent));opacity:.85}
 .card .top{display:flex;align-items:flex-start;justify-content:space-between;gap:10px}
 .card .k{color:var(--muted);font-size:12.5px;font-weight:500}
@@ -27,8 +27,10 @@ h2{margin:0 0 12px;font-size:12px;font-weight:600;color:var(--muted);letter-spac
 .card .v{margin-top:12px;font-size:30px;font-weight:680;letter-spacing:-.6px;font-variant-numeric:tabular-nums;display:flex;align-items:baseline;gap:5px}
 .card .v small{font-size:13px;font-weight:500;color:var(--muted);letter-spacing:0}
 .card .s{margin-top:8px;color:var(--muted);font-size:12px;display:flex;flex-wrap:wrap;gap:4px 12px}
-.card .spark{margin-top:12px;height:34px}
+/* 折线图固定贴在卡片底部：五个块的图因此落在同一水平线上 */
+.card .spark{margin-top:auto;padding-top:12px;height:46px}
 .card .spark svg{display:block;width:100%;height:34px}
+.card .s{margin-bottom:2px}
 .bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:12px}
 button,select,input{font:inherit;color:inherit;background:var(--card);border:1px solid var(--line);border-radius:9px;padding:7px 12px;transition:border-color .15s,background .15s}
 button{cursor:pointer}
@@ -38,7 +40,7 @@ button:disabled{opacity:.45;cursor:not-allowed;border-color:var(--line)}
 input::placeholder{color:var(--muted)}
 .wrap{overflow-x:auto;border:1px solid var(--line);border-radius:14px;background:var(--card)}
 table{width:100%;border-collapse:separate;border-spacing:0}
-th,td{padding:10px 13px;text-align:left;white-space:nowrap;vertical-align:top}
+th,td{padding:10px 13px;text-align:left;white-space:nowrap;vertical-align:middle}
 th{font-size:12px;color:var(--muted);font-weight:600;background:color-mix(in srgb,var(--card) 84%,var(--bg));border-bottom:1px solid var(--line);position:sticky;top:0}
 td{border-bottom:1px solid var(--line);font-variant-numeric:tabular-nums}
 tbody tr:last-child td{border-bottom:none}
@@ -172,10 +174,11 @@ function esc(s){return String(s==null?"":s).replace(/[&<>"]/g,c=>({"&":"&amp;","
 function n(v){return v==null?0:Number(v)||0}
 function int(v){return v==null?"-":Math.round(n(v)).toLocaleString("zh-CN")}
 function fixed(v,d){return v==null?"-":n(v).toFixed(d==null?2:d)}
-// 千位以上转 K/M/G，保留两位小数
+// 千位以上转 K/M/B/T（B = billion = 十亿），保留两位小数
 function scaled(v){
   const x=n(v);
-  if(Math.abs(x)>=1e9)return (x/1e9).toFixed(2)+"G";
+  if(Math.abs(x)>=1e12)return (x/1e12).toFixed(2)+"T";
+  if(Math.abs(x)>=1e9)return (x/1e9).toFixed(2)+"B";
   if(Math.abs(x)>=1e6)return (x/1e6).toFixed(2)+"M";
   if(Math.abs(x)>=1e3)return (x/1e3).toFixed(2)+"K";
   return String(Math.round(x));
@@ -243,8 +246,16 @@ function windowLabel(w){return w==="1h"?"近 1 小时":w==="7d"?"近 7 天":"近
 const PLAN_ACCOUNT_KEY="cpm-plan-account";
 
 function planAccountList(plan){
-  const list=(plan&&plan.accounts)||[];
-  return list.length?list:(plan?[plan]:[]);
+  const all=(plan&&plan.accounts)||[];
+  if(!all.length)return plan?[plan]:[];
+  // 上游拒绝的凭据（401/403，例如把下游客户端 key 当成了 Cline key）不进下拉，
+  // 否则会出现一个永远不可用的账号；/health 的 plan_accounts 里仍能看到它。
+  return all.filter(a=>a&&a.rejected!==true);
+}
+
+function planIgnoredCount(plan){
+  const all=(plan&&plan.accounts)||[];
+  return Math.max(0,all.length-planAccountList(plan).length);
 }
 
 function selectedPlanAccount(plan){
@@ -278,15 +289,18 @@ function renderOverviewNote(view){
   const el=$("overview-note");
   if(!el)return;
   const off=view.off, bits=[];
+  const acctTokens=(view.account&&view.account.tokens)||{};
+  const cumRange=acctTokens.total_tokens?("（"+(acctTokens.from_date||"")+" ~ "+(acctTokens.to_date||"")+"）"):"";
   if(off&&off.detail!==false){
-    bits.push("「请求数 / 总 Token 数 / 缓存命中率」为官方口径：Cline 账号（含 Cline IDE 等其他客户端）在"+windowLabel(view.win)+"内的计费记录。");
+    bits.push("「请求数 / 缓存命中率」为官方口径：Cline 账号（含 Cline IDE 等其他客户端）在"+windowLabel(view.win)+"内的计费记录。");
+    bits.push("「总 Token 数」为官方累计"+cumRange+"，与上方套餐区同口径，不是该时间窗的量。");
     bits.push("「平均延时 / 生成速度」为本机口径：只统计经过本 CPA 的 Cline 请求。");
     if(off.covered===false){
       bits.push('<span class="plan-warn">官方逐条记录覆盖自 '+esc(fmtTime(view.usage.oldest||""))+'，该窗口更早的部分未统计，官方数值偏低。</span>');
     }
     if(view.usage.error)bits.push('<span class="plan-warn">官方用量刷新失败：'+esc(view.usage.error)+"</span>");
   }else if(off){
-    bits.push("「总 Token 数」为官方口径（按自然日汇总："+esc(off.from||"")+" ~ "+esc(off.to||"")+"）。");
+    bits.push("「总 Token 数」为官方累计"+esc(cumRange||("（"+(off.from||"")+" ~ "+(off.to||"")+"）"))+"。");
     bits.push("「请求数 / 缓存命中率 / 平均延时 / 生成速度」为本机口径：官方逐条明细不支持按时间过滤，7 天要上百次分页，因此这个窗口的明细仍取本机记录。");
     if(off.covered===false)bits.push('<span class="plan-warn">官方汇总的覆盖范围待确认，数值可能偏低。</span>');
   }else{
@@ -308,6 +322,19 @@ function renderCards(s){
   const fetched=view.fetchedAt?fmtTime(view.fetchedAt).slice(11,19):"—";
   const localRequests=int(s.requests);
   const successRate=fixed(100-n(s.error_rate)*100,2);
+  // 总 Token 数用官方累计（近 31 天汇总，与套餐区一致），不是当前时间窗的量；
+  // 时间窗的官方数值放在副行。
+  const acctTokens=(view.account&&view.account.tokens)||{};
+  const hasCumulative=n(acctTokens.total_tokens)>0;
+  const cumTotal=hasCumulative?n(acctTokens.total_tokens):n(off&&off.total_tokens);
+  const cumSubs=hasCumulative?[
+      "官方累计 "+esc((acctTokens.from_date||"")+" ~ "+(acctTokens.to_date||""))+" · $"+fixed(n(acctTokens.cost_usd),2),
+      "官方 输入 "+scaled(acctTokens.input_tokens)+" / 输出 "+scaled(acctTokens.output_tokens),
+      "本机"+windowLabel(view.win)+" "+scaled(tok.total)
+    ]:(off?[
+      "官方 "+windowLabel(view.win)+" 输入 "+scaled(off.input_tokens)+" / 输出 "+scaled(off.output_tokens),
+      "本机 "+scaled(tok.total)+"（入 "+scaled(tok.input)+" / 出 "+scaled(tok.output)+"）"
+    ]:[]);
   const cards=[
     offDetail
       ? card({label:"请求数",icon:"⇄",tint:"#60a5fa",tip:"官方口径：Cline 账号在该时间窗内的计费请求数（含其他客户端）。副行为本机 CPA 记录。",
@@ -318,19 +345,11 @@ function renderCards(s){
           value:localRequests,unit:"条",
           sub:[s.failed?("失败 "+int(s.failed)+"（"+fixed(n(s.error_rate)*100,2)+"%）"):"无失败","成功率 "+successRate+"%"],
           spark:series.requests}),
-    card({label:"平均延时",icon:"◷",tint:"#a78bfa",tip:"本机口径：平均总延时；副值为平均首 token 延时（TTFT）",
-      value:fixed(n(s.avg_latency_ms)/1000,2),unit:"s",
-      sub:["平均 TTFT "+dur(s.avg_ttft_ms),"样本 "+int(s.ttft_requests)+" 条"],
-      spark:series.latency_ms}),
-    card({label:"生成速度",icon:"⚡",tint:"#f59e0b",tip:"本机口径：平均生成速度 = output_tokens / 生成耗时",
-      value:fixed(s.tokens_per_second_avg,2),unit:"tok/s",sub:["越高越快"],spark:series.tokens_per_second}),
     offTokens
-      ? card({label:"总 Token 数",icon:"Σ",tint:"#38bdf8",tip:"官方口径：Cline 账号在该时间窗内的 token 总量（输入+输出）。副行为本机 CPA 记录。",
-          value:scaled(off.total_tokens),unit:"token",
-          sub:["官方 输入 "+scaled(off.input_tokens)+" / 输出 "+scaled(off.output_tokens),
-            (off.detail===false?"官方成本 $"+fixed(off.cost_usd,4)+"（按自然日汇总）":"官方成本 $"+fixed(off.cost_usd,4)),
-            "本机 "+scaled(tok.total)+"（入 "+scaled(tok.input)+" / 出 "+scaled(tok.output)+"）"],
-          spark:off.series&&off.series.tokens})
+      ? card({label:"总 Token 数",icon:"Σ",tint:"#38bdf8",tip:"官方口径：Cline 账号自账号创建以来的累计 token（近 31 天逐日汇总）。副行为官方输入/输出与本机时间窗数值。",
+          value:scaled(cumTotal),unit:"token",
+          sub:cumSubs,
+          spark:(acctTokens.series&&acctTokens.series.length?acctTokens.series:(off.series&&off.series.tokens))})
       : card({label:"总 Token 数",icon:"Σ",tint:"#38bdf8",tip:"时间窗内输入 token 与输出 token 的总量（本机口径）",
           value:scaled(tok.total),unit:"token",
           sub:["输入 "+scaled(tok.input)+" / 输出 "+scaled(tok.output),"思考 "+scaled(tok.reasoning)],spark:series.tokens}),
@@ -343,7 +362,13 @@ function renderCards(s){
       : card({label:"缓存命中率",icon:"%",tint:"#34d399",tip:"上游网关口径：promptCacheHit/(hit+miss)；CPA 口径见副值（本机口径）",
           value:fixed(cacheRatio*100,2),unit:"%",
           sub:["上游口径 hit "+scaled(pc.hit)+" / miss "+scaled(pc.miss),"CPA 口径 "+fixed(n(s.cache_ratio)*100,2)+"%（cached/input）"],
-          spark:series.cache_hits})
+          spark:series.cache_hits}),
+    card({label:"平均延时",icon:"◷",tint:"#a78bfa",tip:"本机口径：平均总延时；副值为平均首 token 延时（TTFT）",
+      value:fixed(n(s.avg_latency_ms)/1000,2),unit:"s",
+      sub:["平均 TTFT "+dur(s.avg_ttft_ms),"样本 "+int(s.ttft_requests)+" 条"],
+      spark:series.latency_ms}),
+    card({label:"生成速度",icon:"⚡",tint:"#f59e0b",tip:"本机口径：平均生成速度 = output_tokens / 生成耗时",
+      value:fixed(s.tokens_per_second_avg,2),unit:"tok/s",sub:["越高越快"],spark:series.tokens_per_second})
   ];
   $("cards").innerHTML=cards.join("");
   renderOverviewNote(view);
@@ -381,6 +406,7 @@ function renderPlan(plan){
   msg.classList.add("hidden");
   const bits=[];
   if(list.length>1)bits.push(list.length+" 个 Cline 凭据");
+  if(planIgnoredCount(plan))bits.push('<span class="plan-warn">已忽略 '+planIgnoredCount(plan)+" 个无效凭据</span>");
   if(view.plan_name)bits.push('<span class="chip">'+esc(view.plan_name)+"</span>");
   if(view.plan_price)bits.push(esc(view.plan_price));
   if(view.account)bits.push("账号 "+esc(view.account));
@@ -406,8 +432,9 @@ function renderPlan(plan){
   if(tok.cost_usd)bals.push("近 31 天成本 $"+fixed(tok.cost_usd,4));
   if(tok.requests)bals.push("官方计费条目 "+int(tok.requests));
   const tokenCard=tok.total_tokens?'<div class="pcard">'+
-      '<div class="pk"><span>近 31 天已用 Token（官方）</span><span>'+esc((tok.from_date||"")+" ~ "+(tok.to_date||""))+'</span></div>'+
+      '<div class="pk"><span>近 31 天已用 Token（官方）</span></div>'+
       '<div class="pv">'+scaled(tok.total_tokens)+'<small>token</small></div>'+
+      '<div class="ps"><span>'+esc((tok.from_date||"")+" ~ "+(tok.to_date||""))+'</span></div>'+
       '<div class="ps"><span>输入 '+scaled(tok.input_tokens)+"</span><span>输出 "+scaled(tok.output_tokens)+"</span></div>"+
       '<div class="ps">'+bals.map(b=>"<span>"+esc(b)+"</span>").join("")+"</div>"+
       "</div>":"";

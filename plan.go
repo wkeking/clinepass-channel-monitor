@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -64,6 +65,9 @@ type quotaTokens struct {
 	CostUSD      float64 `json:"cost_usd"`
 	BalanceUSD   float64 `json:"balance_usd"`
 	Requests     int64   `json:"requests"`
+	// Series is one total-token value per day across the same range (oldest first), used for
+	// the overview card's sparkline.
+	Series []int64 `json:"series,omitempty"`
 }
 
 // planAccountSnapshot is the official view of one Cline credential. Several Cline entries
@@ -76,6 +80,9 @@ type planAccountSnapshot struct {
 	Label       string                         `json:"label"`
 	Source      string                         `json:"source,omitempty"`
 	Available   bool                           `json:"available"`
+	// Rejected marks a credential the upstream refused (401/403). The page hides those from
+	// the account picker; /health still lists them for diagnosis.
+	Rejected    bool                           `json:"rejected,omitempty"`
 	Account     string                         `json:"account,omitempty"`
 	PlanName    string                         `json:"plan_name,omitempty"`
 	PlanPrice   string                         `json:"plan_price,omitempty"`
@@ -109,6 +116,25 @@ type planQuota struct {
 	// Accounts lists every configured Cline credential. The fields above mirror the primary
 	// account (the first one that answered) so single-account clients keep working.
 	Accounts []planAccountSnapshot `json:"accounts,omitempty"`
+}
+
+// planStatusError carries the upstream HTTP status so callers can tell "this credential is
+// not valid" apart from "the network hiccuped".
+type planStatusError struct {
+	Status int
+}
+
+func (e *planStatusError) Error() string {
+	return fmt.Sprintf("upstream status %d", e.Status)
+}
+
+// isRejectedCredential reports whether the upstream refused the credential itself.
+func isRejectedCredential(err error) bool {
+	var status *planStatusError
+	if errors.As(err, &status) {
+		return status.Status == http.StatusUnauthorized || status.Status == http.StatusForbidden
+	}
+	return false
 }
 
 // planClient performs the upstream calls. It never logs the API key.
@@ -150,7 +176,7 @@ func (c *planClient) get(path string, out any) error {
 		return errRead
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return fmt.Errorf("upstream status %d", response.StatusCode)
+		return &planStatusError{Status: response.StatusCode}
 	}
 	// {"success":true,"data":...} on success, {"success":false,"error":"..."} otherwise.
 	var envelope struct {
@@ -428,6 +454,7 @@ func (p *planPoller) refreshAccount(cfg config, account *planAccount) {
 
 	user, errMe := client.me()
 	if errMe != nil {
+		snapshot.Rejected = isRejectedCredential(errMe)
 		if account.userID == "" {
 			snapshot.Error = errMe.Error()
 			snapshot.FetchedAt = time.Now().Format(time.RFC3339)
@@ -449,6 +476,7 @@ func (p *planPoller) refreshAccount(cfg config, account *planAccount) {
 
 	limits, errLimits := client.usageLimits()
 	if errLimits != nil {
+		snapshot.Rejected = snapshot.Rejected || isRejectedCredential(errLimits)
 		snapshot.Error = errLimits.Error()
 		snapshot.FetchedAt = time.Now().Format(time.RFC3339)
 		p.attachUsage(cfg, account, &snapshot, now)
@@ -474,11 +502,23 @@ func (p *planPoller) refreshAccount(cfg config, account *planAccount) {
 		items, errDaily := client.dailyUsage(account.userID, from, to)
 		if errDaily == nil {
 			totals := quotaTokens{FromDate: from, ToDate: to}
+			start, errStart := time.Parse("2006-01-02", from)
+			if errStart == nil {
+				totals.Series = make([]int64, planUsageWindowDays)
+			}
 			for _, item := range items {
 				totals.InputTokens += item.PromptTokens
 				totals.OutputTokens += item.CompletionTokens
 				totals.CostUSD += float64(item.CostUnits) / microUSD
 				totals.Requests++
+				if totals.Series == nil {
+					continue
+				}
+				if day, errDay := time.Parse("2006-01-02", strings.TrimSpace(item.Date)); errDay == nil {
+					if index := int(day.UTC().Sub(start).Hours() / 24); index >= 0 && index < len(totals.Series) {
+						totals.Series[index] += item.PromptTokens + item.CompletionTokens
+					}
+				}
 			}
 			totals.TotalTokens = totals.InputTokens + totals.OutputTokens
 			if balance, errBalance := client.balance(account.userID); errBalance == nil {
@@ -641,13 +681,22 @@ func resolvePlanCredentials(cfg config) []planCredential {
 	for _, cred := range clineCredentialsFromHostAuth(cfg) {
 		add(cred.Key, cred.Label, cred.Source)
 	}
-	if key := upstreamBearer(); key != "" {
+	if key := upstreamBearer(); looksLikeClineKey(key) {
 		add(key, "上游请求头 · "+maskCredential(key), "observed-header")
 	}
 	if len(out) > 0 {
 		return out
 	}
 	return nil
+}
+
+// looksLikeClineKey filters the last-resort credential source. The bearer observed on an
+// intercepted request is the *client's* key for CPA (for example sk-X4Zkb…, 20 characters),
+// not a Cline key, so polling it would only produce a second, permanently unavailable
+// account. Cline keys are long sk_… values.
+func looksLikeClineKey(key string) bool {
+	trimmed := strings.TrimSpace(key)
+	return len(trimmed) >= 32 && strings.HasPrefix(trimmed, "sk_")
 }
 
 // credentialID derives the stable identifier the page uses to remember a selection. It is a

@@ -69,9 +69,13 @@ td.num,th.num{text-align:right}
 .detail pre{margin:0;max-height:260px;overflow:auto;font-size:12px;line-height:1.5;background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:11px}
 .msg{color:var(--muted);padding:16px}
 .hidden{display:none}
-/* 标题旁的说明图标：口径说明挂在 title 上，悬停显示 */
-.info{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;margin-left:6px;border-radius:50%;border:1px solid var(--line);color:var(--muted);font-size:11px;font-weight:700;line-height:1;vertical-align:middle;cursor:help;user-select:none}
-.info:hover{border-color:var(--accent);color:var(--accent)}
+/* 标题旁的说明图标：悬停/聚焦时自己画气泡，不用原生 title（原生提示依赖浏览器
+   的悬停时序，且没法排版多行说明） */
+.info{position:relative;display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;margin-left:6px;border-radius:50%;border:1px solid var(--line);color:var(--muted);font-size:11px;font-weight:700;line-height:1;vertical-align:middle;cursor:help;user-select:none}
+.info:hover,.info:focus{border-color:var(--accent);color:var(--accent)}
+.info:focus{outline:none}
+.tip{display:none;position:absolute;left:0;top:calc(100% + 8px);z-index:40;width:max-content;max-width:min(620px,86vw);padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:var(--card);color:var(--fg);font-size:12px;font-weight:400;line-height:1.7;letter-spacing:0;text-transform:none;text-align:left;white-space:pre-line;box-shadow:0 12px 32px rgba(0,0,0,.28)}
+.info:hover .tip,.info:focus .tip{display:block}
 .empty-row td{text-align:center;color:var(--muted);padding:20px}
 .plan{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:14px}
 .pcard{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px 16px}
@@ -124,7 +128,7 @@ td.num,th.num{text-align:right}
   </section>
 
   <section>
-    <h2>概览<span class="info" id="overview-info" role="img" aria-label="概览口径说明" title="概览口径说明">!</span></h2>
+    <h2>概览<span class="info" id="overview-info" tabindex="0" aria-describedby="overview-info-tip" aria-label="概览口径说明">!<span class="tip" id="overview-info-tip" role="tooltip"></span></span></h2>
     <div class="sub hidden" id="overview-warn" style="margin:-4px 0 12px"></div>
     <div class="cards" id="cards"></div>
   </section>
@@ -289,8 +293,8 @@ function officialView(s){
 // 概览口径说明挂在「概览」标题旁的感叹号上（悬停显示）；真正需要留意的告警仍然
 // 显示在标题下方，不能藏进 tooltip。
 function renderOverviewNote(view){
-  const icon=$("overview-info"), warn=$("overview-warn");
-  if(!icon||!warn)return;
+  const icon=$("overview-info"), tip=$("overview-info-tip"), warn=$("overview-warn");
+  if(!icon||!tip||!warn)return;
   const off=view.off, notes=[], warns=[];
   const acctTokens=(view.account&&view.account.tokens)||{};
   const cumRange=acctTokens.total_tokens?("（"+(acctTokens.from_date||"")+" ~ "+(acctTokens.to_date||"")+"）"):"";
@@ -315,7 +319,7 @@ function renderOverviewNote(view){
     else if(!polled)warns.push("官方用量尚未取到。");
     else if(view.usage.enabled!==true)warns.push("官方用量未启用。");
   }
-  icon.title=notes.join("\n");
+  tip.textContent=notes.join("\n");
   warn.innerHTML=warns.map(text=>'<span class="plan-warn">'+esc(text)+"</span>").join(" ");
   warn.classList.toggle("hidden",warns.length===0);
 }

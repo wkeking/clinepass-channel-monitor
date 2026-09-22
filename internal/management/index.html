@@ -308,9 +308,12 @@ function renderOverviewNote(view){
     if(off.covered===false)warns.push("官方汇总的覆盖范围待确认，数值可能偏低。");
   }else{
     notes.push("「"+windowLabel(view.win)+"」使用本机口径：只统计经过本 CPA 的 Cline 请求。");
-    if(view.usage.enabled!==true)warns.push("官方用量未启用。");
-    else if(view.usage.error)warns.push("官方用量不可用："+view.usage.error);
-    else warns.push("官方用量尚未取到。");
+    // plan.source 有值才算轮询跑过一轮：刚重载时快照还是空的，那种情况是"还没取到"，
+    // 不是"没启用"。
+    const polled=!!(planSnapshot&&planSnapshot.source);
+    if(view.usage.error)warns.push("官方用量不可用："+view.usage.error);
+    else if(!polled)warns.push("官方用量尚未取到。");
+    else if(view.usage.enabled!==true)warns.push("官方用量未启用。");
   }
   icon.title=notes.join("\n");
   warn.innerHTML=warns.map(text=>'<span class="plan-warn">'+esc(text)+"</span>").join(" ");

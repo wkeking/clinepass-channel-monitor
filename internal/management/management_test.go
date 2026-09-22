@@ -252,7 +252,8 @@ func readFixture(t *testing.T, name string) []byte {
 }
 
 func TestRecordedManagementPayloadsStillRender(t *testing.T) {
-	// The fixtures are real API responses captured from a live CPA instance.
+	// Captured API responses with every credential and request identifier replaced by a
+	// synthetic value, so the payloads stay realistic without carrying anything real.
 	for _, name := range []string{"management-health.json", "management-stats.json", "management-events.json"} {
 		raw := readFixture(t, name)
 		var decoded map[string]any

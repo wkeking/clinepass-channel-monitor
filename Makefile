@@ -20,10 +20,12 @@ export GOTMPDIR   := $(REPO_ROOT)/.toolchain/gotmp
 export CGO_ENABLED := 1
 
 PLUGIN_ID  := clinepass-channel-monitor
-# VERSION is the released version; DEV_BUMP makes each local build a different version
-# so that CPA always hot-reloads the plugin instead of keeping the previously loaded
-# library (replacement is keyed on the plugin file path, not on its content).
-VERSION    ?= $(shell grep -oP 'Version\s*=\s*"\K[^"]+' $(REPO_ROOT)/internal/buildinfo/buildinfo.go || echo 0.1.0)
+# The version declared in buildinfo.go is the release version; local builds append
+# -dev.N so that CPA always hot-reloads the plugin instead of keeping the previously
+# loaded library (replacement is keyed on the plugin file path, not on its content).
+# sed instead of grep -P keeps this working on macOS/BSD, where the release workflow runs.
+DECLARED_VERSION := $(shell sed -n 's/.*Version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' $(REPO_ROOT)/internal/buildinfo/buildinfo.go | head -1)
+VERSION    ?= $(if $(DECLARED_VERSION),$(DECLARED_VERSION),0.1.0)
 DEV_BUMP   ?= 1
 BUMP_FILE  := $(REPO_ROOT)/.toolchain/.dev-build
 BUILD_VER  := $(shell if [ "$(DEV_BUMP)" = "1" ]; then \
@@ -33,6 +35,8 @@ BUILD_VER  := $(shell if [ "$(DEV_BUMP)" = "1" ]; then \
 GOOS       ?= linux
 GOARCH     ?= $(shell $(GO_BIN) env GOARCH 2>/dev/null || echo arm64)
 BUILD_DIR  := $(REPO_ROOT)/dist
+# Release artifacts (scripts/release.sh): per-platform zips plus checksums.txt.
+RELEASE_DIR := $(REPO_ROOT)/release
 
 LIB_NAME   := $(PLUGIN_ID)-v$(BUILD_VER).so
 LDFLAGS    := -s -w -X github.com/wkeking/clinepass-channel-monitor/internal/buildinfo.Version=$(BUILD_VER)
@@ -74,9 +78,9 @@ vet:
 fmt:
 	$(GO_BIN) fmt ./...
 
-## clean: remove build output
+## clean: remove build output and release artifacts
 clean:
-	rm -rf $(BUILD_DIR)
+	rm -rf $(BUILD_DIR) $(RELEASE_DIR)
 
 ## clean-cache: empty the Go build cache and temp dir (keeps the toolchain, the module cache and dist/)
 clean-cache:

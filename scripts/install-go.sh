@@ -29,6 +29,13 @@ esac
 tarball="go${version}.${os}-${arch}.tar.gz"
 url="https://go.dev/dl/${tarball}"
 
+# macOS ships shasum instead of sha256sum; the release workflow runs there too.
+if command -v sha256sum >/dev/null 2>&1; then
+	sha256() { sha256sum "$1" | awk '{print $1}'; }
+else
+	sha256() { shasum -a 256 "$1" | awk '{print $1}'; }
+fi
+
 mkdir -p "${toolchain_dir}"
 tmp_dir="$(mktemp -d "${toolchain_dir}/go-download.XXXXXX")"
 trap 'rm -rf "${tmp_dir}"' EXIT
@@ -36,7 +43,7 @@ trap 'rm -rf "${tmp_dir}"' EXIT
 echo "downloading ${url}"
 curl -fsSL --retry 3 -o "${tmp_dir}/${tarball}" "${url}"
 
-actual="$(sha256sum "${tmp_dir}/${tarball}" | awk '{print $1}')"
+actual="$(sha256 "${tmp_dir}/${tarball}")"
 
 # https://go.dev/dl/<file>.sha256 answers 200 with an HTML page instead of a digest, so the
 # per-file checksum has to be fetched from the host that go.dev/dl redirects to.

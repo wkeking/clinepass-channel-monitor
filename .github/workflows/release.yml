@@ -1,0 +1,80 @@
+name: release
+
+# The tag is the release: v<version> (for example v0.1.0) both names the GitHub release
+# and defines the version CPA compares against the installed plugin. The assets this
+# workflow attaches are what the plugin store downloads, so their names and layout are
+# fixed by CLIProxyAPI: <id>_<version>_<goos>_<goarch>.zip plus checksums.txt, one
+# dynamic library at the zip root. scripts/release.sh enforces exactly that.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: build ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # linux/amd64 builds natively, linux/arm64 cross-compiles with gcc-aarch64-linux-gnu
+          # on the same runner, and darwin/arm64 needs a macOS runner because the CGO
+          # linker wants the macOS SDK.
+          - runner: ubuntu-22.04
+            goos: linux
+            goarch: amd64
+            packages: gcc zip
+          - runner: ubuntu-22.04
+            goos: linux
+            goarch: arm64
+            packages: gcc-aarch64-linux-gnu zip
+          - runner: macos-14
+            goos: darwin
+            goarch: arm64
+            packages: ""
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the C toolchain
+        if: matrix.packages != ''
+        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.packages }}
+      - name: Install the pinned Go toolchain
+        run: make tools
+      - name: Build and package
+        run: scripts/release.sh "${GITHUB_REF_NAME#v}" ${{ matrix.goos }}/${{ matrix.goarch }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.goos }}-${{ matrix.goarch }}
+          path: release/*.zip
+          if-no-files-found: error
+
+  publish:
+    name: publish GitHub release
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: release
+          merge-multiple: true
+      - name: Write checksums.txt
+        run: |
+          cd release
+          sha256sum ./*.zip | sed 's| \./| |' | LC_ALL=C sort -k2 >checksums.txt
+          cat checksums.txt
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            release/*.zip release/checksums.txt

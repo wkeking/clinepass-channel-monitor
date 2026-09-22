@@ -377,7 +377,53 @@ make clean       # 删掉构建产物 dist/
 
 工具链版本由 `Makefile` 的 `GO_VERSION` 固定为 `1.27.1`（`scripts/install-go.sh` 的默认值与之相同），和 `go.mod` 里 `go 1.26.0` 的语言下限是两件事。工具链、模块缓存、构建缓存都在 `.toolchain/` 下并且已 gitignore：`make clean-cache` 只清构建缓存与临时目录，工具链和模块缓存保持不动，所以清完仍能离线构建（第一次构建是冷编译，会慢一些，缓存会重新长出来）；连工具链一起删就直接删掉 `.toolchain/`，之后需要 `make tools` + `go mod download` 重新拉取。
 
-跨平台产物由 GitHub Actions 在 tag 推送时构建：`linux/amd64`、`linux/arm64` 各打一个 zip，zip 内文件名固定为 `clinepass-channel-monitor.so`，并附 `checksums.txt`。
+跨平台产物由 GitHub Actions 在 tag 推送时构建，见下文「发布与插件商店」。
+
+## 发布与插件商店
+
+**版本只有一个来源**：`internal/buildinfo/buildinfo.go` 里的 `Version`。release tag 必须是 `v<version>`（例如 `v0.1.0`），本地 `make build` 自动加 `-dev.N` 后缀，所以每次构建的版本都不同、CPA 一定会热加载新库而不是继续用旧的。
+
+**本地打包**（产物落在 `release/`，已 gitignore）：
+
+```bash
+make tools                               # 固定版本 Go 工具链，无需 root
+scripts/release.sh 0.1.0                 # 只打本机平台
+scripts/release.sh 0.1.0 linux/arm64 linux/amd64
+```
+
+脚本按插件商店的硬性规则产出并自检：`release/clinepass-channel-monitor_<version>_<goos>_<goarch>.zip`（zip 根目录里只有 `clinepass-channel-monitor.so`）、`release/checksums.txt`（sha256sum 格式）。CGO 交叉编译需要目标平台的 C 工具链：Linux 上会识别 `x86_64-linux-gnu-gcc` / `aarch64-linux-gnu-gcc`，没有就直接报错让你装；darwin 产物必须在 macOS 上构建（CGO 链接要用 macOS SDK）。
+
+**CI 发布**：推 tag 触发 `.github/workflows/release.yml`，三平台矩阵（`linux/amd64`、`linux/arm64`、`darwin/arm64`）各自构建、合并 `checksums.txt`、创建 GitHub Release：
+
+```bash
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+**登记到插件商店**：仓库根目录的 `registry.json` 就是登记文件（`schema_version: 1`，`github-release` 类型，资产取自你的 GitHub Release）。两种用法：
+
+1. **自建源**（立刻可用，不需要别人合并）：把仓库推上 GitHub 后，在 CPA 配置里加这个文件的 raw 地址：
+
+   ```yaml
+   plugins:
+     store-sources:
+       - "https://raw.githubusercontent.com/wkeking/clinepass-channel-monitor/main/registry.json"
+   ```
+
+   CPA 始终加载官方源，第三方源只是追加；源 id 是 URL 的 sha256 前 12 位，名称取 host，私有源另配 `plugins.store-auth`。
+2. **官方商店**：向 `router-for-me/CLIProxyAPI-Plugins-Store` 提 PR，只在它的 `registry.json` 里加一条（必填 `id`/`name`/`description`/`author`/`repository`，且 `repository` 必须正好是 `https://github.com/{owner}/{repo}`），并附最新 tag 与 release 资产的证据。合入后所有人默认可见。你的项目本身**不需要**推进那个仓库——它只放登记表，二进制始终留在你自己的仓库。
+
+**安装与验证**：
+
+```bash
+curl -s -H "Authorization: Bearer $CPA_MANAGEMENT_KEY" \
+  http://127.0.0.1:8317/v0/management/plugin-store          # 各源条目、installed_version、update_available
+curl -s -X POST -H "Authorization: Bearer $CPA_MANAGEMENT_KEY" \
+  "http://127.0.0.1:8317/v0/management/plugin-store/clinepass-channel-monitor/install?version=0.1.0"
+```
+
+也可以在管理中心的「插件商店」里点安装。装好的库落在 `<plugins.dir>/<goos>/<goarch>/clinepass-channel-monitor-v<version>.so`，之后还需要 `plugins.configs.clinepass-channel-monitor` 配置块并触发一次重载才会生效。覆盖当前正在加载的同版本文件会被 CPA 拒绝（`ErrLoadedPluginLocked`）：要么发一个新版本号，要么先重启 CPA。
+
+两个容易踩的点：① tag 带 `v`、资产名不带 `v`，CPA 逐字符匹配资产名（`<id>_<version>_<goos>_<goarch>.zip`），少一个下划线就是 `release asset ... not found`；② 同一个插件 id 同时出现在多个源时，手工安装的副本会变成 `unknown` 来源、不再提示更新——自建源和官方商店只登记一处，或统一走商店安装。
 
 ## 许可证
 

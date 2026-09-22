@@ -6,6 +6,8 @@
 .toolchain/
 # 构建产物
 dist/
+# 发布产物（scripts/release.sh：各平台 zip + checksums.txt）
+release/
 *.so
 *.h
 

@@ -1,0 +1,32 @@
+name: ci
+
+# Tests run for every branch push and pull request; tags are handled by release.yml.
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: vet, test, build
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the pinned Go toolchain
+        run: make tools
+      - name: Check formatting
+        run: |
+          unformatted="$(.toolchain/go/bin/gofmt -l ./cmd ./internal)"
+          if [ -n "$unformatted" ]; then
+            echo "gofmt needed for:" >&2
+            echo "$unformatted" >&2
+            exit 1
+          fi
+      - name: Vet and test
+        run: make vet test
+      - name: Build the shared library (CGO link check)
+        run: make build BUMP_FILE=/tmp/ci-dev-build

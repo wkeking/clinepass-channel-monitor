@@ -197,6 +197,41 @@ func TestHasChannelMarkerEarlyExit(t *testing.T) {
 	}
 }
 
+func TestExtractChannelToleratesForeignProviderShape(t *testing.T) {
+	// Another upstream reusing "provider" for an object must not break the decode of a body
+	// that also carries usable gateway routing.
+	body := []byte(`{"provider":{"id":"x"},"model":"m",` +
+		`"provider_metadata":{"gateway":{"routing":{"finalProvider":"deepseek"}}}}`)
+	meta := ExtractChannelFromBody(body, false)
+	if meta == nil || meta.FinalProvider != "deepseek" {
+		t.Fatalf("gateway routing must survive a foreign provider field, got %+v", meta)
+	}
+	// On its own that foreign shape is not a channel value.
+	only := []byte(`{"provider":{"id":"x"},"choices":[{"delta":{"content":"ok"}}]}`)
+	if meta := ExtractChannelFromBody(only, false); meta != nil {
+		t.Errorf("an object-shaped provider is not a channel value, got %+v", meta)
+	}
+}
+
+func TestBodyShapeMentionsChannelFields(t *testing.T) {
+	shape := BodyShape([]byte(`{"provider_metadata":{"gateway":{"routing":{}}},"choices":[]}`))
+	for _, want := range []string{"provider_metadata", "routing", "choices"} {
+		if !strings.Contains(shape, want) {
+			t.Errorf("shape %q must mention %q", shape, want)
+		}
+	}
+	plain := BodyShape([]byte(`{"choices":[{"delta":{"content":"ok"}}]}`))
+	if strings.Contains(plain, "provider") || strings.Contains(plain, "routing") {
+		t.Errorf("shape %q must not claim channel fields", plain)
+	}
+	if !HasProviderMetadata([]byte(`{"provider_metadata":{}}`)) {
+		t.Error("provider_metadata must be detected")
+	}
+	if HasProviderMetadata([]byte(`{"provider":"Relace"}`)) {
+		t.Error("the serving-provider field alone is not Cline's metadata")
+	}
+}
+
 func TestMaskAPIKey(t *testing.T) {
 	cases := map[string]string{
 		"":                  "",

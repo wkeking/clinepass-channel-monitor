@@ -84,15 +84,30 @@ type upstreamEnvelope struct {
 	} `json:"choices"`
 	ProviderMetadata *rawProviderMetadata `json:"provider_metadata"`
 	// Provider is the serving provider that OpenRouter-shaped responses report instead
-	// of provider_metadata, e.g. "baseten" or "Relace".
-	Provider string         `json:"provider"`
-	Model    string         `json:"model"`
-	Usage    *upstreamUsage `json:"usage"`
+	// of provider_metadata, e.g. "baseten" or "Relace". Other upstreams reuse the key for
+	// objects, so it is decoded tolerantly: one foreign shape must not fail the whole
+	// decode and hide a usable provider_metadata block.
+	Provider json.RawMessage `json:"provider"`
+	Model    json.RawMessage `json:"model"`
+	Usage    *upstreamUsage  `json:"usage"`
 }
 
 type choicePayload struct {
 	ProviderMetadata *rawProviderMetadata `json:"provider_metadata"`
-	Provider         string               `json:"provider"`
+	Provider         json.RawMessage      `json:"provider"`
+}
+
+// rawString returns the string value of a tolerantly decoded field, or "" for any other
+// JSON type.
+func rawString(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var value string
+	if errUnmarshal := json.Unmarshal(raw, &value); errUnmarshal != nil {
+		return ""
+	}
+	return strings.TrimSpace(value)
 }
 
 type upstreamUsage struct {
@@ -157,10 +172,42 @@ func HasChannelMarker(body []byte) bool {
 	return bytes.Contains(body, markerNeedle) || bytes.Contains(body, providerNeedle)
 }
 
-// hasRoutingMarker reports whether a body contains the routing evidence required by
+// HasRoutingMarker reports whether a body contains the routing evidence required by
 // require_routing_marker.
 func HasRoutingMarker(body []byte) bool {
 	return bytes.Contains(body, routingMarkerNeedle)
+}
+
+// HasProviderMetadata reports whether a body mentions Cline's own channel metadata. It is
+// the narrower of the two needles: a body carrying it but yielding no channel value is a
+// parsing anomaly worth counting, while a foreign body that merely mentions "provider" is
+// not.
+func HasProviderMetadata(body []byte) bool {
+	return bytes.Contains(body, markerNeedle)
+}
+
+// BodyShape lists which channel fields a body mentions without exposing its content. It
+// feeds the warning the hooks emit when a body matched a needle but yielded no value.
+func BodyShape(body []byte) string {
+	flags := make([]string, 0, 5)
+	for _, needle := range []struct {
+		name  string
+		bytes []byte
+	}{
+		{"provider_metadata", markerNeedle},
+		{"provider", providerNeedle},
+		{"routing", routingMarkerNeedle},
+		{"choices", []byte(`"choices"`)},
+		{"data", []byte(`"data"`)},
+	} {
+		if bytes.Contains(body, needle.bytes) {
+			flags = append(flags, needle.name)
+		}
+	}
+	if len(flags) == 0 {
+		return "-"
+	}
+	return strings.Join(flags, "|")
 }
 
 // trimSSEFrame strips the SSE "data: " prefix and surrounding whitespace from a frame.
@@ -211,7 +258,7 @@ func unwrapEnvelope(envelope *upstreamEnvelope) *upstreamEnvelope {
 	if envelope == nil || envelope.Data == nil {
 		return nil
 	}
-	if len(envelope.Choices) > 0 || envelope.ProviderMetadata != nil || envelope.Provider != "" {
+	if len(envelope.Choices) > 0 || envelope.ProviderMetadata != nil || len(envelope.Provider) > 0 {
 		return nil
 	}
 	return envelope.Data
@@ -235,7 +282,7 @@ func channelMetadataOf(envelope *upstreamEnvelope) *ChannelMetadata {
 	}
 	meta := &ChannelMetadata{FinalProvider: provider}
 	if envelope != nil {
-		meta.UpstreamModel = envelope.Model
+		meta.UpstreamModel = rawString(envelope.Model)
 		if envelope.Usage != nil {
 			meta.UpstreamPromptTokens = envelope.Usage.PromptTokens
 			meta.UpstreamCompletionTokens = envelope.Usage.CompletionTokens
@@ -250,15 +297,19 @@ func servingProvider(envelope *upstreamEnvelope) string {
 	if envelope == nil {
 		return ""
 	}
-	if provider := strings.TrimSpace(envelope.Provider); provider != "" {
+	if provider := rawString(envelope.Provider); provider != "" {
 		return provider
 	}
 	for i := range envelope.Choices {
-		if delta := envelope.Choices[i].Delta; delta != nil && strings.TrimSpace(delta.Provider) != "" {
-			return strings.TrimSpace(delta.Provider)
+		if delta := envelope.Choices[i].Delta; delta != nil {
+			if provider := rawString(delta.Provider); provider != "" {
+				return provider
+			}
 		}
-		if message := envelope.Choices[i].Message; message != nil && strings.TrimSpace(message.Provider) != "" {
-			return strings.TrimSpace(message.Provider)
+		if message := envelope.Choices[i].Message; message != nil {
+			if provider := rawString(message.Provider); provider != "" {
+				return provider
+			}
 		}
 	}
 	return ""
@@ -294,7 +345,7 @@ func normalizeChannelMetadata(raw *rawProviderMetadata, envelope *upstreamEnvelo
 		PlanningReasoningText:     routing.PlanningReasoning,
 	}
 	if envelope != nil {
-		meta.UpstreamModel = envelope.Model
+		meta.UpstreamModel = rawString(envelope.Model)
 		if envelope.Usage != nil {
 			meta.UpstreamPromptTokens = envelope.Usage.PromptTokens
 			meta.UpstreamCompletionTokens = envelope.Usage.CompletionTokens

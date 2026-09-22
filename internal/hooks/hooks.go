@@ -422,7 +422,23 @@ func ResponseNormalizeBefore(request []byte) ([]byte, error) {
 	}
 	meta := metadata.ExtractChannelFromBody(req.Body, cfg.StorePlanningReasoning)
 	if meta == nil {
-		st.IncParseError()
+		// A body that mentions Cline's own metadata but still yields no channel value is a
+		// real parsing anomaly. A foreign body that merely happens to mention "provider"
+		// is not, so it must not inflate the counter.
+		if metadata.HasProviderMetadata(req.Body) {
+			st.IncParseError()
+		}
+		if cfg.LogEvents {
+			// Field names and lengths only: the body itself is never logged.
+			hostapi.LogAsync("warn", buildinfo.ID+": channel body without usable evidence", map[string]string{
+				"model":         strings.TrimSpace(req.Model),
+				"client_format": strings.TrimSpace(req.ToFormat),
+				"upstream":      strings.TrimSpace(req.FromFormat),
+				"stream":        strconv.FormatBool(req.Stream),
+				"body_bytes":    strconv.Itoa(len(req.Body)),
+				"fields":        metadata.BodyShape(req.Body),
+			})
+		}
 		return empty, nil
 	}
 	// The identity entry is kept (not taken) so a later frame of the same request still

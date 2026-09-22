@@ -1,26 +1,26 @@
-package main
+// Package plugin wires the plugin together: it parses the configuration the host hands
+// over, publishes the runtime state, and dispatches every ABI method CPA calls.
+package plugin
 
 import (
 	"encoding/json"
 	"net/http"
 	"strconv"
 	"strings"
-	"sync"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
-)
 
-const (
-	pluginID          = "clinepass-channel-monitor"
-	pluginName        = "Cline 渠道监控"
-	pluginAuthor      = "wkeking"
-	pluginRepository  = "https://github.com/wkeking/clinepass-channel-monitor"
-	pluginDescription = "逐条记录 Cline 请求实际命中的上游渠道、用量与成本，并提供管理页。"
+	"github.com/wkeking/clinepass-channel-monitor/internal/abi"
+	"github.com/wkeking/clinepass-channel-monitor/internal/buildinfo"
+	"github.com/wkeking/clinepass-channel-monitor/internal/config"
+	"github.com/wkeking/clinepass-channel-monitor/internal/hooks"
+	"github.com/wkeking/clinepass-channel-monitor/internal/hostapi"
+	"github.com/wkeking/clinepass-channel-monitor/internal/management"
+	"github.com/wkeking/clinepass-channel-monitor/internal/plan"
+	"github.com/wkeking/clinepass-channel-monitor/internal/state"
+	"github.com/wkeking/clinepass-channel-monitor/internal/store"
 )
-
-// pluginVersion is a variable so release builds can stamp it with -ldflags.
-var pluginVersion = "0.1.0"
 
 // registrationCapability mirrors the host capability record. Field names are the
 // ABI contract; see sdk/pluginhost rpcCapabilities.
@@ -48,136 +48,85 @@ type registration struct {
 	Capabilities  registrationCapability `json:"capabilities"`
 }
 
-var (
-	stateMu sync.RWMutex
-	state   = pluginState{
-		Config:     defaultConfig(),
-		Identities: newIdentityTable(),
-	}
-)
-
-// pluginState holds everything shared between the hook callbacks.
-type pluginState struct {
-	Config config
-	Store  *store
-	// Identities correlates the request, response and usage hooks of one request.
-	Identities *identityTable
-	// Plan polls Cline's own API for subscription quota information.
-	Plan *planPoller
-}
-
-func loadConfig(raw []byte) {
-	cfg, errParse := parseConfig(raw)
+// LoadConfig parses the configuration block the host hands over, publishes the new runtime
+// state and (re)starts the Cline usage poller.
+//
+// It fails open: an unparseable block keeps the defaults so the plugin still loads and still
+// records. A reconfigure also starts a fresh in-memory view: the ring buffer and the counters
+// describe this instance only, while the JSONL files keep the full history.
+func LoadConfig(raw []byte) {
+	cfg, errParse := config.Parse(raw)
 	if errParse != nil {
-		// Fail open: keep defaults so the plugin still loads and still records.
-		hostLogAsync("warn", "clinepass-channel-monitor: falling back to default config", map[string]string{
+		hostapi.LogAsync("warn", buildinfo.ID+": falling back to default config", map[string]string{
 			"error": errParse.Error(),
 		})
-		cfg = defaultConfig()
+		cfg = config.Default()
 	}
-	stateMu.Lock()
-	state.Config = cfg
-	if state.Store == nil {
-		state.Store = newStore(cfg)
+	if existing := state.Store(); existing == nil {
+		state.SetStore(store.New(cfg))
 	} else {
-		state.Store.reconfigure(cfg)
+		existing.Reconfigure(cfg)
 	}
-	// A reconfigure (or reload) starts a fresh view: the ring and the counters describe
-	// this instance only, while the JSONL files keep the full history.
-	if state.Store != nil {
-		state.Store.reset()
+	state.Store().Reset()
+	hooks.Reset()
+	if poller := state.Plan(); poller != nil {
+		poller.Stop()
+		state.SetPlan(nil)
 	}
-	state.Identities = newIdentityTable()
-	poller := state.Plan
-	if poller != nil {
-		poller.stop()
-		state.Plan = nil
-	}
-	stateMu.Unlock()
+	state.SetConfig(cfg)
 	if cfg.PlanEnabled {
-		poller = startPlanPoller()
-		stateMu.Lock()
-		state.Plan = poller
-		stateMu.Unlock()
+		state.SetPlan(plan.Start(cfg))
 	}
-	hostLogAsync("info", "clinepass-channel-monitor: configured", map[string]string{
-		"mode":          cfg.matchMode(),
+	hostapi.LogAsync("info", buildinfo.ID+": configured", map[string]string{
+		"mode":          cfg.MatchMode(),
 		"hosts":         strings.Join(cfg.Hosts, ","),
 		"jsonl_enabled": strconv.FormatBool(cfg.JSONLEnabled),
 		"jsonl_dir":     cfg.JSONLDir,
 	})
 }
 
-func currentConfig() config {
-	stateMu.RLock()
-	defer stateMu.RUnlock()
-	return state.Config
-}
-
-func currentStore() *store {
-	stateMu.RLock()
-	defer stateMu.RUnlock()
-	return state.Store
-}
-
-func currentIdentities() *identityTable {
-	stateMu.RLock()
-	defer stateMu.RUnlock()
-	if state.Identities == nil {
-		return newIdentityTable()
+// Shutdown flushes the JSONL queue and stops the background work.
+func Shutdown() {
+	store.Shutdown()
+	if poller := state.Plan(); poller != nil {
+		poller.Stop()
 	}
-	return state.Identities
-}
-
-func currentPlan() *planPoller {
-	stateMu.RLock()
-	defer stateMu.RUnlock()
-	return state.Plan
-}
-
-func shutdown() {
-	sinkShutdown()
-	if poller := currentPlan(); poller != nil {
-		poller.stop()
-	}
-	stateMu.Lock()
-	defer stateMu.Unlock()
-	if state.Store != nil {
-		state.Store.close()
+	if st := state.Store(); st != nil {
+		st.Close()
 	}
 }
 
 // handleMethod dispatches one ABI call. Every registered capability must have a case here.
-func handleMethod(method string, request []byte) ([]byte, error) {
+func HandleMethod(method string, request []byte) ([]byte, error) {
 	switch method {
 	case pluginabi.MethodPluginRegister, pluginabi.MethodPluginReconfigure:
-		loadConfig(configYAMLFromLifecycleRequest(request))
+		LoadConfig(configYAMLFromLifecycleRequest(request))
 		if method == pluginabi.MethodPluginRegister {
 			// A single line on load makes it obvious which build CPA is running, which
 			// matters because CPA replaces a plugin by file name rather than content.
-			hostLogAsync("info", "clinepass-channel-monitor: loaded", map[string]string{
-				"version": pluginVersion,
+			hostapi.LogAsync("info", buildinfo.ID+": loaded", map[string]string{
+				"version": buildinfo.Version,
 			})
 		}
-		return okEnvelope(buildRegistration())
+		return abi.OK(buildRegistration())
 	case pluginabi.MethodPluginQuiesce, pluginabi.MethodPluginShutdown:
-		return okEnvelope(nil)
+		return abi.OK(nil)
 	case pluginabi.MethodResponseNormalizeBefore:
-		return handleResponseNormalizeBefore(request)
+		return hooks.ResponseNormalizeBefore(request)
 	case pluginabi.MethodRequestInterceptBefore:
-		return handleRequestInterceptBefore(request)
+		return hooks.RequestInterceptBefore(request)
 	case pluginabi.MethodRequestInterceptAfter:
-		return handleRequestInterceptAfter(request)
+		return hooks.RequestInterceptAfter(request)
 	case pluginabi.MethodRequestComplete:
-		return handleRequestComplete(request)
+		return hooks.RequestComplete(request)
 	case pluginabi.MethodUsageHandle:
-		return handleUsage(request)
+		return hooks.Usage(request)
 	case pluginabi.MethodManagementRegister:
-		return okEnvelope(buildManagementRegistration())
+		return abi.OK(buildManagementRegistration())
 	case pluginabi.MethodManagementHandle:
-		return handleManagement(request)
+		return management.Handle(request)
 	default:
-		return errorEnvelope("unknown_method", "unknown method: "+method), nil
+		return abi.Failure("unknown_method", "unknown method: "+method), nil
 	}
 }
 
@@ -204,10 +153,10 @@ func buildRegistration() registration {
 	return registration{
 		SchemaVersion: pluginabi.SchemaVersion,
 		Metadata: pluginapi.Metadata{
-			Name:             pluginName,
-			Version:          pluginVersion,
-			Author:           pluginAuthor,
-			GitHubRepository: pluginRepository,
+			Name:             buildinfo.Name,
+			Version:          buildinfo.Version,
+			Author:           buildinfo.Author,
+			GitHubRepository: buildinfo.Repository,
 			ConfigFields: []pluginapi.ConfigField{
 				{Name: "hosts", Type: pluginapi.ConfigFieldTypeArray, Description: "需要记录的请求所属的主机名（Base URL 的 host）。以 . 开头表示匹配域名后缀；留空表示记录所有携带网关路由元数据的请求。"},
 				{Name: "require_routing_marker", Type: pluginapi.ConfigFieldTypeBoolean, Description: "要求上游响应里出现 provider_metadata.gateway.routing 才记录该请求。"},
@@ -247,13 +196,13 @@ func buildRegistration() registration {
 func buildManagementRegistration() pluginapi.ManagementRegistrationResponse {
 	return pluginapi.ManagementRegistrationResponse{
 		Routes: []pluginapi.ManagementRoute{
-			{Method: http.MethodGet, Path: managementBasePath + "/stats"},
-			{Method: http.MethodGet, Path: managementBasePath + "/events"},
-			{Method: http.MethodGet, Path: managementBasePath + "/health"},
-			{Method: http.MethodGet, Path: managementBasePath + "/export"},
+			{Method: http.MethodGet, Path: management.BasePath + "/stats"},
+			{Method: http.MethodGet, Path: management.BasePath + "/events"},
+			{Method: http.MethodGet, Path: management.BasePath + "/health"},
+			{Method: http.MethodGet, Path: management.BasePath + "/export"},
 		},
 		Resources: []pluginapi.ResourceRoute{
-			{Path: "/index.html", Menu: pluginName, Description: pluginDescription},
+			{Path: "/index.html", Menu: buildinfo.Name, Description: buildinfo.Description},
 		},
 	}
 }

@@ -1,4 +1,4 @@
-package main
+package plan
 
 import (
 	"encoding/json"
@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/wkeking/clinepass-channel-monitor/internal/config"
 )
 
 // TestClineAPIKeyFromConfigFileReadsAPIKeyEntries guards the credential discovery path:
@@ -31,7 +33,7 @@ func TestClineAPIKeyFromConfigFileReadsAPIKeyEntries(t *testing.T) {
 	if errWrite := os.WriteFile(path, []byte(content), 0o600); errWrite != nil {
 		t.Fatalf("write fixture: %v", errWrite)
 	}
-	cfg := defaultConfig()
+	cfg := config.Default()
 	cfg.PlanConfigPath = path
 	creds := clineCredentialsFromConfigFile(cfg)
 	if len(creds) != 1 || creds[0].Key != "key-from-entries" {
@@ -106,16 +108,11 @@ func fakeClineAPI(t *testing.T, now time.Time) *httptest.Server {
 func TestPlanPollerRefreshServesOfficialWindows(t *testing.T) {
 	now := time.Now().UTC()
 	server := fakeClineAPI(t, now)
-	loadConfig([]byte(fmt.Sprintf(
+	poller := newTestPoller(t, fmt.Sprintf(
 		"plan_enabled: false\nplan_api_key: test-key\nplan_base_url: %s\nplan_daily_enabled: true\nplan_usage_enabled: true\n",
-		server.URL)))
-	defer func() {
-		loadConfig([]byte("plan_enabled: false\n"))
-	}()
-
-	poller := newPlanPoller()
+		server.URL))
 	poller.refresh()
-	quota := poller.snapshot()
+	quota := poller.Snapshot()
 
 	if !quota.Available || quota.Error != "" {
 		t.Fatalf("快照应可用，实际 available=%v error=%q", quota.Available, quota.Error)
@@ -194,11 +191,9 @@ func TestPlanPollerSurvivesUpstreamFailure(t *testing.T) {
 		w.WriteHeader(http.StatusUnauthorized)
 	}))
 	defer broken.Close()
-	loadConfig([]byte(fmt.Sprintf("plan_enabled: false\nplan_api_key: test-key\nplan_base_url: %s\n", broken.URL)))
-
-	poller := newPlanPoller()
+	poller := newTestPoller(t, fmt.Sprintf("plan_enabled: false\nplan_api_key: test-key\nplan_base_url: %s\n", broken.URL))
 	poller.refresh()
-	quota := poller.snapshot()
+	quota := poller.Snapshot()
 	if quota.Available {
 		t.Errorf("上游失败时不应标记可用")
 	}
@@ -246,14 +241,11 @@ func TestPlanPollerPollsEveryConfiguredCredential(t *testing.T) {
 	}))
 	defer server.Close()
 
-	loadConfig([]byte(fmt.Sprintf(
+	poller := newTestPoller(t, fmt.Sprintf(
 		"plan_enabled: false\nplan_config_path: %s\nplan_base_url: %s\nplan_usage_enabled: false\nplan_daily_enabled: false\n",
-		path, server.URL)))
-	defer func() { loadConfig([]byte("plan_enabled: false\n")) }()
-
-	poller := newPlanPoller()
+		path, server.URL))
 	poller.refresh()
-	quota := poller.snapshot()
+	quota := poller.Snapshot()
 	if len(quota.Accounts) != 2 {
 		t.Fatalf("accounts = %+v，期望两把 key 各一个账号", quota.Accounts)
 	}
@@ -294,27 +286,27 @@ func TestPlanPollerPollsEveryConfiguredCredential(t *testing.T) {
 // bearer observed on an intercepted request is the client's key for CPA, not a Cline key, so
 // accepting it produced a second, permanently unavailable account in the picker.
 func TestResolvePlanCredentialsSkipsClientBearer(t *testing.T) {
-	cfg := defaultConfig()
+	cfg := config.Default()
 	cfg.PlanConfigPath = filepath.Join(t.TempDir(), "missing.yaml")
 	resetBearer := func() {
-		latestUpstreamBearer.Lock()
-		latestUpstreamBearer.value = ""
-		latestUpstreamBearer.Unlock()
+		latestBearer.Lock()
+		latestBearer.value = ""
+		latestBearer.Unlock()
 	}
 	defer resetBearer()
 
 	headers := http.Header{}
 	headers.Set("Authorization", "Bearer sk-TESTKEY00000000001") // 20 字符的下游 key
-	rememberUpstreamBearer(headers)
-	if creds := resolvePlanCredentials(cfg); len(creds) != 0 {
+	RememberUpstreamBearer(headers)
+	if creds := ResolveCredentials(cfg); len(creds) != 0 {
 		t.Fatalf("下游客户端 key 不应被当成 Cline 凭据: %+v", creds)
 	}
 
 	clineKey := "sk_" + strings.Repeat("a", 64) // 67 字符
 	headers = http.Header{}
 	headers.Set("Authorization", "Bearer "+clineKey)
-	rememberUpstreamBearer(headers)
-	creds := resolvePlanCredentials(cfg)
+	RememberUpstreamBearer(headers)
+	creds := ResolveCredentials(cfg)
 	if len(creds) != 1 || creds[0].Source != "observed-header" {
 		t.Fatalf("形如 Cline key 的 bearer 应被采用: %+v", creds)
 	}
@@ -331,11 +323,9 @@ func TestPlanPollerMarksRejectedCredential(t *testing.T) {
 		w.WriteHeader(http.StatusUnauthorized)
 	}))
 	defer rejected.Close()
-	loadConfig([]byte(fmt.Sprintf("plan_enabled: false\nplan_api_key: bad-key\nplan_base_url: %s\n", rejected.URL)))
-
-	poller := newPlanPoller()
+	poller := newTestPoller(t, fmt.Sprintf("plan_enabled: false\nplan_api_key: bad-key\nplan_base_url: %s\n", rejected.URL))
 	poller.refresh()
-	quota := poller.snapshot()
+	quota := poller.Snapshot()
 	if len(quota.Accounts) != 1 {
 		t.Fatalf("accounts = %+v", quota.Accounts)
 	}
@@ -373,7 +363,7 @@ func TestClineCredentialsMatchByHostOrName(t *testing.T) {
 	if errWrite := os.WriteFile(path, []byte(content), 0o600); errWrite != nil {
 		t.Fatalf("write fixture: %v", errWrite)
 	}
-	cfg := defaultConfig()
+	cfg := config.Default()
 	cfg.PlanConfigPath = path
 	creds := clineCredentialsFromConfigFile(cfg)
 	got := map[string]string{}
@@ -398,4 +388,18 @@ func TestClineCredentialsMatchByHostOrName(t *testing.T) {
 	if label := got["key-by-host"]; label != "CP #1 · key…host" {
 		t.Errorf("label = %q，期望用条目名做前缀", label)
 	}
+}
+
+// newTestPoller builds a poller for one configuration block, mirroring what the plugin
+// package does on load. The plan package never reads global state, so tests wire the
+// configuration in directly.
+func newTestPoller(t *testing.T, raw string) *Poller {
+	t.Helper()
+	cfg, errParse := config.Parse([]byte(raw))
+	if errParse != nil {
+		t.Fatalf("parse config: %v", errParse)
+	}
+	poller := newPoller()
+	poller.cfg = cfg
+	return poller
 }

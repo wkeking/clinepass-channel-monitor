@@ -34,25 +34,16 @@ void cliproxyPluginShutdown(void);
 import "C"
 
 import (
-	"encoding/json"
 	"fmt"
 	"runtime/debug"
 	"unsafe"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
+
+	"github.com/wkeking/clinepass-channel-monitor/internal/abi"
+	"github.com/wkeking/clinepass-channel-monitor/internal/hostapi"
+	"github.com/wkeking/clinepass-channel-monitor/internal/plugin"
 )
-
-// envelope is the RPC response wrapper shared by every plugin method.
-type envelope struct {
-	OK     bool            `json:"ok"`
-	Result json.RawMessage `json:"result,omitempty"`
-	Error  *envelopeError  `json:"error,omitempty"`
-}
-
-type envelopeError struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
-}
 
 func main() {}
 
@@ -63,7 +54,7 @@ func cliproxy_plugin_init(host *C.cliproxy_host_api, plugin *C.cliproxy_plugin_a
 	}
 	C.store_host_api(host)
 	// host_api.go has its own copy of the bridge storage, so it must be filled in too.
-	storeHost(host)
+	hostapi.Store(unsafe.Pointer(host))
 	plugin.abi_version = C.uint32_t(pluginabi.ABIVersion)
 	plugin.call = C.cliproxy_plugin_call_fn(C.cliproxyPluginCall)
 	plugin.free_buffer = C.cliproxy_plugin_free_fn(C.cliproxyPluginFree)
@@ -82,9 +73,9 @@ func cliproxyPluginCall(method *C.char, request *C.uint8_t, requestLen C.size_t,
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			ret = 1
-			raw := errorEnvelope("plugin_panic", fmt.Sprintf("plugin recovered from panic: %v", recovered))
+			raw := abi.Failure("plugin_panic", fmt.Sprintf("plugin recovered from panic: %v", recovered))
 			writeResponse(response, raw)
-			hostLogAsync("error", "clinepass-channel-monitor: recovered from panic", map[string]string{
+			hostapi.LogAsync("error", "clinepass-channel-monitor: recovered from panic", map[string]string{
 				"method": dispatchMethodName(method),
 				"panic":  fmt.Sprint(recovered),
 				"stack":  trimStack(debug.Stack()),
@@ -92,7 +83,7 @@ func cliproxyPluginCall(method *C.char, request *C.uint8_t, requestLen C.size_t,
 		}
 	}()
 	if method == nil {
-		writeResponse(response, errorEnvelope("invalid_method", "method is required"))
+		writeResponse(response, abi.Failure("invalid_method", "method is required"))
 		return 1
 	}
 	var requestBytes []byte
@@ -100,9 +91,9 @@ func cliproxyPluginCall(method *C.char, request *C.uint8_t, requestLen C.size_t,
 		requestBytes = C.GoBytes(unsafe.Pointer(request), C.int(requestLen))
 	}
 	name := C.GoString(method)
-	raw, errHandle := handleMethod(name, requestBytes)
+	raw, errHandle := plugin.HandleMethod(name, requestBytes)
 	if errHandle != nil {
-		writeResponse(response, errorEnvelope("plugin_error", errHandle.Error()))
+		writeResponse(response, abi.Failure("plugin_error", errHandle.Error()))
 		return 1
 	}
 	writeResponse(response, raw)
@@ -119,7 +110,7 @@ func cliproxyPluginFree(ptr unsafe.Pointer, len C.size_t) {
 
 //export cliproxyPluginShutdown
 func cliproxyPluginShutdown() {
-	shutdown()
+	plugin.Shutdown()
 }
 
 func dispatchMethodName(method *C.char) string {
@@ -147,21 +138,4 @@ func writeResponse(response *C.cliproxy_buffer, raw []byte) {
 	}
 	response.ptr = ptr
 	response.len = C.size_t(len(raw))
-}
-
-func okEnvelope(result any) ([]byte, error) {
-	raw := json.RawMessage("null")
-	if result != nil {
-		marshaled, errMarshal := json.Marshal(result)
-		if errMarshal != nil {
-			return nil, errMarshal
-		}
-		raw = marshaled
-	}
-	return json.Marshal(envelope{OK: true, Result: raw})
-}
-
-func errorEnvelope(code, message string) []byte {
-	raw, _ := json.Marshal(envelope{OK: false, Error: &envelopeError{Code: code, Message: message}})
-	return raw
 }

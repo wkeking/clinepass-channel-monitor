@@ -1,4 +1,7 @@
-package main
+// Package hostapi is the plugin-side bridge to the CPA host callbacks (logging and the
+// host data APIs such as the auth store). Every call is best effort: failures are swallowed
+// so an observation can never influence the traffic it observes.
+package hostapi
 
 /*
 #include "cdecl.h"
@@ -27,22 +30,25 @@ import "C"
 import (
 	"encoding/json"
 	"unsafe"
+
+	"github.com/wkeking/clinepass-channel-monitor/internal/buildinfo"
 )
 
-// storeHost keeps the host API in this file's copy of the bridge storage. Every cgo
-// file compiles its own copy of the preamble, so main.go cannot fill this one in.
-func storeHost(host *C.cliproxy_host_api) {
+// Store keeps the host API in this package's copy of the bridge storage. Every cgo file
+// compiles its own copy of the preamble, so the entry point cannot fill it in from outside:
+// it passes the pointer in as an unsafe.Pointer and this package casts it back.
+func Store(host unsafe.Pointer) {
 	if host == nil {
 		return
 	}
-	C.store_host_api(host)
+	C.store_host_api((*C.cliproxy_host_api)(host))
 }
 
 // callHost performs one host callback and returns the raw response bytes.
 //
 // Failures are swallowed on purpose: a plugin observation must never influence the
 // traffic it observes.
-func callHost(method string, payload []byte) ([]byte, bool) {
+func Call(method string, payload []byte) ([]byte, bool) {
 	cMethod := C.CString(method)
 	defer C.free(unsafe.Pointer(cMethod))
 
@@ -66,9 +72,9 @@ func callHost(method string, payload []byte) ([]byte, bool) {
 const maxLogFieldLen = 512
 
 // hostLog writes one structured line into the CPA log. It is best effort.
-func hostLog(level, message string, fields map[string]string) {
+func Log(level, message string, fields map[string]string) {
 	if len(message) == 0 {
-		message = pluginID
+		message = buildinfo.ID
 	}
 	trimmed := make(map[string]string, len(fields))
 	for key, value := range fields {
@@ -85,10 +91,10 @@ func hostLog(level, message string, fields map[string]string) {
 	if errMarshal != nil {
 		return
 	}
-	_, _ = callHost("host.log", payload)
+	_, _ = Call("host.log", payload)
 }
 
 // hostLogAsync emits a log line without blocking the caller.
-func hostLogAsync(level, message string, fields map[string]string) {
-	go hostLog(level, message, fields)
+func LogAsync(level, message string, fields map[string]string) {
+	go Log(level, message, fields)
 }

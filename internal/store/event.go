@@ -1,4 +1,4 @@
-package main
+package store
 
 import (
 	"bytes"
@@ -6,8 +6,10 @@ import (
 	"time"
 )
 
-// identity carries the correlation keys taken from the request intercept hook.
-type identity struct {
+// Identity carries the correlation keys taken from the request intercept hook.
+// Identity is the (session, model) pair a usage record carries; it is what a channel
+// observation is matched against.
+type Identity struct {
 	RequestHash string
 	SessionID   string
 	Model       string
@@ -18,7 +20,10 @@ type identity struct {
 
 // event is one recorded Cline request. The struct is deliberately flat so that a
 // JSONL line maps one-to-one onto the table columns of the management page.
-type event struct {
+// identity 是包内沿用的短名。
+type identity = Identity
+
+type Event struct {
 	Schema  int    `json:"schema"`
 	EventID string `json:"event_id"`
 	// PluginVersion records which build produced the row. It makes the JSONL file
@@ -153,7 +158,11 @@ type orderedEvent struct {
 	PlanningReasoningText string `json:"planning_reasoning,omitempty"`
 }
 
-const eventSchema = 1
+// EventSchema is the schema version stamped into every persisted record.
+const EventSchema = 1
+
+// eventSchema 是包内沿用的短名。
+const eventSchema = EventSchema
 
 // MarshalJSON renders the stable field order used in the JSONL files. Values that
 // would otherwise be HTML-escaped are written verbatim.
@@ -230,7 +239,7 @@ func (e *event) MarshalJSON() ([]byte, error) {
 }
 
 // eventFilter is the query used by the management endpoints.
-type eventFilter struct {
+type Filter struct {
 	Since   time.Duration
 	Limit   int
 	Offset  int

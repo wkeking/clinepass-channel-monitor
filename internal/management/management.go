@@ -1,7 +1,12 @@
-package main
+// Package management serves the plugin's Management API routes and the embedded page.
+//
+// Data only ever leaves through Management API paths, which the host authenticates. The
+// resource route (/v0/resource/plugins/...) is deliberately a static shell with no data.
+package management
 
 import (
 	"bytes"
+	_ "embed"
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
@@ -12,12 +17,26 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+
+	"github.com/wkeking/clinepass-channel-monitor/internal/abi"
+	"github.com/wkeking/clinepass-channel-monitor/internal/buildinfo"
+	"github.com/wkeking/clinepass-channel-monitor/internal/hooks"
+	"github.com/wkeking/clinepass-channel-monitor/internal/hostapi"
+	"github.com/wkeking/clinepass-channel-monitor/internal/plan"
+	"github.com/wkeking/clinepass-channel-monitor/internal/state"
+	"github.com/wkeking/clinepass-channel-monitor/internal/store"
 )
 
-// managementBasePath is the Management API base path for this plugin. Data endpoints
+// indexPage is the single-file management page. It is embedded so a deployment never
+// depends on extra files next to the plugin binary, and it carries no data of its own.
+//
+//go:embed index.html
+var indexPage []byte
+
+// BasePath is the Management API base path for this plugin. Data endpoints
 // live underneath it, which is the only place the plugin exposes data: the host
 // authenticates every Management API request, unlike /v0/resource/plugins/...
-const managementBasePath = "/v0/management/plugins/" + pluginID
+const BasePath = "/v0/management/plugins/" + buildinfo.ID
 
 const (
 	resourceIndexPath = "/index.html"
@@ -26,24 +45,24 @@ const (
 )
 
 // handleManagement answers Management API and resource requests.
-func handleManagement(request []byte) ([]byte, error) {
+func Handle(request []byte) ([]byte, error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			hostLogAsync("error", pluginID+": management handler recovered from panic", map[string]string{
+			hostapi.LogAsync("error", buildinfo.ID+": management handler recovered from panic", map[string]string{
 				"panic": fmt.Sprint(recovered),
 			})
 		}
 	}()
 	var req pluginapi.ManagementRequest
 	if errUnmarshal := json.Unmarshal(request, &req); errUnmarshal != nil {
-		return okEnvelope(pluginapi.ManagementResponse{
+		return abi.OK(pluginapi.ManagementResponse{
 			StatusCode: http.StatusBadRequest,
 			Headers:    jsonHeaders(),
 			Body:       []byte(`{"error":"invalid_request"}`),
 		})
 	}
-	resp := routeManagementRequest(&req)
-	return okEnvelope(resp)
+	resp := route(&req)
+	return abi.OK(resp)
 }
 
 // indexHTML serves the embedded single-file page. It contains no data: the page asks
@@ -73,9 +92,9 @@ func textHeaders(contentType string) http.Header {
 	}
 }
 
-// routeManagementRequest dispatches one request. The path is matched on its suffix so
+// route dispatches one request. The path is matched on its suffix so
 // both the Management API path and the resource path reach the same handler.
-func routeManagementRequest(req *pluginapi.ManagementRequest) pluginapi.ManagementResponse {
+func route(req *pluginapi.ManagementRequest) pluginapi.ManagementResponse {
 	path := strings.TrimRight(req.Path, "/")
 	switch {
 	case strings.HasSuffix(path, resourceIndexPath):
@@ -89,7 +108,7 @@ func routeManagementRequest(req *pluginapi.ManagementRequest) pluginapi.Manageme
 	case strings.HasSuffix(path, "/export"):
 		return exportResponse(req.Query)
 	default:
-		hostLogAsync("warn", pluginID+": unknown management path", map[string]string{"path": req.Path})
+		hostapi.LogAsync("warn", buildinfo.ID+": unknown management path", map[string]string{"path": req.Path})
 		return pluginapi.ManagementResponse{
 			StatusCode: http.StatusNotFound,
 			Headers:    jsonHeaders(),
@@ -128,7 +147,7 @@ type healthResponse struct {
 	// PlanUsage reports the official per-request collector that backs the overview cards
 	// (retained records, coverage, last error) without exposing any credential. When several
 	// Cline credentials are configured it describes the primary one; PlanAccounts lists all.
-	PlanUsage officialUsageState `json:"plan_usage"`
+	PlanUsage plan.UsageState `json:"plan_usage"`
 	// PlanAccounts lists every configured Cline credential so a deployment with several
 	// entries or several keys can be checked at a glance.
 	PlanAccounts []planAccountHealth `json:"plan_accounts,omitempty"`
@@ -137,8 +156,8 @@ type healthResponse struct {
 	// never contains a credential value.
 	RequestHeaderNames string `json:"request_header_names,omitempty"`
 	RequestBearerLen   int    `json:"request_bearer_len,omitempty"`
-	statsTotals
-	UnmatchedHostSamples []unmatchedHostSample `json:"unmatched_host_samples"`
+	store.Totals
+	UnmatchedHostSamples []store.UnmatchedHostSample `json:"unmatched_host_samples"`
 }
 
 // planAccountHealth is the per-credential diagnostic summary shown by /health.
@@ -169,14 +188,14 @@ func firstNonEmpty(values ...string) string {
 var pluginStart = time.Now()
 
 func buildHealthResponse() healthResponse {
-	cfg := currentConfig()
-	st := currentStore()
-	headerNames, bearerLen := upstreamBearerDiagnostics()
+	cfg := state.Config()
+	st := state.Store()
+	headerNames, bearerLen := plan.BearerDiagnostics()
 	resp := healthResponse{
-		Plugin:               pluginID,
-		Version:              pluginVersion,
+		Plugin:               buildinfo.ID,
+		Version:              buildinfo.Version,
 		Enabled:              cfg.Enabled,
-		Mode:                 cfg.matchMode(),
+		Mode:                 cfg.MatchMode(),
 		Hosts:                cfg.Hosts,
 		RequireRoutingMarker: cfg.RequireRoutingMark,
 		JSONL:                cfg.JSONLEnabled,
@@ -188,9 +207,9 @@ func buildHealthResponse() healthResponse {
 		RequestHeaderNames:   headerNames,
 		RequestBearerLen:     bearerLen,
 	}
-	resp.PlanUsage = officialUsageState{Enabled: cfg.PlanUsageEnabled}
-	if poller := currentPlan(); poller != nil {
-		snapshot := poller.snapshot()
+	resp.PlanUsage = plan.UsageState{Enabled: cfg.PlanUsageEnabled}
+	if poller := state.Plan(); poller != nil {
+		snapshot := poller.Snapshot()
 		if len(snapshot.Accounts) > 0 {
 			resp.PlanUsage = snapshot.Usage
 		}
@@ -213,36 +232,44 @@ func buildHealthResponse() healthResponse {
 	if st == nil {
 		return resp
 	}
-	resp.statsTotals = st.totals()
-	resp.RingUsed = st.used()
-	resp.PendingObservations = st.countObservations()
-	resp.UnmatchedHostSamples = st.unmatchedHostSamples()
-	resp.InFlightIdentities = currentIdentities().len()
+	resp.Totals = st.Totals()
+	resp.RingUsed = st.Used()
+	resp.PendingObservations = st.CountObservations()
+	resp.UnmatchedHostSamples = st.UnmatchedHostSamples()
+	resp.InFlightIdentities = hooks.InFlight()
 	return resp
 }
 
-func buildStatsResponse(query url.Values) windowStats {
+func buildStatsResponse(query url.Values) store.WindowStats {
 	window, label := resolveWindow(query.Get("window"))
-	st := currentStore()
+	st := state.Store()
 	if st == nil {
-		return windowStats{Window: label}
+		return store.WindowStats{Window: label}
 	}
-	return *st.statsWindow(window, label, time.Now())
+	return *st.StatsWindow(window, label, time.Now(), planSnapshot())
+}
+
+// planSnapshot returns the cached subscription view, or an empty one when the poller is off.
+func planSnapshot() plan.Quota {
+	if poller := state.Plan(); poller != nil {
+		return poller.Snapshot()
+	}
+	return plan.Quota{}
 }
 
 func resolveWindow(raw string) (time.Duration, string) {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
 	case "1h", "hour":
-		return statsWindowHour, "1h"
+		return store.StatsWindowHour, "1h"
 	case "7d", "week":
-		return statsWindowWeek, "7d"
+		return store.StatsWindowWeek, "7d"
 	case "24h", "day", "":
-		return statsWindowDay, "24h"
+		return store.StatsWindowDay, "24h"
 	default:
 		if parsed, errParse := time.ParseDuration(raw); errParse == nil && parsed > 0 {
 			return parsed, raw
 		}
-		return statsWindowDay, "24h"
+		return store.StatsWindowDay, "24h"
 	}
 }
 
@@ -252,7 +279,7 @@ type eventsResponse struct {
 	Offset  int      `json:"offset"`
 	Limit   int      `json:"limit"`
 	Filters filters  `json:"filters"`
-	Events  []*event `json:"events"`
+	Events  []*store.Event `json:"events"`
 }
 
 type filters struct {
@@ -262,7 +289,7 @@ type filters struct {
 	Result  string `json:"result"`
 }
 
-func eventFilterFromQuery(query url.Values) eventFilter {
+func filterFromQuery(query url.Values) store.Filter {
 	window, _ := resolveWindow(query.Get("window"))
 	limit, errLimit := strconv.Atoi(strings.TrimSpace(query.Get("limit")))
 	if errLimit != nil || limit <= 0 {
@@ -275,7 +302,7 @@ func eventFilterFromQuery(query url.Values) eventFilter {
 	if errOffset != nil || offset < 0 {
 		offset = 0
 	}
-	return eventFilter{
+	return store.Filter{
 		Since:   window,
 		Limit:   limit,
 		Offset:  offset,
@@ -287,7 +314,7 @@ func eventFilterFromQuery(query url.Values) eventFilter {
 }
 
 func buildEventsResponse(query url.Values) eventsResponse {
-	filter := eventFilterFromQuery(query)
+	filter := filterFromQuery(query)
 	window, label := resolveWindow(query.Get("window"))
 	resp := eventsResponse{
 		Window: label,
@@ -300,11 +327,11 @@ func buildEventsResponse(query url.Values) eventsResponse {
 			Result:  filter.Result,
 		},
 	}
-	st := currentStore()
+	st := state.Store()
 	if st == nil {
 		return resp
 	}
-	all := st.events(eventFilter{
+	all := st.Events(store.Filter{
 		Since:   window,
 		Channel: filter.Channel,
 		Model:   filter.Model,
@@ -313,7 +340,7 @@ func buildEventsResponse(query url.Values) eventsResponse {
 	})
 	resp.Total = len(all)
 	if filter.Offset >= len(all) {
-		resp.Events = []*event{}
+		resp.Events = []*store.Event{}
 		return resp
 	}
 	end := filter.Offset + filter.Limit
@@ -322,19 +349,19 @@ func buildEventsResponse(query url.Values) eventsResponse {
 	}
 	resp.Events = all[filter.Offset:end]
 	if resp.Events == nil {
-		resp.Events = []*event{}
+		resp.Events = []*store.Event{}
 	}
 	return resp
 }
 
 // exportResponse renders the current selection as CSV.
 func exportResponse(query url.Values) pluginapi.ManagementResponse {
-	filter := eventFilterFromQuery(query)
+	filter := filterFromQuery(query)
 	window, _ := resolveWindow(query.Get("window"))
-	st := currentStore()
-	var events []*event
+	st := state.Store()
+	var events []*store.Event
 	if st != nil {
-		events = st.events(eventFilter{
+		events = st.Events(store.Filter{
 			Since:   window,
 			Channel: filter.Channel,
 			Model:   filter.Model,

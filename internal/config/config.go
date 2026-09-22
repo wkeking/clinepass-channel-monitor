@@ -1,4 +1,8 @@
-package main
+// Package config parses and normalizes the plugin's configuration block.
+//
+// The host hands the block over as YAML (or JSON) through the register/reconfigure ABI
+// call; the tags below are that contract, so they are treated as public API.
+package config
 
 import (
 	"bytes"
@@ -12,7 +16,16 @@ import (
 )
 
 const (
-	defaultRingSize            = 5000
+	// DefaultPlanBaseURL is Cline's public API. It is a default, never a hard requirement.
+	DefaultPlanBaseURL = "https://api.cline.bot/api/v1"
+	// DefaultPlanRefresh is how often the subscription quota is refreshed, and
+	// DefaultPlanUsageRefresh how often the official per-request records are paged.
+	DefaultPlanRefresh      = 5 * time.Minute
+	DefaultPlanUsageRefresh = 5 * time.Minute
+	defaultPlanRefresh      = DefaultPlanRefresh
+	defaultPlanUsageRefresh = DefaultPlanUsageRefresh
+	DefaultRingSize            = 5000
+	defaultRingSize            = DefaultRingSize
 	defaultRetentionDays       = 30
 	defaultJoinWindow          = 5 * time.Second
 	defaultOrphanTTL           = 60 * time.Second
@@ -23,6 +36,13 @@ const (
 	defaultJSONLDir = "logs/channel-monitor"
 )
 
+// DefaultJoinWindow and DefaultOrphanTTL are the fallbacks for callers that read a
+// configuration which never went through Parse (for example a zero value in a test).
+const (
+	DefaultJoinWindow = defaultJoinWindow
+	DefaultOrphanTTL  = defaultOrphanTTL
+)
+
 // defaultHosts is the only value that carries a Cline assumption. It is a default,
 // never a hard requirement: an empty hosts list means "judge by routing marker only".
 var defaultHosts = []string{"api.cline.bot"}
@@ -30,7 +50,7 @@ var defaultHosts = []string{"api.cline.bot"}
 // config mirrors the plugins.configs.<id> block. The host hands that block to the
 // plugin as YAML (see pluginhost.runtimeConfigYAML), so the tags below are the
 // public configuration contract.
-type config struct {
+type Config struct {
 	Enabled            bool     `yaml:"enabled"`
 	Priority           int      `yaml:"priority"`
 	Hosts              []string `yaml:"hosts"`
@@ -108,8 +128,8 @@ func (d Duration) Or(def time.Duration) time.Duration {
 }
 
 // defaultConfig returns the configuration used when the host passes no YAML at all.
-func defaultConfig() config {
-	return config{
+func Default() Config {
+	return Config{
 		Enabled:            true,
 		Priority:           1,
 		Hosts:              append([]string(nil), defaultHosts...),
@@ -126,11 +146,11 @@ func defaultConfig() config {
 		CaptureCache:       true,
 		Timezone:           defaultTimezone,
 		PlanEnabled:        true,
-		PlanBaseURL:        planDefaultBaseURL,
-		PlanRefresh:        Duration{Value: planDefaultRefresh, Set: true},
+		PlanBaseURL:        DefaultPlanBaseURL,
+		PlanRefresh:        Duration{Value: defaultPlanRefresh, Set: true},
 		PlanDailyEnabled:   true,
 		PlanUsageEnabled:   true,
-		PlanUsageRefresh:   Duration{Value: planDefaultUsageRefresh, Set: true},
+		PlanUsageRefresh:   Duration{Value: defaultPlanUsageRefresh, Set: true},
 	}
 }
 
@@ -139,8 +159,8 @@ func defaultConfig() config {
 // The distinction between "hosts absent" and "hosts: []" is deliberate:
 // absent keeps the Cline default, an explicit empty list switches the plugin
 // into marker-only mode.
-func parseConfig(raw []byte) (config, error) {
-	cfg := defaultConfig()
+func Parse(raw []byte) (Config, error) {
+	cfg := Default()
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 {
 		return cfg, nil
@@ -159,13 +179,13 @@ func parseConfig(raw []byte) (config, error) {
 	} else if errJSON := decodeJSONConfig(trimmed, &cfg); errJSON != nil {
 		return cfg, errJSON
 	}
-	normalizeConfig(&cfg)
+	normalize(&cfg)
 	return cfg, nil
 }
 
 // decodeJSONConfig supports a raw JSON object, which is what arrives when the host
 // itself was configured through a JSON document.
-func decodeJSONConfig(raw []byte, cfg *config) error {
+func decodeJSONConfig(raw []byte, cfg *Config) error {
 	probe := struct {
 		Hosts *[]string `json:"hosts"`
 	}{}
@@ -180,7 +200,7 @@ func decodeJSONConfig(raw []byte, cfg *config) error {
 
 // hostFromBaseURL returns the lower-cased host of a base URL, or "" when it cannot
 // be parsed. It is the only place a base URL is interpreted.
-func hostFromBaseURL(raw string) string {
+func HostFromBaseURL(raw string) string {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
 		return ""
@@ -192,7 +212,7 @@ func hostFromBaseURL(raw string) string {
 	return strings.ToLower(parsed.Hostname())
 }
 
-func normalizeConfig(cfg *config) {
+func normalize(cfg *Config) {
 	for i := range cfg.Hosts {
 		cfg.Hosts[i] = strings.ToLower(strings.TrimSpace(cfg.Hosts[i]))
 	}
@@ -216,7 +236,7 @@ func normalizeConfig(cfg *config) {
 		cfg.Timezone = defaultTimezone
 	}
 	if strings.TrimSpace(cfg.PlanBaseURL) == "" {
-		cfg.PlanBaseURL = planDefaultBaseURL
+		cfg.PlanBaseURL = DefaultPlanBaseURL
 	}
 	if cfg.PlanUsageRefresh.Set && cfg.PlanUsageRefresh.Value < time.Minute {
 		// The official per-request endpoint is paginated; a sub-minute interval would mean
@@ -226,7 +246,7 @@ func normalizeConfig(cfg *config) {
 }
 
 // matchMode describes which judgement the current configuration uses.
-func (c config) matchMode() string {
+func (c Config) MatchMode() string {
 	if len(c.Hosts) == 0 {
 		return "marker-only"
 	}
@@ -238,8 +258,8 @@ func (c config) matchMode() string {
 // Matching parses the URL and compares hosts case-insensitively; entries that start
 // with "." match a domain suffix. A prefix comparison would let
 // "https://api.cline.bot.example.com" pass, so hosts are never compared as substrings.
-func (c config) hostMatched(baseURL string) (string, bool) {
-	host := hostFromBaseURL(baseURL)
+func (c Config) HostMatched(baseURL string) (string, bool) {
+	host := HostFromBaseURL(baseURL)
 	if host == "" {
 		return "", false
 	}

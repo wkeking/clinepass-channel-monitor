@@ -20,7 +20,7 @@ PLUGIN_ID  := clinepass-channel-monitor
 # VERSION is the released version; DEV_BUMP makes each local build a different version
 # so that CPA always hot-reloads the plugin instead of keeping the previously loaded
 # library (replacement is keyed on the plugin file path, not on its content).
-VERSION    ?= $(shell grep -oP 'pluginVersion\s*=\s*"\K[^"]+' $(REPO_ROOT)/plugin.go)
+VERSION    ?= $(shell grep -oP 'Version\s*=\s*"\K[^"]+' $(REPO_ROOT)/internal/buildinfo/buildinfo.go || echo 0.1.0)
 DEV_BUMP   ?= 1
 BUMP_FILE  := $(REPO_ROOT)/.toolchain/.dev-build
 BUILD_VER  := $(shell if [ "$(DEV_BUMP)" = "1" ]; then \
@@ -32,7 +32,7 @@ GOARCH     ?= $(shell $(GO_BIN) env GOARCH 2>/dev/null || echo arm64)
 BUILD_DIR  := $(REPO_ROOT)/dist
 
 LIB_NAME   := $(PLUGIN_ID)-v$(BUILD_VER).so
-LDFLAGS    := -s -w -X main.pluginVersion=$(BUILD_VER)
+LDFLAGS    := -s -w -X github.com/wkeking/clinepass-channel-monitor/internal/buildinfo.Version=$(BUILD_VER)
 
 # Where the CPA container reads plugins from. Override for your own deployment.
 INSTALL_DIR ?= /opt/cpa/plugins/$(GOOS)/$(GOARCH)
@@ -48,10 +48,10 @@ deps:
 ## build: build the plugin shared library for GOOS/GOARCH
 build: $(BUILD_DIR)/$(LIB_NAME)
 
-$(BUILD_DIR)/$(LIB_NAME): $(wildcard $(REPO_ROOT)/*.go) $(REPO_ROOT)/go.mod $(REPO_ROOT)/cdecl.h
+$(BUILD_DIR)/$(LIB_NAME): $(shell find $(REPO_ROOT)/cmd $(REPO_ROOT)/internal -name '*.go') $(REPO_ROOT)/go.mod $(REPO_ROOT)/cmd/clinepass-channel-monitor/cdecl.h
 	@mkdir -p $(BUILD_DIR)
 	GOOS=$(GOOS) GOARCH=$(GOARCH) $(GO_BIN) build $(GOFLAGS) -trimpath \
-		-ldflags '$(LDFLAGS)' -buildmode=c-shared -o $@ .
+		-ldflags '$(LDFLAGS)' -buildmode=c-shared -o $@ ./cmd/clinepass-channel-monitor
 	@rm -f $(BUILD_DIR)/$(PLUGIN_ID).h
 	@echo "built $@"
 

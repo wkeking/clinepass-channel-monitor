@@ -1,10 +1,12 @@
-package main
+package store
 
 import (
 	"sort"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/wkeking/clinepass-channel-monitor/internal/plan"
 )
 
 // parseCost turns a gateway cost string into a number. The gateway sends plain
@@ -28,7 +30,7 @@ type promptCacheAccumulator struct {
 	Miss int64 `json:"miss"`
 }
 
-func (a *promptCacheAccumulator) add(hit, miss int64) {
+func (a *promptCacheAccumulator) Add(hit, miss int64) {
 	a.Hit += hit
 	a.Miss += miss
 }
@@ -53,7 +55,7 @@ type tokenAccumulator struct {
 	AvgOutput float64 `json:"avg_output"`
 }
 
-func (a *tokenAccumulator) add(e *event) {
+func (a *tokenAccumulator) Add(e *event) {
 	a.Requests++
 	a.Input += e.InputTokens
 	a.Output += e.OutputTokens
@@ -77,7 +79,7 @@ type costAccumulator struct {
 	Unparsed int64   `json:"unparsed"`
 }
 
-func (a *costAccumulator) add(value string) {
+func (a *costAccumulator) Add(value string) {
 	if value == "" {
 		return
 	}
@@ -91,7 +93,7 @@ func (a *costAccumulator) add(value string) {
 }
 
 // channelStat is one row of the channel / model / source distribution tables.
-type channelStat struct {
+type ChannelStat struct {
 	Key             string  `json:"key"`
 	Requests        int64   `json:"requests"`
 	Failed          int64   `json:"failed"`
@@ -111,7 +113,7 @@ type channelStat struct {
 }
 
 // windowStats is the aggregation returned by /stats for one time window.
-type windowStats struct {
+type WindowStats struct {
 	Window string `json:"window"`
 	From   string `json:"from"`
 	To     string `json:"to"`
@@ -137,7 +139,7 @@ type windowStats struct {
 	// Series holds per-bucket counters for the charts on the overview cards.
 	Series seriesStats `json:"series"`
 	// Plan carries Cline's own subscription view when it is enabled and reachable.
-	Plan planQuota `json:"plan"`
+	Plan plan.Quota `json:"plan"`
 
 	Channels []channelStat `json:"channels"`
 	Models   []channelStat `json:"models"`
@@ -167,9 +169,9 @@ type seriesStats struct {
 
 const maxSeriesBuckets = 48
 
-// statsWindow replays the in-memory ring for one window. It is the only place that
+// StatsWindow replays the in-memory ring for one window. It is the only place that
 // walks the ring for aggregation, so the cost stays linear in the buffer size.
-func (s *store) statsWindow(window time.Duration, label string, now time.Time) *windowStats {
+func (s *Store) StatsWindow(window time.Duration, label string, now time.Time, quota plan.Quota) *WindowStats {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -178,7 +180,7 @@ func (s *store) statsWindow(window time.Duration, label string, now time.Time) *
 	stats.To = now.Format(time.RFC3339)
 	stats.From = cutoff.Format(time.RFC3339)
 
-	bucketSeconds, bucketCount := seriesBucket(window)
+	bucketSeconds, bucketCount := SeriesBucket(window)
 	stats.Series = newSeriesStats(bucketSeconds, bucketCount, cutoff)
 	bucketIndex := func(at time.Time) int {
 		offset := at.Sub(cutoff)
@@ -221,9 +223,9 @@ func (s *store) statsWindow(window time.Duration, label string, now time.Time) *
 		if e.ChannelMissing {
 			stats.ChannelMissing++
 		}
-		stats.Tokens.add(e)
+		stats.Tokens.Add(e)
 		if s.cfg.CaptureCost {
-			stats.Cost.add(e.Cost)
+			stats.Cost.Add(e.Cost)
 		}
 		latencySum += e.LatencyMS
 		if e.TTFTMS > 0 {
@@ -234,7 +236,7 @@ func (s *store) statsWindow(window time.Duration, label string, now time.Time) *
 			stats.TPSAvg += e.TokensPerSecond
 		}
 		if s.cfg.CaptureCache {
-			stats.PromptCache.add(e.PromptCacheHitTokens, e.PromptCacheMissTokens)
+			stats.PromptCache.Add(e.PromptCacheHitTokens, e.PromptCacheMissTokens)
 		}
 		if bucket := bucketIndex(e.Timestamp); bucket >= 0 {
 			stats.Series.Requests[bucket]++
@@ -285,9 +287,7 @@ func (s *store) statsWindow(window time.Duration, label string, now time.Time) *
 	stats.Channels = finalizeStats(channels)
 	stats.Models = finalizeStats(models)
 	stats.Sources = finalizeStats(sources)
-	if poller := currentPlan(); poller != nil {
-		stats.Plan = poller.snapshot()
-	}
+	stats.Plan = quota
 	return stats
 }
 
@@ -313,7 +313,7 @@ func newSeriesStats(bucketSeconds int64, bucketCount int, cutoff time.Time) seri
 }
 
 // seriesBucket picks a bucket size that keeps the chart under maxSeriesBuckets points.
-func seriesBucket(window time.Duration) (int64, int) {
+func SeriesBucket(window time.Duration) (int64, int) {
 	seconds := int64(window / time.Second)
 	if seconds <= 0 {
 		seconds = int64(time.Hour / time.Second)

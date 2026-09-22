@@ -1,4 +1,8 @@
-package main
+// Package hooks implements the observation hooks CPA calls for every request: the request
+// interceptor creates a correlation identity, the response normalizer reads the upstream
+// channel evidence, and the usage hook joins both into one record. Every hook answers with
+// an empty body, which the host reads as "keep the payload unchanged".
+package hooks
 
 import (
 	"crypto/sha256"
@@ -12,6 +16,15 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+
+	"github.com/wkeking/clinepass-channel-monitor/internal/abi"
+	"github.com/wkeking/clinepass-channel-monitor/internal/buildinfo"
+	"github.com/wkeking/clinepass-channel-monitor/internal/config"
+	"github.com/wkeking/clinepass-channel-monitor/internal/hostapi"
+	"github.com/wkeking/clinepass-channel-monitor/internal/metadata"
+	"github.com/wkeking/clinepass-channel-monitor/internal/plan"
+	"github.com/wkeking/clinepass-channel-monitor/internal/state"
+	"github.com/wkeking/clinepass-channel-monitor/internal/store"
 )
 
 const (
@@ -20,6 +33,32 @@ const (
 	// requestHashBytes is the length of the truncated sha256 used as the join key.
 	requestHashBytes = 16
 )
+
+// currentTable joins the hooks of this plugin instance. It is replaced wholesale on load
+// and on reconfigure, which is why it is read through table().
+var (
+	tableMu      sync.RWMutex
+	currentTable = newIdentityTable()
+)
+
+// table returns the correlation table of the running instance.
+func table() *identityTable {
+	tableMu.RLock()
+	defer tableMu.RUnlock()
+	return currentTable
+}
+
+// Reset drops every correlation entry. The plugin calls it on load and on reconfigure.
+func Reset() {
+	tableMu.Lock()
+	currentTable = newIdentityTable()
+	tableMu.Unlock()
+}
+
+// InFlight reports how many request identities are being tracked, for /health.
+func InFlight() int {
+	return table().len()
+}
 
 // requestIdentity carries the correlation keys for one in-flight request.
 type requestIdentity struct {
@@ -37,18 +76,6 @@ type requestIdentity struct {
 	CreatedAt        time.Time
 }
 
-// routingState is what the response hook saw for one request.
-type routingState int
-
-const (
-	// routingAbsent means no upstream body carried the channel marker.
-	routingAbsent routingState = iota
-	// routingMarkerOnly means the marker was present without gateway routing evidence.
-	routingMarkerOnly
-	// routingConfirmed means gateway routing evidence was observed.
-	routingConfirmed
-)
-
 // identityTable joins the three hooks of one request. The request intercept hook
 // creates entries, the response hook annotates them, and the usage hook consumes them.
 type identityTable struct {
@@ -58,7 +85,7 @@ type identityTable struct {
 	// routing holds what the response hook saw per request, keyed by request hash. It
 	// outlives the identity entry so the usage hook can still tell "the host matched but
 	// this response carried no routing marker" apart from "this request was never seen".
-	routing     map[string]routingState
+	routing     map[string]store.RoutingState
 	routingFIFO []string
 }
 
@@ -68,7 +95,7 @@ const maxRoutedEntries = 512
 func newIdentityTable() *identityTable {
 	return &identityTable{
 		entries: make(map[string]*requestIdentity),
-		routing: make(map[string]routingState),
+		routing: make(map[string]store.RoutingState),
 	}
 }
 
@@ -124,7 +151,7 @@ func mergeIdentity(target, source *requestIdentity) {
 
 // annotateProtocols records the protocol pair observed by the response hook and marks
 // the routing evidence for this request.
-func (t *identityTable) annotateProtocols(hash, client, upstream string, stream bool, state routingState) {
+func (t *identityTable) annotateProtocols(hash, client, upstream string, stream bool, state store.RoutingState) {
 	if hash == "" {
 		return
 	}
@@ -137,7 +164,7 @@ func (t *identityTable) annotateProtocols(hash, client, upstream string, stream 
 		t.entries[hash] = entry
 		t.order = append(t.order, hash)
 	}
-	if state == routingConfirmed {
+	if state == store.RoutingConfirmed {
 		entry.RoutingSeen = true
 	}
 	entry.ClientProtocol = client
@@ -148,7 +175,7 @@ func (t *identityTable) annotateProtocols(hash, client, upstream string, stream 
 }
 
 // markRoutingLocked records the strongest routing state seen for one request.
-func (t *identityTable) markRoutingLocked(hash string, state routingState) {
+func (t *identityTable) markRoutingLocked(hash string, state store.RoutingState) {
 	if existing, ok := t.routing[hash]; ok {
 		if existing >= state {
 			return
@@ -191,9 +218,9 @@ func (t *identityTable) peek(hash string) *requestIdentity {
 }
 
 // routingStateOf returns what the response hook observed for one request.
-func (t *identityTable) routingStateOf(hash string) routingState {
+func (t *identityTable) routingStateOf(hash string) store.RoutingState {
 	if hash == "" {
-		return routingAbsent
+		return store.RoutingAbsent
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -233,61 +260,61 @@ func requestHash(originalRequest []byte) string {
 }
 
 // handleRequestInterceptBefore records the correlation keys of an in-flight request.
-func handleRequestInterceptBefore(request []byte) ([]byte, error) {
+func RequestInterceptBefore(request []byte) ([]byte, error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			hostLogAsync("error", pluginID+": request interceptor recovered from panic", map[string]string{"panic": fmt.Sprint(recovered)})
+			hostapi.LogAsync("error", buildinfo.ID+": request interceptor recovered from panic", map[string]string{"panic": fmt.Sprint(recovered)})
 		}
 	}()
 	var req pluginapi.RequestInterceptRequest
 	if errUnmarshal := json.Unmarshal(request, &req); errUnmarshal != nil {
-		return okEnvelope(pluginapi.RequestInterceptResponse{})
+		return abi.OK(pluginapi.RequestInterceptResponse{})
 	}
 	captured := captureIdentity(&req)
 	if captured == nil {
-		return okEnvelope(pluginapi.RequestInterceptResponse{})
+		return abi.OK(pluginapi.RequestInterceptResponse{})
 	}
-	currentIdentities().remember(captured)
-	return okEnvelope(pluginapi.RequestInterceptResponse{})
+	table().remember(captured)
+	return abi.OK(pluginapi.RequestInterceptResponse{})
 }
 
 // handleRequestInterceptAfter records the same correlation keys after credential
 // selection. The host calls it because the plugin declares the request interceptor
 // capability; the plugin itself answers with an empty response, which means "leave the
 // request untouched".
-func handleRequestInterceptAfter(request []byte) ([]byte, error) {
+func RequestInterceptAfter(request []byte) ([]byte, error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			hostLogAsync("error", pluginID+": request interceptor (after auth) recovered from panic", map[string]string{"panic": fmt.Sprint(recovered)})
+			hostapi.LogAsync("error", buildinfo.ID+": request interceptor (after auth) recovered from panic", map[string]string{"panic": fmt.Sprint(recovered)})
 		}
 	}()
 	var req pluginapi.RequestInterceptRequest
 	if errUnmarshal := json.Unmarshal(request, &req); errUnmarshal != nil {
-		return okEnvelope(pluginapi.RequestInterceptResponse{})
+		return abi.OK(pluginapi.RequestInterceptResponse{})
 	}
 	if captured := captureIdentity(&req); captured != nil {
-		currentIdentities().remember(captured)
+		table().remember(captured)
 	}
 	// Feeds the subscription card when no other credential source is readable. The
 	// value is kept in memory only, never logged and never returned to a caller.
-	rememberUpstreamBearer(req.Headers)
-	return okEnvelope(pluginapi.RequestInterceptResponse{})
+	plan.RememberUpstreamBearer(req.Headers)
+	return abi.OK(pluginapi.RequestInterceptResponse{})
 }
 
 // handleRequestComplete releases the identity of a finished request. It only runs when
 // the request lifecycle capability is declared, which is not the case today, so it is
 // implemented defensively rather than relied upon.
-func handleRequestComplete(request []byte) ([]byte, error) {
+func RequestComplete(request []byte) ([]byte, error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			hostLogAsync("error", pluginID+": request completion recovered from panic", map[string]string{"panic": fmt.Sprint(recovered)})
+			hostapi.LogAsync("error", buildinfo.ID+": request completion recovered from panic", map[string]string{"panic": fmt.Sprint(recovered)})
 		}
 	}()
 	var completion pluginapi.RequestCompletion
 	if errUnmarshal := json.Unmarshal(request, &completion); errUnmarshal != nil {
-		return okEnvelope(map[string]any{})
+		return abi.OK(map[string]any{})
 	}
-	return okEnvelope(map[string]any{})
+	return abi.OK(map[string]any{})
 }
 
 func captureIdentity(req *pluginapi.RequestInterceptRequest) *requestIdentity {
@@ -350,22 +377,22 @@ func metadataString(metadata map[string]any, keys ...string) string {
 // It runs before CPA translates the upstream payload, which is the only place where
 // /v1/responses traffic still carries provider_metadata. It always returns an empty
 // body so the host treats the response as unmodified.
-func handleResponseNormalizeBefore(request []byte) ([]byte, error) {
-	empty := okEnvelopeEmptyBody
+func ResponseNormalizeBefore(request []byte) ([]byte, error) {
+	empty := abi.EmptyObservation
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			cfg := currentConfig()
-			st := currentStore()
+			cfg := state.Config()
+			st := state.Store()
 			if cfg.Enabled && st != nil {
-				st.incParseError()
+				st.IncParseError()
 			}
-			hostLogAsync("error", pluginID+": response hook recovered from panic", map[string]string{
+			hostapi.LogAsync("error", buildinfo.ID+": response hook recovered from panic", map[string]string{
 				"panic": fmt.Sprint(recovered),
 			})
 		}
 	}()
-	cfg := currentConfig()
-	st := currentStore()
+	cfg := state.Config()
+	st := state.Store()
 	if !cfg.Enabled || st == nil {
 		return empty, nil
 	}
@@ -377,25 +404,25 @@ func handleResponseNormalizeBefore(request []byte) ([]byte, error) {
 	if hash == "" {
 		return empty, nil
 	}
-	identities := currentIdentities()
+	identities := table()
 	// Cost of the common path: one bytes.Contains over the frame.
-	if !hasChannelMarker(req.Body) {
+	if !metadata.HasChannelMarker(req.Body) {
 		// The response hook only sees bodies, so a response without the marker means the
 		// request produced no channel evidence: exactly what marker_missing counts.
-		identities.markRouting(hash, routingMarkerOnly)
+		identities.markRouting(hash, store.RoutingMarkerOnly)
 		return empty, nil
 	}
-	routing := routingMarkerOnly
-	if hasRoutingMarker(req.Body) {
-		routing = routingConfirmed
+	routing := store.RoutingMarkerOnly
+	if metadata.HasRoutingMarker(req.Body) {
+		routing = store.RoutingConfirmed
 	} else if cfg.RequireRoutingMark {
 		// A marker without routing evidence is not a channel observation.
-		identities.annotateProtocols(hash, strings.TrimSpace(req.ToFormat), strings.TrimSpace(req.FromFormat), req.Stream, routingMarkerOnly)
+		identities.annotateProtocols(hash, strings.TrimSpace(req.ToFormat), strings.TrimSpace(req.FromFormat), req.Stream, store.RoutingMarkerOnly)
 		return empty, nil
 	}
-	meta := extractChannelFromBody(req.Body, cfg.StorePlanningReasoning)
+	meta := metadata.ExtractChannelFromBody(req.Body, cfg.StorePlanningReasoning)
 	if meta == nil {
-		st.incParseError()
+		st.IncParseError()
 		return empty, nil
 	}
 	// The identity entry is kept (not taken) so a later frame of the same request still
@@ -415,21 +442,21 @@ func handleResponseNormalizeBefore(request []byte) ([]byte, error) {
 	meta.ClientProtocol = strings.TrimSpace(req.ToFormat)
 	meta.UpstreamProtocol = strings.TrimSpace(req.FromFormat)
 	meta.Stream = req.Stream
-	st.addChannel(&pendingChannel{
-		requestHash: hash,
-		routing:     routing,
-		identity: identity{
+	st.AddChannel(&store.PendingChannel{
+		RequestHash: hash,
+		Routing:     routing,
+		Identity: store.Identity{
 			RequestHash: hash,
 			SessionID:   sessionID,
 			Model:       model,
 			Source:      source,
 			Stream:      req.Stream,
 		},
-		meta:      meta,
-		createdAt: time.Now(),
+		Meta:      meta,
+		CreatedAt: time.Now(),
 	})
 	if cfg.LogEvents {
-		hostLogAsync("info", pluginID+": channel observed", map[string]string{
+		hostapi.LogAsync("info", buildinfo.ID+": channel observed", map[string]string{
 			"final_provider": meta.FinalProvider,
 			"model":          model,
 			"client_format":  req.ToFormat,
@@ -441,51 +468,48 @@ func handleResponseNormalizeBefore(request []byte) ([]byte, error) {
 	return empty, nil
 }
 
-// okEnvelopeEmptyBody is the shared "do not modify" payload for observation hooks.
-var okEnvelopeEmptyBody, _ = okEnvelope(pluginapi.PayloadResponse{})
-
 // handleUsage turns a finished request into one recorded row.
-func handleUsage(request []byte) ([]byte, error) {
+func Usage(request []byte) ([]byte, error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			hostLogAsync("error", pluginID+": usage hook recovered from panic", map[string]string{"panic": fmt.Sprint(recovered)})
+			hostapi.LogAsync("error", buildinfo.ID+": usage hook recovered from panic", map[string]string{"panic": fmt.Sprint(recovered)})
 		}
 	}()
 	var record pluginapi.UsageRecord
 	if errUnmarshal := json.Unmarshal(request, &record); errUnmarshal != nil {
-		return okEnvelope(map[string]any{})
+		return abi.OK(map[string]any{})
 	}
-	cfg := currentConfig()
-	st := currentStore()
+	cfg := state.Config()
+	st := state.Store()
 	if !cfg.Enabled || st == nil {
-		return okEnvelope(map[string]any{})
+		return abi.OK(map[string]any{})
 	}
-	st.incRequests()
+	st.IncRequests()
 	if !hostAllowed(&record, cfg, st) {
-		return okEnvelope(map[string]any{})
+		return abi.OK(map[string]any{})
 	}
-	observed := st.consumeChannel(identity{
+	observed := st.ConsumeChannel(store.Identity{
 		SessionID: strings.TrimSpace(record.SessionID),
 		Model:     strings.TrimSpace(record.Model),
 	}, record.RequestedAt, record.Latency)
 	if !observationAccepted(&record, cfg, observed) {
-		return okEnvelope(map[string]any{})
+		return abi.OK(map[string]any{})
 	}
-	var meta *ChannelMetadata
+	var meta *metadata.ChannelMetadata
 	if observed != nil {
-		meta = observed.meta
+		meta = observed.Meta
 		// The observation is consumed, so its identity entry is no longer needed.
-		currentIdentities().take(observed.requestHash)
+		table().take(observed.RequestHash)
 	}
 	e := buildEvent(&record, cfg)
 	applyObservation(cfg, meta, e)
-	sinkWrite(cfg, e)
-	st.add(e)
+	store.Write(cfg, st, e)
+	st.Add(e)
 	if meta != nil {
-		st.incHostMatched()
+		st.IncHostMatched()
 	}
 	if cfg.LogEvents {
-		hostLogAsync("info", pluginID+": request recorded", map[string]string{
+		hostapi.LogAsync("info", buildinfo.ID+": request recorded", map[string]string{
 			"model":          e.Model,
 			"final_provider": e.FinalProvider,
 			"failed":         strconv.FormatBool(e.Failed),
@@ -493,11 +517,11 @@ func handleUsage(request []byte) ([]byte, error) {
 			"cost":           e.Cost,
 		})
 	}
-	return okEnvelope(map[string]any{})
+	return abi.OK(map[string]any{})
 }
 
 // markRouting records the routing state of a request without touching its identity.
-func (t *identityTable) markRouting(hash string, state routingState) {
+func (t *identityTable) markRouting(hash string, state store.RoutingState) {
 	if hash == "" {
 		return
 	}
@@ -513,41 +537,41 @@ func (t *identityTable) markRouting(hash string, state routingState) {
 // the usage record can be tied to a channel observation (the strongest evidence
 // possible), or the request failed before producing any upstream body, in which case
 // channel_missing marks the row and the failure stays visible.
-func observationAccepted(record *pluginapi.UsageRecord, cfg config, observed *pendingChannel) bool {
-	st := currentStore()
+func observationAccepted(record *pluginapi.UsageRecord, cfg config.Config, observed *store.PendingChannel) bool {
+	st := state.Store()
 	if observed != nil {
-		if cfg.RequireRoutingMark && observed.routing != routingConfirmed {
-			st.incMarkerMissing()
+		if cfg.RequireRoutingMark && observed.Routing != store.RoutingConfirmed {
+			st.IncMarkerMissing()
 			return false
 		}
 		return true
 	}
 	if record.Failed {
 		// Nothing to inspect: the request never produced an upstream response body.
-		st.incChannelMissing()
+		st.IncChannelMissing()
 		return true
 	}
 	if cfg.RequireRoutingMark {
 		// No channel observation for a successful request means its response carried no
 		// routing marker, so it is not a Cline channel record.
-		st.incMarkerMissing()
+		st.IncMarkerMissing()
 		return false
 	}
-	st.incChannelMissing()
+	st.IncChannelMissing()
 	return true
 }
 
 // hostAllowed applies the row-level judgement: the usage record's base_url host must
 // be one of the configured hosts. An empty hosts list disables this rule (marker-only).
-func hostAllowed(record *pluginapi.UsageRecord, cfg config, st *store) bool {
+func hostAllowed(record *pluginapi.UsageRecord, cfg config.Config, st *store.Store) bool {
 	if len(cfg.Hosts) == 0 {
 		return true
 	}
-	if _, matched := cfg.hostMatched(record.BaseURL); !matched {
+	if _, matched := cfg.HostMatched(record.BaseURL); !matched {
 		// Self-diagnosis: the request reached an upstream that is not in hosts. Surfaced
 		// through /health so a wrong hosts list is visible instead of silent.
-		st.recordUnmatchedHost(unmatchedHostSample{
-			Host:     hostFromBaseURL(record.BaseURL),
+		st.RecordUnmatchedHost(store.UnmatchedHostSample{
+			Host:     config.HostFromBaseURL(record.BaseURL),
 			Provider: record.Provider,
 			Model:    record.Model,
 			Time:     time.Now().Format(time.RFC3339),
@@ -558,16 +582,16 @@ func hostAllowed(record *pluginapi.UsageRecord, cfg config, st *store) bool {
 }
 
 // buildEvent maps a usage record onto the recorded row.
-func buildEvent(record *pluginapi.UsageRecord, cfg config) *event {
+func buildEvent(record *pluginapi.UsageRecord, cfg config.Config) *store.Event {
 	requestedAt := record.RequestedAt
 	if requestedAt.IsZero() {
 		requestedAt = time.Now()
 	}
 	location := timeLocation(cfg.Timezone)
-	e := &event{
-		Schema:          eventSchema,
+	e := &store.Event{
+		Schema:          store.EventSchema,
 		EventID:         eventID(record),
-		PluginVersion:   pluginVersion,
+		PluginVersion:   buildinfo.Version,
 		Timestamp:       requestedAt.In(location),
 		Provider:        strings.TrimSpace(record.Provider),
 		BaseURL:         strings.TrimSpace(record.BaseURL),
@@ -591,7 +615,7 @@ func buildEvent(record *pluginapi.UsageRecord, cfg config) *event {
 		ServiceTier:     strings.TrimSpace(record.ServiceTier),
 		ChannelMissing:  true,
 	}
-	e.Host = hostFromBaseURL(e.BaseURL)
+	e.Host = config.HostFromBaseURL(e.BaseURL)
 	if cfg.CaptureCache {
 		e.CachedTokens = record.Detail.CachedTokens
 		e.CacheReadTokens = record.Detail.CacheReadTokens
@@ -607,7 +631,7 @@ func buildEvent(record *pluginapi.UsageRecord, cfg config) *event {
 
 // applyObservation joins the channel observation with the usage record. A missing
 // observation is a normal state for failed requests and is counted, not treated as an error.
-func applyObservation(cfg config, meta *ChannelMetadata, e *event) {
+func applyObservation(cfg config.Config, meta *metadata.ChannelMetadata, e *store.Event) {
 	if meta == nil {
 		e.ChannelMissing = true
 		return
@@ -650,9 +674,9 @@ func eventID(record *pluginapi.UsageRecord) string {
 	return hex.EncodeToString(sum[:16])
 }
 
-func apiKeyOf(key string, cfg config) string {
+func apiKeyOf(key string, cfg config.Config) string {
 	if cfg.MaskAPIKey {
-		return maskAPIKey(key)
+		return metadata.MaskAPIKey(key)
 	}
 	return strings.TrimSpace(key)
 }

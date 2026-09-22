@@ -1,4 +1,9 @@
-package main
+// Package metadata reads the upstream channel evidence out of a response body.
+//
+// Cline's gateway reports the channel it picked in provider_metadata.gateway.routing; CPA
+// passes the response to the plugins before it translates it to the client protocol, which
+// is the only moment that evidence is still present.
+package metadata
 
 import (
 	"bytes"
@@ -133,13 +138,13 @@ type rawRouting struct {
 }
 
 // hasChannelMarker reports whether a body could contain channel information.
-func hasChannelMarker(body []byte) bool {
+func HasChannelMarker(body []byte) bool {
 	return bytes.Contains(body, markerNeedle)
 }
 
 // hasRoutingMarker reports whether a body contains the routing evidence required by
 // require_routing_marker.
-func hasRoutingMarker(body []byte) bool {
+func HasRoutingMarker(body []byte) bool {
 	return bytes.Contains(body, routingMarkerNeedle)
 }
 
@@ -157,8 +162,8 @@ func trimSSEFrame(body []byte) []byte {
 // A nil result means "nothing observed" - either the frame carries no channel
 // metadata or it could not be decoded. Callers must never turn that into an error
 // that reaches the client.
-func extractChannelFromBody(body []byte, storePlanningReasoning bool) *ChannelMetadata {
-	if !hasChannelMarker(body) {
+func ExtractChannelFromBody(body []byte, storePlanningReasoning bool) *ChannelMetadata {
+	if !HasChannelMarker(body) {
 		return nil
 	}
 	payload := trimSSEFrame(body)
@@ -217,7 +222,7 @@ func normalizeChannelMetadata(raw *rawProviderMetadata, envelope *upstreamEnvelo
 			meta.UpstreamCompletionTokens = envelope.Usage.CompletionTokens
 			meta.UpstreamCacheCreationTokens = envelope.Usage.CacheCreationInputToken
 			if meta.Cost == "" && envelope.Usage.GatewayCost != 0 {
-				meta.Cost = formatCost(envelope.Usage.GatewayCost)
+				meta.Cost = FormatCost(envelope.Usage.GatewayCost)
 			}
 		}
 	}
@@ -260,12 +265,12 @@ func int64Of(value interface{}) int64 {
 
 // formatCost renders a numeric cost without scientific notation, matching the string
 // form the gateway itself uses in provider_metadata.
-func formatCost(value float64) string {
+func FormatCost(value float64) string {
 	return strconv.FormatFloat(value, 'f', -1, 64)
 }
 
 // maskAPIKey keeps only the first and last four characters of a key.
-func maskAPIKey(key string) string {
+func MaskAPIKey(key string) string {
 	trimmed := strings.TrimSpace(key)
 	if trimmed == "" {
 		return ""

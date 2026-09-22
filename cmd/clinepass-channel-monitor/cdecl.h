@@ -1,3 +1,9 @@
+/* C 侧类型声明，供 cgo 前置（// #include "cdecl.h"）使用。
+ *
+ * cgo 对相对路径 include 的解析依赖包的构建目录，跨包引用并不可靠，所以入口包
+ * （cmd/clinepass-channel-monitor）与宿主回调包（internal/hostapi）各自持有一份内容
+ * 完全相同的副本。改动时必须同时更新两处。
+ */
 /* Shared C ABI declarations for the CLIProxyAPI plugin host.
  *
  * Types only: each cgo file compiles its own copy of the preamble, so this header must

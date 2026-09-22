@@ -1,4 +1,4 @@
-package main
+package hooks
 
 import (
 	"encoding/json"
@@ -7,7 +7,27 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+
+	"github.com/wkeking/clinepass-channel-monitor/internal/config"
+	"github.com/wkeking/clinepass-channel-monitor/internal/state"
+	"github.com/wkeking/clinepass-channel-monitor/internal/store"
 )
+
+// loadTestConfig mirrors what the plugin package does on load: parse the block, publish it
+// and reset the in-memory view.
+func loadTestConfig(raw []byte) {
+	cfg, errParse := config.Parse(raw)
+	if errParse != nil {
+		cfg = config.Default()
+	}
+	state.SetConfig(cfg)
+	if existing := state.Store(); existing == nil {
+		state.SetStore(store.New(cfg))
+	} else {
+		existing.Reconfigure(cfg)
+	}
+	state.Store().Reset()
+}
 
 // 这些基准量化「插件在请求路径上多花多少时间」。宿主对每个钩子的载荷是 JSON，且
 // OriginalRequest / TranslatedRequest / Body 都是 []byte（JSON 里是 base64），所以一次
@@ -81,11 +101,11 @@ func BenchmarkNormalizeHookMarkerMissing(b *testing.B) {
 	for _, size := range []int{8 << 10, 64 << 10, 1 << 20} {
 		body := paddedJSON(size)
 		payload := hookPayload(b, 64<<10, body, true)
-		loadConfig([]byte("enabled: true\nhosts: [\"api.cline.bot\"]\n"))
+		loadTestConfig([]byte("enabled: true\nhosts: [\"api.cline.bot\"]\n"))
 		b.Run(sizeName(size), func(b *testing.B) {
 			b.SetBytes(int64(len(payload)))
 			for i := 0; i < b.N; i++ {
-				if _, errHook := handleResponseNormalizeBefore(payload); errHook != nil {
+				if _, errHook := ResponseNormalizeBefore(payload); errHook != nil {
 					b.Fatalf("hook: %v", errHook)
 				}
 			}
@@ -121,11 +141,11 @@ func BenchmarkPayloadDecodeLean(b *testing.B) {
 // 1MB 请求体下的完整钩子调用（大请求体的真实量级）。
 func BenchmarkNormalizeHookWithBigRequest(b *testing.B) {
 	payload := hookPayload(b, 1<<20, paddedJSON(2<<10), true)
-	loadConfig([]byte("enabled: true\nhosts: [\"api.cline.bot\"]\n"))
+	loadTestConfig([]byte("enabled: true\nhosts: [\"api.cline.bot\"]\n"))
 	b.SetBytes(int64(len(payload)))
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if _, errHook := handleResponseNormalizeBefore(payload); errHook != nil {
+		if _, errHook := ResponseNormalizeBefore(payload); errHook != nil {
 			b.Fatalf("hook: %v", errHook)
 		}
 	}
@@ -135,12 +155,12 @@ func BenchmarkNormalizeHookWithBigRequest(b *testing.B) {
 func BenchmarkNormalizeHookWithChannel(b *testing.B) {
 	body := channelJSON(4 << 10)
 	payload := hookPayload(b, 64<<10, body, false)
-	loadConfig([]byte("enabled: true\nhosts: [\"api.cline.bot\"]\n"))
+	loadTestConfig([]byte("enabled: true\nhosts: [\"api.cline.bot\"]\n"))
 	b.SetBytes(int64(len(payload)))
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		currentIdentities().remember(&requestIdentity{Hash: "bench", Model: "deepseek-flash"})
-		if _, errHook := handleResponseNormalizeBefore(payload); errHook != nil {
+		table().remember(&requestIdentity{Hash: "bench", Model: "deepseek-flash"})
+		if _, errHook := ResponseNormalizeBefore(payload); errHook != nil {
 			b.Fatalf("hook: %v", errHook)
 		}
 	}
@@ -148,7 +168,7 @@ func BenchmarkNormalizeHookWithChannel(b *testing.B) {
 
 // 落盘前的序列化（sinkWrite 里唯一在请求路径上的部分，入队后由后台 goroutine 写文件）。
 func BenchmarkEventMarshal(b *testing.B) {
-	e := event{
+	e := store.Event{
 		Schema: 1, EventID: "evt-0123456789abcdef", PluginVersion: "0.1.0", Timestamp: time.Now(),
 		Provider: "openai-compatible-cline", BaseURL: "https://api.cline.bot/api/v1", Host: "api.cline.bot",
 		Model: "deepseek-flash", ModelAlias: "cline-pass/deepseek-v4.1-flash",

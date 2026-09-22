@@ -1,4 +1,4 @@
-package main
+package store
 
 import (
 	"bufio"
@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/wkeking/clinepass-channel-monitor/internal/config"
 )
 
 const (
@@ -27,16 +29,17 @@ const (
 // because CPA usually runs as root and the files are meant to be readable by host-side
 // tooling.
 type jsonlWriter struct {
-	mu          sync.Mutex
-	dir         string
-	file        *os.File
-	buffer      *bufio.Writer
-	currentDate string
-	lastCleanup time.Time
+	mu            sync.Mutex
+	dir           string
+	retentionDays int
+	file          *os.File
+	buffer        *bufio.Writer
+	currentDate   string
+	lastCleanup   time.Time
 }
 
-func newJSONLWriter(dir string) *jsonlWriter {
-	return &jsonlWriter{dir: dir}
+func newJSONLWriter(cfg config.Config) *jsonlWriter {
+	return &jsonlWriter{dir: cfg.JSONLDir, retentionDays: cfg.RetentionDays}
 }
 
 func (w *jsonlWriter) write(line []byte) error {
@@ -97,7 +100,7 @@ func (w *jsonlWriter) flush() {
 	}
 }
 
-func (w *jsonlWriter) close() {
+func (w *jsonlWriter) Close() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.buffer != nil {
@@ -112,7 +115,7 @@ func (w *jsonlWriter) close() {
 
 // cleanup deletes JSONL files older than the retention window.
 func (w *jsonlWriter) cleanup() {
-	retention := currentConfig().RetentionDays
+	retention := w.retentionDays
 	if retention <= 0 {
 		return
 	}
@@ -144,6 +147,7 @@ func (w *jsonlWriter) cleanup() {
 type sink struct {
 	once    sync.Once
 	writer  *jsonlWriter
+	store   *Store
 	queue   chan []byte
 	done    chan struct{}
 	stopped bool
@@ -152,43 +156,45 @@ type sink struct {
 
 var globalSink sink
 
-// sinkWrite serializes one event and hands it to the writer without ever blocking a
-// request path: a full queue drops the line and counts a write error.
-func sinkWrite(cfg config, e *event) {
+// Write serializes one event and hands it to the writer without ever blocking a
+// request path: a full queue drops the line and counts a write error on the store that
+// produced it.
+func Write(cfg config.Config, st *Store, e *Event) {
 	if !cfg.JSONLEnabled || e == nil {
 		return
 	}
 	encoded, errMarshal := json.Marshal(e)
 	if errMarshal != nil {
-		if st := currentStore(); st != nil {
-			st.incWriteError()
+		if st != nil {
+			st.IncWriteError()
 		}
 		return
 	}
-	globalSink.enqueue(cfg.JSONLDir, encoded)
+	globalSink.enqueue(cfg, st, encoded)
 }
 
-func (s *sink) enqueue(dir string, line []byte) {
+func (s *sink) enqueue(cfg config.Config, st *Store, line []byte) {
 	s.mu.Lock()
 	if s.stopped {
 		s.mu.Unlock()
 		return
 	}
+	s.store = st
 	s.mu.Unlock()
-	s.once.Do(func() { s.start(dir) })
+	s.once.Do(func() { s.start(cfg) })
 	select {
 	case s.queue <- line:
 	default:
-		if st := currentStore(); st != nil {
-			st.incWriteError()
+		if s.store != nil {
+			s.store.IncWriteError()
 		}
 	}
 }
 
-func (s *sink) start(dir string) {
+func (s *sink) start(cfg config.Config) {
 	s.queue = make(chan []byte, sinkQueueSize)
 	s.done = make(chan struct{})
-	s.writer = newJSONLWriter(dir)
+	s.writer = newJSONLWriter(cfg)
 	go func() {
 		defer close(s.done)
 		ticker := time.NewTicker(sinkFlushEvery)
@@ -200,8 +206,8 @@ func (s *sink) start(dir string) {
 					return
 				}
 				if errWrite := s.writer.write(line); errWrite != nil {
-					if st := currentStore(); st != nil {
-						st.incWriteError()
+					if s.store != nil {
+						s.store.IncWriteError()
 					}
 				}
 			case <-ticker.C:
@@ -211,8 +217,8 @@ func (s *sink) start(dir string) {
 	}()
 }
 
-// sinkShutdown flushes and stops the writer, waiting briefly for queued lines.
-func sinkShutdown() {
+// Shutdown flushes and stops the writer, waiting briefly for queued lines.
+func Shutdown() {
 	globalSink.mu.Lock()
 	if globalSink.stopped || globalSink.queue == nil {
 		globalSink.stopped = true
@@ -227,5 +233,5 @@ func sinkShutdown() {
 	case <-globalSink.done:
 	case <-time.After(3 * time.Second):
 	}
-	globalSink.writer.close()
+	globalSink.writer.Close()
 }

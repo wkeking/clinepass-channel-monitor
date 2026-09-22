@@ -1,4 +1,4 @@
-package main
+package metadata
 
 import (
 	"os"
@@ -22,7 +22,7 @@ func firstLine(raw []byte) []byte {
 
 func TestExtractChannelFromStreamFrame(t *testing.T) {
 	frame := firstLine(readFixture(t, "sse_channel_frames.jsonl"))
-	meta := extractChannelFromBody(frame, false)
+	meta := ExtractChannelFromBody(frame, false)
 	if meta == nil {
 		t.Fatal("expected channel metadata for a stream frame carrying provider_metadata")
 	}
@@ -69,7 +69,7 @@ func TestExtractChannelFromStreamFrame(t *testing.T) {
 
 func TestExtractChannelKeepsPlanningReasoningWhenEnabled(t *testing.T) {
 	frame := firstLine(readFixture(t, "sse_channel_frames.jsonl"))
-	meta := extractChannelFromBody(frame, true)
+	meta := ExtractChannelFromBody(frame, true)
 	if meta == nil {
 		t.Fatal("expected channel metadata")
 	}
@@ -80,7 +80,7 @@ func TestExtractChannelKeepsPlanningReasoningWhenEnabled(t *testing.T) {
 
 func TestExtractChannelFromNonStreamBody(t *testing.T) {
 	body := readFixture(t, "chat_nonstream_channel.json")
-	meta := extractChannelFromBody(body, false)
+	meta := ExtractChannelFromBody(body, false)
 	if meta == nil {
 		t.Fatal("expected channel metadata for a non-streaming chat.completion body")
 	}
@@ -97,7 +97,7 @@ func TestExtractChannelIgnoresBodiesWithoutMarker(t *testing.T) {
 		"empty frame": []byte("data: "),
 	}
 	for name, body := range cases {
-		if meta := extractChannelFromBody(body, false); meta != nil {
+		if meta := ExtractChannelFromBody(body, false); meta != nil {
 			t.Errorf("%s: expected nil, got %+v", name, meta)
 		}
 	}
@@ -105,23 +105,23 @@ func TestExtractChannelIgnoresBodiesWithoutMarker(t *testing.T) {
 
 func TestExtractChannelRejectsMalformedJSON(t *testing.T) {
 	body := []byte(`data: {"choices":[{"delta":{"provider_metadata":`)
-	if meta := extractChannelFromBody(body, false); meta != nil {
+	if meta := ExtractChannelFromBody(body, false); meta != nil {
 		t.Fatalf("expected nil for malformed JSON, got %+v", meta)
 	}
 }
 
 func TestExtractChannelRequiresGatewayRouting(t *testing.T) {
 	body := []byte(`{"choices":[{"delta":{"provider_metadata":{"gateway":{"cost":"0.1"}}}}]}`)
-	if meta := extractChannelFromBody(body, false); meta != nil {
+	if meta := ExtractChannelFromBody(body, false); meta != nil {
 		t.Fatalf("provider_metadata without gateway.routing is not routing evidence, got %+v", meta)
 	}
 }
 
 func TestHasChannelMarkerEarlyExit(t *testing.T) {
-	if hasChannelMarker([]byte(`{"choices":[{"delta":{"content":"no channel info"}}]}`)) {
+	if HasChannelMarker([]byte(`{"choices":[{"delta":{"content":"no channel info"}}]}`)) {
 		t.Error("body without the marker needle must be rejected")
 	}
-	if !hasChannelMarker([]byte(`{"provider_metadata":{}}`)) {
+	if !HasChannelMarker([]byte(`{"provider_metadata":{}}`)) {
 		t.Error("body with the marker needle must pass the early-out")
 	}
 }
@@ -133,8 +133,8 @@ func TestMaskAPIKey(t *testing.T) {
 		"sk-FIXTURE0000000100": "sk-1****abcd",
 	}
 	for input, want := range cases {
-		if got := maskAPIKey(input); got != want {
-			t.Errorf("maskAPIKey(%q) = %q, want %q", input, got, want)
+		if got := MaskAPIKey(input); got != want {
+			t.Errorf("MaskAPIKey(%q) = %q, want %q", input, got, want)
 		}
 	}
 }

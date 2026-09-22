@@ -1,4 +1,4 @@
-package main
+package plan
 
 import (
 	"fmt"
@@ -7,6 +7,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/wkeking/clinepass-channel-monitor/internal/config"
 )
 
 // This file keeps a rolling view of Cline's own per-request usage records so the overview
@@ -75,8 +77,8 @@ type officialUsageSeries struct {
 	Cached   []int64 `json:"cached"`
 }
 
-// officialUsageWindow is the official aggregate for one page window.
-type officialUsageWindow struct {
+// UsageWindow is the official aggregate for one page window.
+type UsageWindow struct {
 	Window       string              `json:"window"`
 	From         string              `json:"from"`
 	To           string              `json:"to"`
@@ -96,9 +98,9 @@ type officialUsageWindow struct {
 	Detail bool `json:"detail"`
 }
 
-// officialUsageState describes the collector itself, so the page and /health can explain
+// UsageState describes the collector itself, so the page and /health can explain
 // why an official number is missing or incomplete.
-type officialUsageState struct {
+type UsageState struct {
 	Enabled   bool   `json:"enabled"`
 	Items     int    `json:"items"`
 	Oldest    string `json:"oldest,omitempty"`
@@ -324,7 +326,7 @@ func (c *officialUsageCollector) fetch(client *planClient, userID string, every 
 func (c *officialUsageCollector) noteFailureLocked(now time.Time, every time.Duration) {
 	c.failures++
 	if every <= 0 {
-		every = planDefaultUsageRefresh
+		every = config.DefaultPlanUsageRefresh
 	}
 	shift := c.failures - 1
 	if shift > 4 {
@@ -361,7 +363,7 @@ func (c *officialUsageCollector) due(now time.Time, every time.Duration) bool {
 		return false
 	}
 	if every <= 0 {
-		every = planDefaultUsageRefresh
+		every = config.DefaultPlanUsageRefresh
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -381,8 +383,8 @@ func (c *officialUsageCollector) refreshIfDue(client *planClient, userID string,
 // aggregate turns the retained records into the page windows. accountCreated (zero when
 // unknown) is used to tell "the account had no usage yet" apart from "the records do not
 // reach back far enough".
-func (c *officialUsageCollector) aggregate(now time.Time, accountCreated time.Time) map[string]officialUsageWindow {
-	out := make(map[string]officialUsageWindow, len(officialWindowSpecs))
+func (c *officialUsageCollector) aggregate(now time.Time, accountCreated time.Time) map[string]UsageWindow {
+	out := make(map[string]UsageWindow, len(officialWindowSpecs))
 	if c == nil {
 		return out
 	}
@@ -397,7 +399,7 @@ func (c *officialUsageCollector) aggregate(now time.Time, accountCreated time.Ti
 	}
 	for _, spec := range officialWindowSpecs {
 		from := now.Add(-spec.Duration)
-		window := officialUsageWindow{
+		window := UsageWindow{
 			Window:  spec.Label,
 			From:    from.UTC().Format(time.RFC3339),
 			To:      now.UTC().Format(time.RFC3339),
@@ -450,13 +452,13 @@ func (c *officialUsageCollector) aggregate(now time.Time, accountCreated time.Ti
 }
 
 // state reports the collector diagnostics.
-func (c *officialUsageCollector) state(enabled bool) officialUsageState {
+func (c *officialUsageCollector) state(enabled bool) UsageState {
 	if c == nil {
-		return officialUsageState{Enabled: enabled}
+		return UsageState{Enabled: enabled}
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	out := officialUsageState{
+	out := UsageState{
 		Enabled:   enabled,
 		Items:     len(c.items),
 		Truncated: c.truncated,
@@ -480,11 +482,11 @@ func (c *officialUsageCollector) state(enabled bool) officialUsageState {
 // the daily rows are one request for the whole range. They carry tokens and cost only,
 // which is why this window reports Detail=false and the page keeps requests and cache on
 // the local view. Days are natural UTC days, so the range is today-6 .. today.
-func officialDailyWindow(rows []dailyUsageItem, now time.Time, accountCreated time.Time) officialUsageWindow {
+func officialDailyWindow(rows []dailyUsageItem, now time.Time, accountCreated time.Time) UsageWindow {
 	const days = 7
 	utcNow := now.UTC()
 	from := time.Date(utcNow.Year(), utcNow.Month(), utcNow.Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, -(days - 1))
-	window := officialUsageWindow{
+	window := UsageWindow{
 		Window: "7d",
 		From:   from.Format("2006-01-02"),
 		To:     utcNow.Format("2006-01-02"),

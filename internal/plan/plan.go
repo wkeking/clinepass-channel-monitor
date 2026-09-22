@@ -1,4 +1,7 @@
-package main
+// Package plan reads Cline's own usage API: the subscription quota, the official token
+// totals and the per-request records behind the overview cards.
+package plan
+
 
 import (
 	"crypto/sha256"
@@ -17,6 +20,21 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 	"gopkg.in/yaml.v3"
+
+	"github.com/wkeking/clinepass-channel-monitor/internal/buildinfo"
+	"github.com/wkeking/clinepass-channel-monitor/internal/config"
+	"github.com/wkeking/clinepass-channel-monitor/internal/hostapi"
+)
+
+// 包内沿用的短名：对外是导出的类型名，对内保持原来的写法。
+type (
+	planQuota           = Quota
+	planAccountSnapshot = AccountSnapshot
+	officialUsageWindow = UsageWindow
+	officialUsageState  = UsageState
+	quotaTokens         = Tokens
+	quotaWindow         = Window
+	planPoller          = Poller
 )
 
 // This file talks to Cline's own API to surface the subscription view: which plan the
@@ -31,11 +49,14 @@ import (
 //
 // Credits are reported in micro-USD: 0.000001 USD per unit.
 const (
-	planDefaultBaseURL    = "https://api.cline.bot/api/v1"
-	planDefaultRefresh    = 5 * time.Minute
-	planDefaultDailyEvery = time.Hour
-	// planDefaultUsageRefresh is how often the official per-request records are paged.
-	planDefaultUsageRefresh = 5 * time.Minute
+	// planDefaultBaseURL is Cline's public API; planDefaultRefresh is how often the
+	// subscription quota is refreshed and planDefaultUsageRefresh how often the official
+	// per-request records are paged. They mirror the config defaults on purpose: the plan
+	// package stays usable without the configuration layer.
+	planDefaultBaseURL      = config.DefaultPlanBaseURL
+	planDefaultRefresh      = config.DefaultPlanRefresh
+	planDefaultUsageRefresh = config.DefaultPlanUsageRefresh
+	planDefaultDailyEvery   = time.Hour
 	// planAccountStagger separates two credentials in one polling round so several accounts
 	// do not page the same upstream endpoint back to back.
 	planAccountStagger = 500 * time.Millisecond
@@ -46,8 +67,8 @@ const (
 	microUSD                = 1_000_000.0
 )
 
-// quotaWindow is one rolling limit reported by the usage-limits endpoint.
-type quotaWindow struct {
+// Window is one rolling limit reported by the usage-limits endpoint.
+type Window struct {
 	Type        string  `json:"type"`
 	Label       string  `json:"label"`
 	PercentUsed float64 `json:"percent_used"`
@@ -55,8 +76,8 @@ type quotaWindow struct {
 	ResetsIn    string  `json:"resets_in,omitempty"`
 }
 
-// quotaTokens carries the official account totals for the last 31 days.
-type quotaTokens struct {
+// Tokens carries the official account totals for the last 31 days.
+type Tokens struct {
 	FromDate     string  `json:"from_date"`
 	ToDate       string  `json:"to_date"`
 	InputTokens  int64   `json:"input_tokens"`
@@ -70,10 +91,10 @@ type quotaTokens struct {
 	Series []int64 `json:"series,omitempty"`
 }
 
-// planAccountSnapshot is the official view of one Cline credential. Several Cline entries
+// AccountSnapshot is the official view of one Cline credential. Several Cline entries
 // or several keys inside one entry each get their own snapshot: every key can belong to a
 // different Cline account with its own quota.
-type planAccountSnapshot struct {
+type AccountSnapshot struct {
 	// ID is a stable, key-derived identifier (never the key itself); the page uses it to
 	// remember which account the user selected.
 	ID          string                         `json:"id"`
@@ -86,36 +107,36 @@ type planAccountSnapshot struct {
 	Account     string                         `json:"account,omitempty"`
 	PlanName    string                         `json:"plan_name,omitempty"`
 	PlanPrice   string                         `json:"plan_price,omitempty"`
-	Limits      []quotaWindow                  `json:"limits,omitempty"`
-	Tokens      quotaTokens                    `json:"tokens"`
+	Limits      []Window                  `json:"limits,omitempty"`
+	Tokens      Tokens                    `json:"tokens"`
 	TokensError string                         `json:"tokens_error,omitempty"`
-	Windows     map[string]officialUsageWindow `json:"windows,omitempty"`
-	Usage       officialUsageState             `json:"usage"`
+	Windows     map[string]UsageWindow `json:"windows,omitempty"`
+	Usage       UsageState             `json:"usage"`
 	FetchedAt   string                         `json:"fetched_at,omitempty"`
 	Error       string                         `json:"error,omitempty"`
 }
 
-// planQuota is the cached view served to the page.
-type planQuota struct {
+// Quota is the cached view served to the page.
+type Quota struct {
 	Available bool          `json:"available"`
 	Source    string        `json:"source"`
 	Account   string        `json:"account,omitempty"`
 	PlanName  string        `json:"plan_name,omitempty"`
 	PlanPrice string        `json:"plan_price,omitempty"`
-	Limits    []quotaWindow `json:"limits"`
-	Tokens    quotaTokens   `json:"tokens"`
+	Limits    []Window `json:"limits"`
+	Tokens    Tokens   `json:"tokens"`
 	// TokensError explains why the official token totals are missing instead of leaving the
 	// page to show zeros.
 	TokensError string `json:"tokens_error,omitempty"`
 	// Windows carries the official per-request aggregates for the page windows (1h/24h/7d).
-	Windows map[string]officialUsageWindow `json:"windows,omitempty"`
+	Windows map[string]UsageWindow `json:"windows,omitempty"`
 	// Usage describes the official record collector behind Windows.
-	Usage     officialUsageState `json:"usage"`
+	Usage     UsageState `json:"usage"`
 	FetchedAt string             `json:"fetched_at,omitempty"`
 	Error     string             `json:"error,omitempty"`
 	// Accounts lists every configured Cline credential. The fields above mirror the primary
 	// account (the first one that answered) so single-account clients keep working.
-	Accounts []planAccountSnapshot `json:"accounts,omitempty"`
+	Accounts []AccountSnapshot `json:"accounts,omitempty"`
 }
 
 // planStatusError carries the upstream HTTP status so callers can tell "this credential is
@@ -147,7 +168,7 @@ type planClient struct {
 func newPlanClient(baseURL, apiKey string) *planClient {
 	base := strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	if base == "" {
-		base = planDefaultBaseURL
+		base = config.DefaultPlanBaseURL
 	}
 	return &planClient{
 		http:    &http.Client{Timeout: planRequestTimeout},
@@ -216,7 +237,7 @@ func (c *planClient) me() (struct {
 	return out, errGet
 }
 
-func (c *planClient) usageLimits() ([]quotaWindow, error) {
+func (c *planClient) usageLimits() ([]Window, error) {
 	var payload struct {
 		Limits []struct {
 			Type        string  `json:"type"`
@@ -227,9 +248,9 @@ func (c *planClient) usageLimits() ([]quotaWindow, error) {
 	if errGet := c.get("/users/me/plan/usage-limits", &payload); errGet != nil {
 		return nil, errGet
 	}
-	out := make([]quotaWindow, 0, len(payload.Limits))
+	out := make([]Window, 0, len(payload.Limits))
 	for _, item := range payload.Limits {
-		window := quotaWindow{
+		window := Window{
 			Type:        item.Type,
 			Label:       quotaWindowLabel(item.Type),
 			PercentUsed: item.PercentUsed,
@@ -322,11 +343,11 @@ type planAccount struct {
 	usage     *officialUsageCollector
 	userID    string
 	created   time.Time
-	tokens    quotaTokens
+	tokens    Tokens
 	tokensErr string
-	window7   *officialUsageWindow
+	window7   *UsageWindow
 	lastDaily time.Time
-	snapshot  planAccountSnapshot
+	snapshot  AccountSnapshot
 }
 
 func newPlanAccount(cred planCredential) *planAccount {
@@ -339,13 +360,16 @@ func newPlanAccount(cred planCredential) *planAccount {
 	}
 }
 
-// planPoller keeps one cached snapshot per Cline credential plus the primary view the page
+// Poller keeps one cached snapshot per Cline credential plus the primary view the page
 // shows by default. A deployment may configure several Cline entries, or several keys inside
 // one entry, and each key can belong to a different Cline account with its own quota, so
 // every credential is polled as its own account.
-type planPoller struct {
+type Poller struct {
 	mu       sync.RWMutex
-	quota    planQuota
+	// cfg is the configuration the poller was started with; the plugin restarts the poller
+	// on every reconfigure, so it never reads a stale one.
+	cfg      config.Config
+	quota    Quota
 	stopped  chan struct{}
 	once     sync.Once
 	accounts []*planAccount
@@ -353,26 +377,26 @@ type planPoller struct {
 	loggedEmpty bool
 }
 
-func newPlanPoller() *planPoller {
-	return &planPoller{stopped: make(chan struct{})}
+func newPoller() *Poller {
+	return &Poller{stopped: make(chan struct{})}
 }
 
-func (p *planPoller) snapshot() planQuota {
+func (p *Poller) Snapshot() Quota {
 	if p == nil {
-		return planQuota{}
+		return Quota{}
 	}
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.quota
 }
 
-func (p *planPoller) store(quota planQuota) {
+func (p *Poller) store(quota Quota) {
 	p.mu.Lock()
 	p.quota = quota
 	p.mu.Unlock()
 }
 
-func (p *planPoller) stop() {
+func (p *Poller) Stop() {
 	if p == nil {
 		return
 	}
@@ -381,7 +405,7 @@ func (p *planPoller) stop() {
 
 // syncAccounts keeps the polling state of the credentials that are still configured and
 // drops the ones that disappeared, so a removed key stops being polled.
-func (p *planPoller) syncAccounts(creds []planCredential) []*planAccount {
+func (p *Poller) syncAccounts(creds []planCredential) []*planAccount {
 	byID := make(map[string]*planAccount, len(p.accounts))
 	for _, account := range p.accounts {
 		byID[account.id] = account
@@ -404,18 +428,18 @@ func (p *planPoller) syncAccounts(creds []planCredential) []*planAccount {
 // refresh polls every configured credential once and publishes the combined snapshot.
 // Accounts are polled sequentially and each paces its own paging, so several credentials do
 // not turn into a burst against the same upstream.
-func (p *planPoller) refresh() {
-	cfg := currentConfig()
-	creds := resolvePlanCredentials(cfg)
+func (p *Poller) refresh() {
+	cfg := p.cfg
+	creds := ResolveCredentials(cfg)
 	p.accounts = p.syncAccounts(creds)
 	if len(p.accounts) == 0 {
 		if !p.loggedEmpty {
-			hostLogAsync("warn", pluginID+": no Cline api key available for the subscription card", map[string]string{
+			hostapi.LogAsync("warn", buildinfo.ID+": no Cline api key available for the subscription card", map[string]string{
 				"hint": "set plan_api_key in the plugin config, or point plan_config_path at CPA's config.yaml",
 			})
 			p.loggedEmpty = true
 		}
-		p.store(planQuota{Source: "cline-api", Error: "no Cline api key available yet"})
+		p.store(Quota{Source: "cline-api", Error: "no Cline api key available yet"})
 		return
 	}
 	p.loggedEmpty = false
@@ -428,7 +452,7 @@ func (p *planPoller) refresh() {
 			time.Sleep(planAccountStagger)
 		}
 		if covered, ok := byUserID[account.userID]; ok && account.userID != "" {
-			account.snapshot = planAccountSnapshot{
+			account.snapshot = AccountSnapshot{
 				ID: account.id, Label: account.label, Source: account.source,
 				Account: shortAccountID(account.userID),
 				Error:   "与 " + covered + " 是同一个 Cline 账号，已合并（未重复拉取）",
@@ -444,10 +468,10 @@ func (p *planPoller) refresh() {
 }
 
 // refreshAccount performs one round of upstream calls for a single credential.
-func (p *planPoller) refreshAccount(cfg config, account *planAccount) {
+func (p *Poller) refreshAccount(cfg config.Config, account *planAccount) {
 	client := newPlanClient(cfg.PlanBaseURL, account.key)
 	now := time.Now()
-	snapshot := planAccountSnapshot{
+	snapshot := AccountSnapshot{
 		ID: account.id, Label: account.label, Source: account.source,
 		Tokens: account.tokens, TokensError: account.tokensErr,
 	}
@@ -471,7 +495,7 @@ func (p *planPoller) refreshAccount(cfg config, account *planAccount) {
 	}
 
 	if cfg.PlanUsageEnabled {
-		account.usage.refreshIfDue(client, account.userID, cfg.PlanUsageRefresh.Or(planDefaultUsageRefresh), now)
+		account.usage.refreshIfDue(client, account.userID, cfg.PlanUsageRefresh.Or(config.DefaultPlanUsageRefresh), now)
 	}
 
 	limits, errLimits := client.usageLimits()
@@ -501,7 +525,7 @@ func (p *planPoller) refreshAccount(cfg config, account *planAccount) {
 		to := utcNow.Format("2006-01-02")
 		items, errDaily := client.dailyUsage(account.userID, from, to)
 		if errDaily == nil {
-			totals := quotaTokens{FromDate: from, ToDate: to}
+			totals := Tokens{FromDate: from, ToDate: to}
 			start, errStart := time.Parse("2006-01-02", from)
 			if errStart == nil {
 				totals.Series = make([]int64, planUsageWindowDays)
@@ -545,7 +569,7 @@ func (p *planPoller) refreshAccount(cfg config, account *planAccount) {
 
 // attachUsage hangs the official per-request windows and the collector state onto a
 // snapshot.
-func (p *planPoller) attachUsage(cfg config, account *planAccount, snapshot *planAccountSnapshot, now time.Time) {
+func (p *Poller) attachUsage(cfg config.Config, account *planAccount, snapshot *AccountSnapshot, now time.Time) {
 	if !cfg.PlanUsageEnabled {
 		return
 	}
@@ -557,8 +581,8 @@ func (p *planPoller) attachUsage(cfg config, account *planAccount, snapshot *pla
 }
 
 // publish exposes the per-account snapshots plus the primary one under the legacy fields.
-func (p *planPoller) publish() {
-	quota := planQuota{Source: "cline-api"}
+func (p *Poller) publish() {
+	quota := Quota{Source: "cline-api"}
 	for _, account := range p.accounts {
 		quota.Accounts = append(quota.Accounts, account.snapshot)
 	}
@@ -582,7 +606,7 @@ func (p *planPoller) publish() {
 
 // primaryAccount is the account the page shows by default: the first one that answered,
 // otherwise the first configured one.
-func (p *planPoller) primaryAccount() *planAccount {
+func (p *Poller) primaryAccount() *planAccount {
 	var first *planAccount
 	for _, account := range p.accounts {
 		if first == nil {
@@ -595,17 +619,17 @@ func (p *planPoller) primaryAccount() *planAccount {
 	return first
 }
 
-// latestUpstreamBearer remembers the bearer token that CPA sent upstream for the most
+// latestBearer remembers the bearer token that CPA sent upstream for the most
 // recent Cline request. It is the last-resort source for the subscription card when the
 // deployment keeps the credential somewhere the plugin cannot read.
-var latestUpstreamBearer struct {
+var latestBearer struct {
 	sync.Mutex
 	value    string
 	lastKeys string
 	lastLen  int
 }
 
-func rememberUpstreamBearer(headers http.Header) {
+func RememberUpstreamBearer(headers http.Header) {
 	if headers == nil {
 		return
 	}
@@ -620,30 +644,30 @@ func rememberUpstreamBearer(headers http.Header) {
 	}
 	auth = strings.TrimSpace(strings.TrimPrefix(auth, "Bearer "))
 	// The header names are recorded for diagnosis; the values never are.
-	latestUpstreamBearer.Lock()
-	latestUpstreamBearer.lastKeys = strings.Join(names, ",")
-	latestUpstreamBearer.lastLen = len(auth)
+	latestBearer.Lock()
+	latestBearer.lastKeys = strings.Join(names, ",")
+	latestBearer.lastLen = len(auth)
 	if len(auth) >= 20 {
-		latestUpstreamBearer.value = auth
+		latestBearer.value = auth
 	}
-	latestUpstreamBearer.Unlock()
+	latestBearer.Unlock()
 }
 
-func upstreamBearer() string {
-	latestUpstreamBearer.Lock()
-	defer latestUpstreamBearer.Unlock()
-	return latestUpstreamBearer.value
+func UpstreamBearer() string {
+	latestBearer.Lock()
+	defer latestBearer.Unlock()
+	return latestBearer.value
 }
 
-// upstreamBearerDiagnostics reports what the last intercepted request carried, without
+// BearerDiagnostics reports what the last intercepted request carried, without
 // exposing any value.
-func upstreamBearerDiagnostics() (string, int) {
-	latestUpstreamBearer.Lock()
-	defer latestUpstreamBearer.Unlock()
-	return latestUpstreamBearer.lastKeys, latestUpstreamBearer.lastLen
+func BearerDiagnostics() (string, int) {
+	latestBearer.Lock()
+	defer latestBearer.Unlock()
+	return latestBearer.lastKeys, latestBearer.lastLen
 }
 
-// resolvePlanCredentials collects every Cline credential this deployment can use. A Cline
+// ResolveCredentials collects every Cline credential this deployment can use. A Cline
 // entry may carry several keys, and several entries may point at Cline, so the poller works
 // on a list instead of a single key.
 //
@@ -657,7 +681,7 @@ func upstreamBearerDiagnostics() (string, int) {
 //
 // Values stay in memory: they are never logged, never written to disk and never returned to
 // the page (labels only carry a masked tail).
-func resolvePlanCredentials(cfg config) []planCredential {
+func ResolveCredentials(cfg config.Config) []planCredential {
 	out := make([]planCredential, 0, 4)
 	seen := make(map[string]struct{}, 4)
 	add := func(key, label, source string) {
@@ -681,7 +705,7 @@ func resolvePlanCredentials(cfg config) []planCredential {
 	for _, cred := range clineCredentialsFromHostAuth(cfg) {
 		add(cred.Key, cred.Label, cred.Source)
 	}
-	if key := upstreamBearer(); looksLikeClineKey(key) {
+	if key := UpstreamBearer(); looksLikeClineKey(key) {
 		add(key, "上游请求头 · "+maskCredential(key), "observed-header")
 	}
 	if len(out) > 0 {
@@ -727,9 +751,10 @@ func shortAccountID(id string) string {
 // startPlanPoller refreshes every configured credential in the background until stop is
 // called. Credentials are resolved again on every cycle, so a deployment that only reveals
 // its key later (for example through an observed upstream request) still gets the card.
-func startPlanPoller() *planPoller {
-	poller := newPlanPoller()
-	interval := currentConfig().PlanRefresh.Or(planDefaultRefresh)
+func Start(cfg config.Config) *Poller {
+	poller := newPoller()
+	poller.cfg = cfg
+	interval := cfg.PlanRefresh.Or(config.DefaultPlanRefresh)
 	if interval < time.Minute {
 		interval = time.Minute
 	}
@@ -764,9 +789,9 @@ type hostAuthGetResponse struct {
 // clineCredentialsFromHostAuth reads every Cline credential CPA exposes through the host auth
 // callbacks (auth files). Credentials CPA synthesizes from openai-compatibility entries are
 // not listed here; those are read from the configuration file.
-func clineCredentialsFromHostAuth(cfg config) []planCredential {
+func clineCredentialsFromHostAuth(cfg config.Config) []planCredential {
 	out := make([]planCredential, 0, 2)
-	raw, ok := callHost(pluginabi.MethodHostAuthList, nil)
+	raw, ok := hostapi.Call(pluginabi.MethodHostAuthList, nil)
 	if !ok {
 		return out
 	}
@@ -787,7 +812,7 @@ func clineCredentialsFromHostAuth(cfg config) []planCredential {
 		if errMarshal != nil {
 			continue
 		}
-		rawAuth, okGet := callHost(pluginabi.MethodHostAuthGet, payload)
+		rawAuth, okGet := hostapi.Call(pluginabi.MethodHostAuthGet, payload)
 		if !okGet {
 			continue
 		}
@@ -812,7 +837,7 @@ func clineCredentialsFromHostAuth(cfg config) []planCredential {
 			Source: "host-auth",
 		})
 	}
-	hostLogAsync("info", pluginID+": host auth lookup finished", map[string]string{
+	hostapi.LogAsync("info", buildinfo.ID+": host auth lookup finished", map[string]string{
 		"auth_files": strconv.Itoa(count),
 		"matched":    strconv.Itoa(matched),
 		"usable":     strconv.Itoa(len(out)),
@@ -824,7 +849,7 @@ func clineCredentialsFromHostAuth(cfg config) []planCredential {
 // openai-compatibility entry that points at Cline: matched by base_url host, or by the entry
 // name being "Cline" when the host does not match. CPA persists the keys it was configured
 // with under api-key-entries, so this is normally the source that needs no user input.
-func clineCredentialsFromConfigFile(cfg config) []planCredential {
+func clineCredentialsFromConfigFile(cfg config.Config) []planCredential {
 	out := make([]planCredential, 0, 2)
 	paths := planConfigPaths
 	if override := strings.TrimSpace(cfg.PlanConfigPath); override != "" {
@@ -833,7 +858,7 @@ func clineCredentialsFromConfigFile(cfg config) []planCredential {
 	for _, path := range paths {
 		raw, errRead := os.ReadFile(path)
 		if errRead != nil {
-			hostLogAsync("info", pluginID+": config attempt: "+path+": "+errRead.Error(), nil)
+			hostapi.LogAsync("info", buildinfo.ID+": config attempt: "+path+": "+errRead.Error(), nil)
 			continue
 		}
 		var file struct {
@@ -848,7 +873,7 @@ func clineCredentialsFromConfigFile(cfg config) []planCredential {
 			} `yaml:"openai-compatibility"`
 		}
 		if errUnmarshal := yaml.Unmarshal(raw, &file); errUnmarshal != nil {
-			hostLogAsync("info", pluginID+": config attempt: "+path+": decode failed", nil)
+			hostapi.LogAsync("info", buildinfo.ID+": config attempt: "+path+": decode failed", nil)
 			continue
 		}
 		found := 0
@@ -856,13 +881,13 @@ func clineCredentialsFromConfigFile(cfg config) []planCredential {
 			if entry.Disabled {
 				continue
 			}
-			host := hostFromBaseURL(entry.BaseURL)
+			host := config.HostFromBaseURL(entry.BaseURL)
 			if host == "" {
 				continue
 			}
 			matches := false
 			if len(cfg.Hosts) > 0 {
-				_, matches = cfg.hostMatched(entry.BaseURL)
+				_, matches = cfg.HostMatched(entry.BaseURL)
 			}
 			if !matches && !strings.EqualFold(strings.TrimSpace(entry.Name), "cline") {
 				continue
@@ -890,7 +915,7 @@ func clineCredentialsFromConfigFile(cfg config) []planCredential {
 				})
 			}
 			if index > 0 {
-				hostLogAsync("info", pluginID+": using Cline credentials from CPA's configuration file", map[string]string{
+				hostapi.LogAsync("info", buildinfo.ID+": using Cline credentials from CPA's configuration file", map[string]string{
 					"source": "config-file",
 					"host":   host,
 					"entry":  name,
@@ -934,12 +959,12 @@ func apiKeyFromAuthJSON(raw json.RawMessage) string {
 
 // entryMatchesCline decides whether an auth entry belongs to Cline. The base URL host is
 // the deciding factor; provider and name are only fallback hints.
-func entryMatchesCline(entry hostAuthFileEntry, cfg config) bool {
+func entryMatchesCline(entry hostAuthFileEntry, cfg config.Config) bool {
 	if entry.Disabled {
 		return false
 	}
 	if len(cfg.Hosts) > 0 {
-		if _, matched := cfg.hostMatched(entry.BaseURL); matched {
+		if _, matched := cfg.HostMatched(entry.BaseURL); matched {
 			return true
 		}
 	}

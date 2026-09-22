@@ -1,21 +1,40 @@
-package main
+// Package store keeps the recorded requests: a bounded in-memory ring buffer for the
+// management pages, the counters that describe this instance, and the daily JSONL files that
+// keep the full history.
+package store
 
 import (
 	"sync"
 	"time"
+
+	"github.com/wkeking/clinepass-channel-monitor/internal/config"
+	"github.com/wkeking/clinepass-channel-monitor/internal/metadata"
 )
 
+// 包内沿用的短名：对外是导出的类型名，对内保持原来的写法。
+type (
+	store               = Store
+	event               = Event
+	eventFilter         = Filter
+	statsTotals         = Totals
+	windowStats         = WindowStats
+	channelStat         = ChannelStat
+	unmatchedHostSample = UnmatchedHostSample
+	pendingChannel      = PendingChannel
+)
+
+// The page windows the management API understands.
 const (
-	statsWindowHour = time.Hour
-	statsWindowDay  = 24 * time.Hour
-	statsWindowWeek = 7 * 24 * time.Hour
+	StatsWindowHour = time.Hour
+	StatsWindowDay  = 24 * time.Hour
+	StatsWindowWeek = 7 * 24 * time.Hour
 )
 
 // store keeps the in-memory view of recorded requests and the counters used for
 // self-diagnosis. Every exported method is safe for concurrent use.
-type store struct {
+type Store struct {
 	mu   sync.RWMutex
-	cfg  config
+	cfg  config.Config
 	ring []*event
 	head int
 	size int
@@ -43,7 +62,7 @@ type counters struct {
 }
 
 // statsTotals is the lifetime summary exposed by /health.
-type statsTotals struct {
+type Totals struct {
 	Requests        int64 `json:"requests"`
 	Recorded        int64 `json:"recorded"`
 	HostMatched     int64 `json:"host_matched"`
@@ -57,32 +76,35 @@ type statsTotals struct {
 	Fused           bool  `json:"fused"`
 }
 
-type unmatchedHostSample struct {
+type UnmatchedHostSample struct {
 	Host     string `json:"host"`
 	Provider string `json:"provider"`
 	Model    string `json:"model"`
 	Time     string `json:"time"`
 }
 
-type pendingChannel struct {
-	// requestHash is the identity the response hook was observed for.
-	requestHash string
-	// routing is what the response hook saw for that request.
-	routing   routingState
-	identity  identity
-	meta      *ChannelMetadata
-	createdAt time.Time
+// PendingChannel is one channel observation waiting for its usage record. Its fields are
+// exported because the hooks package fills it in.
+type PendingChannel struct {
+	// RequestHash is the identity the response hook was observed for.
+	RequestHash string
+	// Routing is what the response hook saw for that request.
+	Routing  RoutingState
+	Identity Identity
+	Meta     *metadata.ChannelMetadata
+	// CreatedAt is when the observation was recorded, used for the orphan window.
+	CreatedAt time.Time
 	consumed  bool
 }
 
-func newStore(cfg config) *store {
+func New(cfg config.Config) *Store {
 	return &store{
 		cfg:  cfg,
 		ring: make([]*event, cfg.RingSize),
 	}
 }
 
-func (s *store) reconfigure(cfg config) {
+func (s *Store) Reconfigure(cfg config.Config) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if cfg.RingSize != s.cfg.RingSize {
@@ -95,7 +117,7 @@ func (s *store) reconfigure(cfg config) {
 
 // reset clears the in-memory view: a reconfigured plugin starts with empty counters
 // so that /health reflects the current instance instead of a previous configuration.
-func (s *store) reset() {
+func (s *Store) Reset() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.ring = make([]*event, len(s.ring))
@@ -106,19 +128,19 @@ func (s *store) reset() {
 	s.counters = counters{}
 }
 
-func (s *store) close() {
+func (s *Store) Close() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.pending = nil
 }
 
-func (s *store) config() config {
+func (s *Store) config() config.Config {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.cfg
 }
 
-func (s *store) add(e *event) {
+func (s *Store) Add(e *Event) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.ring[s.head] = e
@@ -130,7 +152,7 @@ func (s *store) add(e *event) {
 }
 
 // events returns the stored events newest first, filtered by the request.
-func (s *store) events(filter eventFilter) []*event {
+func (s *Store) Events(filter Filter) []*Event {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	now := time.Now()
@@ -158,30 +180,30 @@ func (s *store) events(filter eventFilter) []*event {
 	return out
 }
 
-func (s *store) addChannel(c *pendingChannel) {
+func (s *Store) AddChannel(c *PendingChannel) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.pending = append(s.pending, c)
 	s.trimPendingLocked()
 }
 
-// consumeChannel finds the channel observation matching a usage record and marks it
+// ConsumeChannel finds the channel observation matching a usage record and marks it
 // consumed so one observation can never be joined twice.
 //
 // Matching order follows the correlation contract: (session, model) within the join
 // window first, then model only. An unconsumed observation is never reused.
-func (s *store) consumeChannel(id identity, requestedAt time.Time, latency time.Duration) *pendingChannel {
+func (s *Store) ConsumeChannel(id Identity, requestedAt time.Time, latency time.Duration) *PendingChannel {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	cfg := s.cfg
-	window := cfg.JoinWindow.Or(defaultJoinWindow)
+	window := cfg.JoinWindow.Or(config.DefaultJoinWindow)
 
 	best := s.pickLocked(func(candidate *pendingChannel) bool {
-		return sameSessionAndModel(candidate.identity, id)
+		return sameSessionAndModel(candidate.Identity, id)
 	}, requestedAt, latency, window)
 	if best == nil {
 		best = s.pickLocked(func(candidate *pendingChannel) bool {
-			return candidate.identity.Model != "" && candidate.identity.Model == id.Model
+			return candidate.Identity.Model != "" && candidate.Identity.Model == id.Model
 		}, requestedAt, latency, window)
 	}
 	if best == nil {
@@ -193,17 +215,17 @@ func (s *store) consumeChannel(id identity, requestedAt time.Time, latency time.
 }
 
 // pickLocked returns the closest unconsumed observation accepted by the predicate.
-func (s *store) pickLocked(accept func(*pendingChannel) bool, requestedAt time.Time, latency, window time.Duration) *pendingChannel {
+func (s *Store) pickLocked(accept func(*pendingChannel) bool, requestedAt time.Time, latency, window time.Duration) *pendingChannel {
 	var best *pendingChannel
 	var bestDistance time.Duration
 	for _, candidate := range s.pending {
-		if candidate.consumed || candidate.meta == nil {
+		if candidate.consumed || candidate.Meta == nil {
 			continue
 		}
 		if !accept(candidate) {
 			continue
 		}
-		delta := candidate.createdAt.Sub(requestedAt)
+		delta := candidate.CreatedAt.Sub(requestedAt)
 		if delta < -window || delta > latency+window {
 			continue
 		}
@@ -231,15 +253,15 @@ func sameSessionAndModel(a, b identity) bool {
 
 // trimPendingLocked drops consumed entries and expired orphans. Orphans are counted
 // separately because they are the signal that channel metadata is not being consumed.
-func (s *store) trimPendingLocked() {
-	ttl := s.cfg.OrphanTTL.Or(defaultOrphanTTL)
+func (s *Store) trimPendingLocked() {
+	ttl := s.cfg.OrphanTTL.Or(config.DefaultOrphanTTL)
 	now := time.Now()
 	kept := s.pending[:0]
 	for _, candidate := range s.pending {
 		if candidate.consumed {
 			continue
 		}
-		if now.Sub(candidate.createdAt) > ttl {
+		if now.Sub(candidate.CreatedAt) > ttl {
 			s.counters.orphanChannel++
 			continue
 		}
@@ -248,7 +270,7 @@ func (s *store) trimPendingLocked() {
 	s.pending = kept
 }
 
-func (s *store) recordUnmatchedHost(sample unmatchedHostSample) {
+func (s *Store) RecordUnmatchedHost(sample UnmatchedHostSample) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.counters.skippedUnmatchedHost++
@@ -264,14 +286,14 @@ func (s *store) recordUnmatchedHost(sample unmatchedHostSample) {
 	}
 }
 
-func (s *store) snapshotCounters() counters {
+func (s *Store) snapshotCounters() counters {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.counters
 }
 
 // totals returns the lifetime counters plus a windowed subset.
-func (s *store) totals() statsTotals {
+func (s *Store) Totals() Totals {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return statsTotals{
@@ -288,7 +310,7 @@ func (s *store) totals() statsTotals {
 	}
 }
 
-func (s *store) unmatchedHostSamples() []unmatchedHostSample {
+func (s *Store) UnmatchedHostSamples() []UnmatchedHostSample {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out := make([]unmatchedHostSample, len(s.unmatchedSamples))
@@ -297,7 +319,7 @@ func (s *store) unmatchedHostSamples() []unmatchedHostSample {
 }
 
 // used returns how many events the ring currently holds.
-func (s *store) used() int {
+func (s *Store) Used() int {
 	if s == nil {
 		return 0
 	}
@@ -306,7 +328,7 @@ func (s *store) used() int {
 	return s.size
 }
 
-func (s *store) countObservations() int {
+func (s *Store) CountObservations() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	total := 0
@@ -319,7 +341,7 @@ func (s *store) countObservations() int {
 }
 
 // bump applies one counter increment under the store lock.
-func (s *store) bump(apply func(*counters)) {
+func (s *Store) bump(apply func(*counters)) {
 	if s == nil {
 		return
 	}
@@ -328,9 +350,9 @@ func (s *store) bump(apply func(*counters)) {
 	apply(&s.counters)
 }
 
-func (s *store) incRequests()       { s.bump(func(c *counters) { c.requests++ }) }
-func (s *store) incHostMatched()    { s.bump(func(c *counters) { c.hostMatched++ }) }
-func (s *store) incMarkerMissing()  { s.bump(func(c *counters) { c.markerMissing++ }) }
-func (s *store) incParseError()     { s.bump(func(c *counters) { c.parseError++ }) }
-func (s *store) incChannelMissing() { s.bump(func(c *counters) { c.channelMissing++ }) }
-func (s *store) incWriteError()     { s.bump(func(c *counters) { c.writeError++ }) }
+func (s *Store) IncRequests()       { s.bump(func(c *counters) { c.requests++ }) }
+func (s *Store) IncHostMatched()    { s.bump(func(c *counters) { c.hostMatched++ }) }
+func (s *Store) IncMarkerMissing()  { s.bump(func(c *counters) { c.markerMissing++ }) }
+func (s *Store) IncParseError()     { s.bump(func(c *counters) { c.parseError++ }) }
+func (s *Store) IncChannelMissing() { s.bump(func(c *counters) { c.channelMissing++ }) }
+func (s *Store) IncWriteError()     { s.bump(func(c *counters) { c.writeError++ }) }

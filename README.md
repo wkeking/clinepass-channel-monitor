@@ -336,11 +336,32 @@ curl -s -H "Authorization: Bearer $CPA_MANAGEMENT_KEY" http://127.0.0.1:8317/v0/
 - **回滚**：把 `plugins.configs.clinepass-channel-monitor.enabled` 设为 `false`（插件不再注册路由、不再写盘），或直接删掉 `.so` 后触发重扫；
 - **卸载残留**：插件本身不在 CPA 配置之外写任何文件。需要彻底清理时删除：① 插件配置块，② `.so` 文件，③ `jsonl_dir` 下的 `channel-monitor-*.jsonl`（这一步是删数据，按需保留备份）。
 
+## 目录结构
+
+```
+cmd/clinepass-channel-monitor/   入口：C ABI 的四个 //export 符号、信封编解码、panic 兜底
+  cdecl.h                        C 侧类型声明（cgo 前置用）
+internal/abi/                    插件 ABI 信封与观测钩子的「不改动」空响应
+internal/buildinfo/              插件 id / 名称 / 作者 / 版本（版本由 -ldflags 注入）
+internal/hostapi/                宿主回调桥：日志与 host.* 数据接口
+internal/config/                 配置解析与归一化（plugins.configs.<id> 契约）
+internal/store/                  环形缓冲、计数器、聚合、事件模型、JSONL 落盘与保留期
+internal/metadata/               provider_metadata 解析（渠道证据从哪来）
+internal/plan/                   Cline 官方用量：套餐、限额、31 天汇总、逐条记录采集
+internal/hooks/                  三个观测钩子 + 请求关联表（identity）
+internal/state/                  运行时状态（配置 / 存储 / 用量轮询器）的发布与读取
+internal/management/             管理接口与内嵌页面 index.html
+internal/plugin/                 注册、生命周期与方法分发（把上面这些接起来）
+```
+
+依赖是单向的：`plugin → hooks / management → store / plan → config`；`hooks`、`management`、`plugin` 通过 `state` 读取运行时状态，而 `state` 不反向依赖它们，所以没有任何 import 环。
+
 ## 构建与开发
 
 ```bash
 make build      # 构建本机架构的 .so（CGO，-buildmode=c-shared）
 make test       # 单元测试（解析器/关联器/环形缓冲，含真实响应片段 fixture）
+make bench      # 请求路径开销基准（钩子载荷解码、请求指纹、事件序列化）
 make install    # 安装到本地 CPA 插件目录（路径可通过变量覆盖）
 ```
 

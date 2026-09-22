@@ -44,18 +44,22 @@ LDFLAGS    := -s -w -X github.com/wkeking/clinepass-channel-monitor/internal/bui
 # Where the CPA container reads plugins from. Override for your own deployment.
 INSTALL_DIR ?= /opt/cpa/plugins/$(GOOS)/$(GOARCH)
 
-.PHONY: all deps build strip test bench vet fmt lint clean clean-cache install uninstall tools help
+.PHONY: all deps build strip test bench vet fmt lint clean clean-cache install uninstall tools help toolchain-dirs
 
 all: build
 
+## toolchain-dirs: create the in-repo Go cache directories that a fresh clone (CI included) does not have
+toolchain-dirs:
+	@mkdir -p $(GOCACHE) $(GOMODCACHE) $(GOPATH) $(GOTMPDIR)
+
 ## deps: download Go modules
-deps:
+deps: toolchain-dirs
 	$(GO_BIN) mod download
 
 ## build: build the plugin shared library for GOOS/GOARCH
 build: $(BUILD_DIR)/$(LIB_NAME)
 
-$(BUILD_DIR)/$(LIB_NAME): $(shell find $(REPO_ROOT)/cmd $(REPO_ROOT)/internal -name '*.go') $(REPO_ROOT)/go.mod $(REPO_ROOT)/cmd/clinepass-channel-monitor/cdecl.h
+$(BUILD_DIR)/$(LIB_NAME): $(shell find $(REPO_ROOT)/cmd $(REPO_ROOT)/internal -name '*.go') $(REPO_ROOT)/go.mod $(REPO_ROOT)/cmd/clinepass-channel-monitor/cdecl.h | toolchain-dirs
 	@mkdir -p $(BUILD_DIR)
 	GOOS=$(GOOS) GOARCH=$(GOARCH) $(GO_BIN) build $(GOFLAGS) -trimpath \
 		-ldflags '$(LDFLAGS)' -buildmode=c-shared -o $@ ./cmd/clinepass-channel-monitor
@@ -63,19 +67,19 @@ $(BUILD_DIR)/$(LIB_NAME): $(shell find $(REPO_ROOT)/cmd $(REPO_ROOT)/internal -n
 	@echo "built $@"
 
 ## test: run unit tests
-test:
+test: toolchain-dirs
 	$(GO_BIN) test ./...
 
 ## bench: run the request-path benchmarks (hook cost, hashing, event marshalling)
-bench:
+bench: toolchain-dirs
 	$(GO_BIN) test -run '^$$' -bench . -benchmem -benchtime 200x .
 
 ## vet: run go vet
-vet:
+vet: toolchain-dirs
 	$(GO_BIN) vet ./...
 
 ## fmt: format Go sources
-fmt:
+fmt: toolchain-dirs
 	$(GO_BIN) fmt ./...
 
 ## clean: remove build output and release artifacts

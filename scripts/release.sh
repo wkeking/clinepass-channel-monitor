@@ -115,6 +115,9 @@ for target in "$@"; do
 	CC="${cc:-}" make build BUILD_DIR="$STAGE/dist" GOOS="$goos" GOARCH="$goarch" VERSION="$VERSION" DEV_BUMP=0 >/dev/null
 	# The Makefile always names the library .so; the name inside the zip is what matters.
 	[ -f "$STAGE/dist/$PLUGIN_ID-v$VERSION.so" ] || die "expected $STAGE/dist/$PLUGIN_ID-v$VERSION.so"
+	# A cross target can exit 0 and still emit the wrong image, so check the header
+	# before anything is published: darwin/amd64 must not ship an arm64 Mach-O.
+	python3 "$REPO_ROOT/scripts/check-library-arch.py" "$goos" "$goarch" "$STAGE/dist/$PLUGIN_ID-v$VERSION.so"
 	install -m 0644 "$STAGE/dist/$PLUGIN_ID-v$VERSION.so" "$STAGE/pkg/$library"
 	rm -f "$archive"
 	(cd "$STAGE/pkg" && zip -q -X "$archive" "$library")

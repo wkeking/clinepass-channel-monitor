@@ -400,7 +400,7 @@ scripts/release.sh 0.1.1 linux/arm64 linux/amd64
 git tag v0.1.1 && git push origin v0.1.1
 ```
 
-不想为一个新平台先发版本的话，可以在 Actions 里手动跑一次 `release`（`workflow_dispatch`，填版本号）：它只构建并上传五个 zip 作为 artifacts 供你核对内容，不会创建 release。
+不想为一个新平台先发版本的话，先干跑一次：把改动推到一个名为 `release-dryrun` 的分支（或直接在 Actions 里手动跑 `release`），它只构建并上传五个 zip 作为 artifacts 供你核对，不会创建 release——publish job 用 `if: startsWith(github.ref, 'refs/tags/')` 卡掉了非 tag 事件。脚本还会读产物头部校验容器格式与架构（ELF / Mach-O / PE 的 machine 字段），所以 `darwin/amd64` 那一条不会悄悄出一个 arm64 库。
 
 **登记到插件商店**：仓库根目录的 `registry.json` 就是登记文件（`schema_version: 1`，`github-release` 类型，资产取自你的 GitHub Release）。两种用法：
 

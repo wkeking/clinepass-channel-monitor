@@ -9,6 +9,14 @@ on:
   push:
     tags:
       - "v*"
+  # Dry run: builds and uploads the archives for every platform without creating a
+  # release, so a new matrix entry can be checked before the tag that publishes it.
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build; must match internal/buildinfo/buildinfo.go"
+        required: true
+        default: "0.1.1"
 
 permissions:
   contents: write
@@ -25,9 +33,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # linux/amd64 builds natively, linux/arm64 cross-compiles with gcc-aarch64-linux-gnu
-          # on the same runner, and darwin/arm64 needs a macOS runner because the CGO
-          # linker wants the macOS SDK.
+          # The plugin store audit requires every release to carry darwin/amd64,
+          # darwin/arm64, linux/amd64, linux/arm64 and windows/amd64.
+          # linux/* builds natively or cross-compiles with the matching GNU gcc,
+          # darwin/* needs a macOS runner (the CGO linker wants the macOS SDK; Go
+          # passes -arch x86_64 for GOARCH=amd64, so one runner covers both archs),
+          # and windows/amd64 needs mingw-w64.
           - runner: ubuntu-22.04
             goos: linux
             goarch: amd64
@@ -36,9 +47,17 @@ jobs:
             goos: linux
             goarch: arm64
             packages: gcc-aarch64-linux-gnu zip
+          - runner: ubuntu-22.04
+            goos: windows
+            goarch: amd64
+            packages: gcc-mingw-w64-x86-64 zip
           - runner: macos-14
             goos: darwin
             goarch: arm64
+            packages: ""
+          - runner: macos-14
+            goos: darwin
+            goarch: amd64
             packages: ""
     steps:
       - uses: actions/checkout@v4
@@ -47,8 +66,17 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y ${{ matrix.packages }}
       - name: Install the pinned Go toolchain
         run: make tools
+      - name: Resolve the version
+        id: version
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="${{ inputs.version }}"
+          fi
+          echo "version=${version}" >>"$GITHUB_OUTPUT"
       - name: Build and package
-        run: scripts/release.sh "${GITHUB_REF_NAME#v}" ${{ matrix.goos }}/${{ matrix.goarch }}
+        run: scripts/release.sh "${{ steps.version.outputs.version }}" ${{ matrix.goos }}/${{ matrix.goarch }}
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.goos }}-${{ matrix.goarch }}
@@ -57,6 +85,8 @@ jobs:
 
   publish:
     name: publish GitHub release
+    # A tag push publishes; a workflow_dispatch dry run stops after the artifacts.
+    if: github.event_name == 'push'
     needs: build
     runs-on: ubuntu-22.04
     steps:

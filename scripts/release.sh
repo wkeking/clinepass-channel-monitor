@@ -50,7 +50,8 @@ library_extension() {
 }
 
 # cross_cc prints the C compiler for a target that differs from the host, or nothing
-# when the default toolchain is right. CGO means a cross target needs its own gcc.
+# when the default toolchain is right. CGO means a cross target needs its own gcc
+# (windows/amd64 wants mingw-w64, for example gcc-mingw-w64-x86-64).
 cross_cc() {
 	local goos="$1" goarch="$2"
 	[ "$goos" = "$HOST_GOOS" ] && [ "$goarch" = "$HOST_GOARCH" ] && return 0
@@ -58,6 +59,7 @@ cross_cc() {
 	linux/amd64) command -v x86_64-linux-gnu-gcc >/dev/null 2>&1 && echo "x86_64-linux-gnu-gcc" ;;
 	linux/arm64) command -v aarch64-linux-gnu-gcc >/dev/null 2>&1 && echo "aarch64-linux-gnu-gcc" ;;
 	linux/arm) command -v arm-linux-gnueabihf-gcc >/dev/null 2>&1 && echo "arm-linux-gnueabihf-gcc" ;;
+	windows/amd64) command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1 && echo "x86_64-w64-mingw32-gcc" ;;
 	esac
 	return 0
 }
@@ -101,7 +103,7 @@ for target in "$@"; do
 	fi
 	cc="$(cross_cc "$goos" "$goarch")"
 	if [ "$goos" != "darwin" ] && { [ "$goos" != "$HOST_GOOS" ] || [ "$goarch" != "$HOST_GOARCH" ]; } && [ -z "$cc" ]; then
-		die "no C cross compiler for $goos/$goarch; install one (for example gcc-aarch64-linux-gnu) or build it in CI"
+		die "no C cross compiler for $goos/$goarch; install one (gcc-aarch64-linux-gnu for linux/arm64, gcc-mingw-w64-x86-64 for windows/amd64) or build it in CI"
 	fi
 
 	extension="$(library_extension "$goos")"

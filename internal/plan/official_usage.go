@@ -55,6 +55,15 @@ type officialUsageItem struct {
 	Completion int64
 	Cached     int64
 	CostMicro  int64
+	// Model is the model that actually ran, taken from metadata.raw_model ("deepseek/
+	// deepseek-v4.1-flash"), which is more precise than the routed name the record carries
+	// in aiModelName ("cline-pass/deepseek-v4.1-flash").
+	Model string
+	// Credits is what the request deducted from the credit balance. A flat subscription
+	// (ClinePass) reports 0 for every record.
+	Credits int64
+	BYOK    bool
+	Stream  bool
 }
 
 // officialUsageRawItem mirrors the upstream JSON.
@@ -62,6 +71,7 @@ type officialUsageRawItem struct {
 	ID               string `json:"id"`
 	CreatedAt        string `json:"createdAt"`
 	CostUnits        int64  `json:"costUsd"`
+	CreditsUsed      int64  `json:"creditsUsed"`
 	Operation        string `json:"operation"`
 	AIModelTypeName  string `json:"aiModelTypeName"`
 	AIModelName      string `json:"aiModelName"`
@@ -69,12 +79,35 @@ type officialUsageRawItem struct {
 	CompletionTokens int64  `json:"completionTokens"`
 	TotalTokens      int64  `json:"totalTokens"`
 	CachedTokens     int64  `json:"cachedTokens"`
+	// Metadata carries the routing detail of the request. It has no final-provider field:
+	// the channel actually used is only visible on the response body of the live request.
+	Metadata struct {
+		IsBYOK   bool   `json:"is_byok"`
+		IsStream bool   `json:"is_stream"`
+		RawModel string `json:"raw_model"`
+		ModelTyp string `json:"model_type"`
+	} `json:"metadata"`
 }
 
 type officialUsageSeries struct {
 	Requests []int64 `json:"requests"`
 	Tokens   []int64 `json:"tokens"`
 	Cached   []int64 `json:"cached"`
+}
+
+// UsageModelRow is one model's share of a window. It is derived from records the collector
+// already holds (or from the daily rows it already fetched), so the breakdown needs no
+// extra upstream call.
+type UsageModelRow struct {
+	Model        string  `json:"model"`
+	Requests     int64   `json:"requests"`
+	InputTokens  int64   `json:"input_tokens"`
+	OutputTokens int64   `json:"output_tokens"`
+	TotalTokens  int64   `json:"total_tokens"`
+	CachedTokens int64   `json:"cached_tokens"`
+	CacheRatio   float64 `json:"cache_ratio"`
+	CostUSD      float64 `json:"cost_usd"`
+	CreditsUsed  int64   `json:"credits_used,omitempty"`
 }
 
 // UsageWindow is the official aggregate for one page window.
@@ -90,6 +123,14 @@ type UsageWindow struct {
 	CacheRatio   float64             `json:"cache_ratio"`
 	CostUSD      float64             `json:"cost_usd"`
 	Series       officialUsageSeries `json:"series"`
+	// Models splits the same window by model, largest first. For a window built from the
+	// daily totals it carries tokens and cost only, because those rows have nothing else.
+	Models []UsageModelRow `json:"models,omitempty"`
+	// CreditsUsed sums the credits the window consumed; 0 on a flat subscription.
+	CreditsUsed int64 `json:"credits_used,omitempty"`
+	// BYOKRequests and StreamRequests describe the same records the totals come from.
+	BYOKRequests   int64 `json:"byok_requests,omitempty"`
+	StreamRequests int64 `json:"stream_requests,omitempty"`
 	// Covered is false when the retained records do not reach back to the start of the
 	// window, which makes the numbers below a lower bound rather than a total.
 	Covered bool `json:"covered"`
@@ -190,6 +231,12 @@ func parseOfficialItem(raw officialUsageRawItem) (officialUsageItem, bool) {
 	if errParse != nil {
 		return officialUsageItem{}, false
 	}
+	// metadata.raw_model is the model that actually ran; the record's own aiModelName is
+	// the routed name the request asked for.
+	model := strings.TrimSpace(raw.Metadata.RawModel)
+	if model == "" {
+		model = strings.TrimSpace(raw.AIModelName)
+	}
 	return officialUsageItem{
 		ID:         raw.ID,
 		At:         at,
@@ -197,7 +244,55 @@ func parseOfficialItem(raw officialUsageRawItem) (officialUsageItem, bool) {
 		Completion: raw.CompletionTokens,
 		Cached:     raw.CachedTokens,
 		CostMicro:  raw.CostUnits,
+		Model:      model,
+		Credits:    raw.CreditsUsed,
+		BYOK:       raw.Metadata.IsBYOK,
+		Stream:     raw.Metadata.IsStream,
 	}, true
+}
+
+// addModelRow folds one record into the per-model rows of a window. counted is false for
+// rows built from the daily totals, which have neither a request count nor cache columns.
+func addModelRow(rows map[string]*UsageModelRow, model string, prompt, completion, cached, costMicro, credits int64, counted bool) {
+	if strings.TrimSpace(model) == "" {
+		model = "未知模型"
+	}
+	row, ok := rows[model]
+	if !ok {
+		row = &UsageModelRow{Model: model}
+		rows[model] = row
+	}
+	if counted {
+		row.Requests++
+	}
+	row.InputTokens += prompt
+	row.OutputTokens += completion
+	row.TotalTokens += prompt + completion
+	row.CachedTokens += cached
+	row.CostUSD += float64(costMicro) / microUSD
+	row.CreditsUsed += credits
+}
+
+// modelRows finishes the per-model view: cache ratio per row, largest first. Rows with the
+// same size fall back to the model name so the order is stable between refreshes.
+func modelRows(rows map[string]*UsageModelRow) []UsageModelRow {
+	if len(rows) == 0 {
+		return nil
+	}
+	out := make([]UsageModelRow, 0, len(rows))
+	for _, row := range rows {
+		if row.InputTokens > 0 {
+			row.CacheRatio = float64(row.CachedTokens) / float64(row.InputTokens)
+		}
+		out = append(out, *row)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].TotalTokens != out[j].TotalTokens {
+			return out[i].TotalTokens > out[j].TotalTokens
+		}
+		return out[i].Model < out[j].Model
+	})
+	return out
 }
 
 // fetch pages from the newest record backwards until it reaches records it already has,
@@ -422,6 +517,7 @@ func (c *officialUsageCollector) aggregate(now time.Time, accountCreated time.Ti
 		if width <= 0 {
 			width = time.Second
 		}
+		rows := make(map[string]*UsageModelRow, 8)
 		for _, item := range items {
 			if item.At.Before(from) {
 				continue
@@ -432,6 +528,14 @@ func (c *officialUsageCollector) aggregate(now time.Time, accountCreated time.Ti
 			window.TotalTokens += item.Prompt + item.Completion
 			window.CachedTokens += item.Cached
 			window.CostUSD += float64(item.CostMicro) / microUSD
+			window.CreditsUsed += item.Credits
+			if item.BYOK {
+				window.BYOKRequests++
+			}
+			if item.Stream {
+				window.StreamRequests++
+			}
+			addModelRow(rows, item.Model, item.Prompt, item.Completion, item.Cached, item.CostMicro, item.Credits, true)
 			bucket := int(item.At.Sub(from) / width)
 			if bucket < 0 {
 				bucket = 0
@@ -446,6 +550,7 @@ func (c *officialUsageCollector) aggregate(now time.Time, accountCreated time.Ti
 		if window.InputTokens > 0 {
 			window.CacheRatio = float64(window.CachedTokens) / float64(window.InputTokens)
 		}
+		window.Models = modelRows(rows)
 		out[spec.Label] = window
 	}
 	return out
@@ -501,6 +606,7 @@ func officialDailyWindow(rows []dailyUsageItem, now time.Time, accountCreated ti
 			Cached:   make([]int64, days),
 		},
 	}
+	models := make(map[string]*UsageModelRow, 8)
 	for _, row := range rows {
 		date, errParse := time.Parse("2006-01-02", strings.TrimSpace(row.Date))
 		if errParse != nil {
@@ -515,6 +621,19 @@ func officialDailyWindow(rows []dailyUsageItem, now time.Time, accountCreated ti
 		window.TotalTokens += row.PromptTokens + row.CompletionTokens
 		window.CostUSD += float64(row.CostUnits) / microUSD
 		window.Series.Tokens[index] += row.PromptTokens + row.CompletionTokens
+		// The daily rows carry the routed model name, not the raw one, and no cache or
+		// credit columns: the per-model table says so instead of showing zeros.
+		addModelRow(models, rowModelName(row), row.PromptTokens, row.CompletionTokens, 0, row.CostUnits, 0, false)
 	}
+	window.Models = modelRows(models)
 	return window
+}
+
+// rowModelName is what a daily row calls its model. The routed name is the only one the
+// daily endpoint reports.
+func rowModelName(row dailyUsageItem) string {
+	if name := strings.TrimSpace(row.AIModelName); name != "" {
+		return name
+	}
+	return strings.TrimSpace(row.AIModelTypeName)
 }

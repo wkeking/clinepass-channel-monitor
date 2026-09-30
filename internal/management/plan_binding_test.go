@@ -36,7 +36,19 @@ func fakeClineAPI(t *testing.T, now time.Time) *httptest.Server {
 				"createdAt":   now.AddDate(0, 0, -30).Format(time.RFC3339Nano),
 			})
 		case "/users/me/plan":
-			write(map[string]any{"plan": map[string]any{"displayName": "Cline Pass (Monthly)", "pricePerSeatCents": 999}})
+			write(map[string]any{
+				"plan": map[string]any{
+					"displayName":       "Cline Pass (Monthly)",
+					"pricePerSeatCents": 999,
+					"description":       "Fixture plan description.",
+					"interval":          "Monthly",
+					"type":              "individual",
+					"isActive":          true,
+					"features":          map[string]any{"included": []string{"Benefit one", "Benefit two"}},
+				},
+				"currentPeriodStart": now.AddDate(0, 0, -12).Format(time.RFC3339),
+				"currentPeriodEnd":   now.AddDate(0, 0, 18).Format(time.RFC3339),
+			})
 		case "/users/me/plan/usage-limits":
 			write(map[string]any{"limits": []map[string]any{
 				{"type": "five_hour", "percentUsed": 16, "resetsAt": now.Add(30 * time.Minute).Format(time.RFC3339Nano)},
@@ -45,11 +57,13 @@ func fakeClineAPI(t *testing.T, now time.Time) *httptest.Server {
 		case "/users/usr-fixture0001/usages":
 			write(map[string]any{"items": []map[string]any{
 				{"id": "usg-fixture0001", "createdAt": now.Add(-10 * time.Minute).Format(time.RFC3339Nano),
-					"costUsd": 1000000, "operation": "chat_completion",
-					"promptTokens": 1000, "completionTokens": 100, "totalTokens": 1100, "cachedTokens": 800},
+					"costUsd": 1000000, "creditsUsed": 0, "operation": "chat_completion",
+					"promptTokens": 1000, "completionTokens": 100, "totalTokens": 1100, "cachedTokens": 800,
+					"metadata": map[string]any{"raw_model": "deepseek/deepseek-v4.1-flash", "is_stream": true, "is_byok": false}},
 				{"id": "usg-fixture0002", "createdAt": now.Add(-90 * time.Minute).Format(time.RFC3339Nano),
-					"costUsd": 500000, "operation": "chat_completion",
-					"promptTokens": 2000, "completionTokens": 200, "totalTokens": 2200, "cachedTokens": 900},
+					"costUsd": 500000, "creditsUsed": 0, "operation": "chat_completion",
+					"promptTokens": 2000, "completionTokens": 200, "totalTokens": 2200, "cachedTokens": 900,
+					"metadata": map[string]any{"raw_model": "z-ai/glm-5.3", "is_stream": true, "is_byok": false}},
 			}, "nextToken": "", "total": 2})
 		case "/users/usr-fixture0001/usages/daily":
 			to := time.Now().UTC()
@@ -114,6 +128,21 @@ func TestHealthBindsToTheLivePlanSnapshot(t *testing.T) {
 	}
 	if week, ok := account.Windows["7d"]; !ok || week.Detail {
 		t.Errorf("the 7d window must come from the daily totals and report detail=false: %+v", week)
+	}
+	// The plan detail and the per-model split both come from responses the poller already
+	// fetches; they must reach the page without an extra upstream call.
+	if resp.Plan.PlanDescription == "" || len(resp.Plan.PlanBenefits) != 2 || resp.Plan.PlanPeriodEnd == "" {
+		t.Errorf("the plan detail must reach the page: %+v", resp.Plan)
+	}
+	models := account.Windows["24h"].Models
+	if len(models) != 2 {
+		t.Fatalf("the 24h window must carry its per-model split: %+v", models)
+	}
+	if models[0].Model != "z-ai/glm-5.3" {
+		t.Errorf("per-model rows come from metadata.raw_model, largest first: %+v", models)
+	}
+	if account.Windows["24h"].StreamRequests != 2 {
+		t.Errorf("the window must count its streamed records: %+v", account.Windows["24h"])
 	}
 	if account.Tokens.TotalTokens == 0 || account.Tokens.BalanceUSD == 0 {
 		t.Errorf("the official totals must reach the page: %+v", account.Tokens)

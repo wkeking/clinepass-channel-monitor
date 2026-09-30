@@ -102,28 +102,48 @@ type AccountSnapshot struct {
 	Available bool   `json:"available"`
 	// Rejected marks a credential the upstream refused (401/403). The page hides those from
 	// the account picker; /health still lists them for diagnosis.
-	Rejected    bool                   `json:"rejected,omitempty"`
-	Account     string                 `json:"account,omitempty"`
-	PlanName    string                 `json:"plan_name,omitempty"`
-	PlanPrice   string                 `json:"plan_price,omitempty"`
-	Limits      []Window               `json:"limits,omitempty"`
-	Tokens      Tokens                 `json:"tokens"`
-	TokensError string                 `json:"tokens_error,omitempty"`
-	Windows     map[string]UsageWindow `json:"windows,omitempty"`
-	Usage       UsageState             `json:"usage"`
-	FetchedAt   string                 `json:"fetched_at,omitempty"`
-	Error       string                 `json:"error,omitempty"`
+	Rejected  bool   `json:"rejected,omitempty"`
+	Account   string `json:"account,omitempty"`
+	PlanName  string `json:"plan_name,omitempty"`
+	PlanPrice string `json:"plan_price,omitempty"`
+	// The rest of the subscription, all from the same plan call: what the plan includes,
+	// how it bills, and when the current period ends.
+	PlanDescription string                 `json:"plan_description,omitempty"`
+	PlanInterval    string                 `json:"plan_interval,omitempty"`
+	PlanType        string                 `json:"plan_type,omitempty"`
+	PlanActive      bool                   `json:"plan_active,omitempty"`
+	PlanBenefits    []string               `json:"plan_benefits,omitempty"`
+	PlanPeriodStart string                 `json:"plan_period_start,omitempty"`
+	PlanPeriodEnd   string                 `json:"plan_period_end,omitempty"`
+	PlanCanceledAt  string                 `json:"plan_canceled_at,omitempty"`
+	Limits          []Window               `json:"limits,omitempty"`
+	Tokens          Tokens                 `json:"tokens"`
+	TokensError     string                 `json:"tokens_error,omitempty"`
+	Windows         map[string]UsageWindow `json:"windows,omitempty"`
+	Usage           UsageState             `json:"usage"`
+	FetchedAt       string                 `json:"fetched_at,omitempty"`
+	Error           string                 `json:"error,omitempty"`
 }
 
 // Quota is the cached view served to the page.
 type Quota struct {
-	Available bool     `json:"available"`
-	Source    string   `json:"source"`
-	Account   string   `json:"account,omitempty"`
-	PlanName  string   `json:"plan_name,omitempty"`
-	PlanPrice string   `json:"plan_price,omitempty"`
-	Limits    []Window `json:"limits"`
-	Tokens    Tokens   `json:"tokens"`
+	Available bool   `json:"available"`
+	Source    string `json:"source"`
+	Account   string `json:"account,omitempty"`
+	PlanName  string `json:"plan_name,omitempty"`
+	PlanPrice string `json:"plan_price,omitempty"`
+	// The plan detail mirrors the primary account's: description, billing interval, the
+	// benefit list and the current billing period.
+	PlanDescription string   `json:"plan_description,omitempty"`
+	PlanInterval    string   `json:"plan_interval,omitempty"`
+	PlanType        string   `json:"plan_type,omitempty"`
+	PlanActive      bool     `json:"plan_active,omitempty"`
+	PlanBenefits    []string `json:"plan_benefits,omitempty"`
+	PlanPeriodStart string   `json:"plan_period_start,omitempty"`
+	PlanPeriodEnd   string   `json:"plan_period_end,omitempty"`
+	PlanCanceledAt  string   `json:"plan_canceled_at,omitempty"`
+	Limits          []Window `json:"limits"`
+	Tokens          Tokens   `json:"tokens"`
 	// TokensError explains why the official token totals are missing instead of leaving the
 	// page to show zeros.
 	TokensError string `json:"tokens_error,omitempty"`
@@ -276,21 +296,79 @@ func quotaWindowLabel(kind string) string {
 	}
 }
 
-func (c *planClient) plan() (struct {
-	Name     string  `json:"displayName"`
-	PriceUSD float64 `json:"pricePerSeatCents"`
-}, error) {
+// planDetails is the subscription the account is on, plus the billing period the plan
+// endpoint reports next to it. Everything here comes from one GET /users/me/plan.
+type planDetails struct {
+	Name        string
+	PriceUSD    float64
+	Description string
+	Interval    string
+	Type        string
+	Active      bool
+	Benefits    []string
+	PeriodStart string
+	PeriodEnd   string
+	CanceledAt  string
+}
+
+func (c *planClient) plan() (planDetails, error) {
 	var payload struct {
 		Plan struct {
 			DisplayName       string `json:"displayName"`
 			PricePerSeatCents int64  `json:"pricePerSeatCents"`
+			Description       string `json:"description"`
+			Interval          string `json:"interval"`
+			Type              string `json:"type"`
+			IsActive          bool   `json:"isActive"`
+			Features          struct {
+				Included []string `json:"included"`
+			} `json:"features"`
 		} `json:"plan"`
+		CurrentPeriodStart string `json:"currentPeriodStart"`
+		CurrentPeriodEnd   string `json:"currentPeriodEnd"`
+		CanceledAt         string `json:"canceledAt"`
 	}
 	errGet := c.get("/users/me/plan", &payload)
-	return struct {
-		Name     string  `json:"displayName"`
-		PriceUSD float64 `json:"pricePerSeatCents"`
-	}{Name: payload.Plan.DisplayName, PriceUSD: float64(payload.Plan.PricePerSeatCents) / 100}, errGet
+	return planDetails{
+		Name:        payload.Plan.DisplayName,
+		PriceUSD:    float64(payload.Plan.PricePerSeatCents) / 100,
+		Description: payload.Plan.Description,
+		Interval:    payload.Plan.Interval,
+		Type:        payload.Plan.Type,
+		Active:      payload.Plan.IsActive,
+		Benefits:    payload.Plan.Features.Included,
+		PeriodStart: payload.CurrentPeriodStart,
+		PeriodEnd:   payload.CurrentPeriodEnd,
+		CanceledAt:  payload.CanceledAt,
+	}, errGet
+}
+
+// planPriceLabel renders the price with the billing interval the plan itself reports,
+// instead of assuming every subscription is monthly.
+func planPriceLabel(priceUSD float64, interval string) string {
+	if priceUSD <= 0 {
+		return ""
+	}
+	if suffix := billingIntervalLabel(interval); suffix != "" {
+		return fmt.Sprintf("$%.2f / %s", priceUSD, suffix)
+	}
+	return fmt.Sprintf("$%.2f", priceUSD)
+}
+
+// billingIntervalLabel maps the plan interval to a short Chinese unit.
+func billingIntervalLabel(interval string) string {
+	switch strings.ToLower(strings.TrimSpace(interval)) {
+	case "monthly", "month":
+		return "月"
+	case "yearly", "annual", "annually", "year":
+		return "年"
+	case "weekly", "week":
+		return "周"
+	case "":
+		return ""
+	default:
+		return interval
+	}
 }
 
 // dailyUsage returns the account totals for a date range of at most 31 days.
@@ -508,9 +586,15 @@ func (p *Poller) refreshAccount(cfg config.Config, account *planAccount) {
 	}
 	if plan, errPlan := client.plan(); errPlan == nil {
 		snapshot.PlanName = plan.Name
-		if plan.PriceUSD > 0 {
-			snapshot.PlanPrice = fmt.Sprintf("$%.2f / 月", plan.PriceUSD)
-		}
+		snapshot.PlanPrice = planPriceLabel(plan.PriceUSD, plan.Interval)
+		snapshot.PlanDescription = plan.Description
+		snapshot.PlanInterval = plan.Interval
+		snapshot.PlanType = plan.Type
+		snapshot.PlanActive = plan.Active
+		snapshot.PlanBenefits = plan.Benefits
+		snapshot.PlanPeriodStart = plan.PeriodStart
+		snapshot.PlanPeriodEnd = plan.PeriodEnd
+		snapshot.PlanCanceledAt = plan.CanceledAt
 	}
 	snapshot.Limits = limits
 	snapshot.Available = true
@@ -592,6 +676,14 @@ func (p *Poller) publish() {
 		quota.Account = snapshot.Account
 		quota.PlanName = snapshot.PlanName
 		quota.PlanPrice = snapshot.PlanPrice
+		quota.PlanDescription = snapshot.PlanDescription
+		quota.PlanInterval = snapshot.PlanInterval
+		quota.PlanType = snapshot.PlanType
+		quota.PlanActive = snapshot.PlanActive
+		quota.PlanBenefits = snapshot.PlanBenefits
+		quota.PlanPeriodStart = snapshot.PlanPeriodStart
+		quota.PlanPeriodEnd = snapshot.PlanPeriodEnd
+		quota.PlanCanceledAt = snapshot.PlanCanceledAt
 		quota.Limits = snapshot.Limits
 		quota.Tokens = snapshot.Tokens
 		quota.TokensError = snapshot.TokensError

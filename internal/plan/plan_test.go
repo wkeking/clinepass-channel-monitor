@@ -63,7 +63,19 @@ func fakeClineAPI(t *testing.T, now time.Time) *httptest.Server {
 				"createdAt":   now.AddDate(0, 0, -30).Format(time.RFC3339Nano),
 			})
 		case r.URL.Path == "/users/me/plan":
-			write(map[string]any{"plan": map[string]any{"displayName": "Cline Pass (Monthly)", "pricePerSeatCents": 999}})
+			write(map[string]any{
+				"plan": map[string]any{
+					"displayName":       "Cline Pass (Monthly)",
+					"pricePerSeatCents": 999,
+					"description":       "Fixture plan description.",
+					"interval":          "Monthly",
+					"type":              "individual",
+					"isActive":          true,
+					"features":          map[string]any{"included": []string{"Benefit one", "Benefit two"}},
+				},
+				"currentPeriodStart": now.AddDate(0, 0, -12).Format(time.RFC3339),
+				"currentPeriodEnd":   now.AddDate(0, 0, 18).Format(time.RFC3339),
+			})
 		case r.URL.Path == "/users/me/plan/usage-limits":
 			write(map[string]any{"limits": []map[string]any{
 				{"type": "five_hour", "percentUsed": 16, "resetsAt": now.Add(30 * time.Minute).Format(time.RFC3339Nano)},
@@ -125,6 +137,17 @@ func TestPlanPollerRefreshServesOfficialWindows(t *testing.T) {
 	}
 	if quota.PlanName != "Cline Pass (Monthly)" || quota.PlanPrice != "$9.99 / 月" {
 		t.Errorf("套餐 = %q %q", quota.PlanName, quota.PlanPrice)
+	}
+	// The same plan call also carries the description, the benefits and the billing
+	// period: they must reach the page without any extra upstream request.
+	if quota.PlanDescription != "Fixture plan description." || quota.PlanInterval != "Monthly" || !quota.PlanActive {
+		t.Errorf("套餐详情 = %q %q active=%v", quota.PlanDescription, quota.PlanInterval, quota.PlanActive)
+	}
+	if len(quota.PlanBenefits) != 2 || quota.PlanBenefits[0] != "Benefit one" {
+		t.Errorf("套餐权益 = %v", quota.PlanBenefits)
+	}
+	if quota.PlanPeriodStart == "" || quota.PlanPeriodEnd == "" {
+		t.Errorf("订阅周期 = %q ~ %q，期望两端都有值", quota.PlanPeriodStart, quota.PlanPeriodEnd)
 	}
 	totals := quota.Tokens
 	if totals.TotalTokens != 3300 || totals.InputTokens != 3000 || totals.OutputTokens != 300 {

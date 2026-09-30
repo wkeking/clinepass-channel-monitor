@@ -19,8 +19,9 @@ v0.1.x 注册了 `response_before_translator` 钩子。CPA 在每个流式帧都
 
 ## 能力一览
 
-- 管理页展示：套餐名与月费、5 小时 / 每周 / 每月限额进度与重置时间、近 31 天官方 Token 总量（输入/输出）、参考成本、余额、官方计费条目数；
+- 管理页展示：套餐名与月费、套餐说明与权益清单、订阅周期与取消状态、5 小时 / 每周 / 每月限额进度与重置时间、近 31 天官方 Token 总量（输入/输出）、参考成本、余额、官方计费条目数；
 - 概览卡片（官方口径）：近 1 小时 / 近 24 小时的官方计费请求数、总 Token 数、缓存命中率，以及近 7 天的官方逐日汇总（只有 token 与成本）；官方记录覆盖不到窗口起点时页面会标注「官方数值偏低」；
+- 官方用量明细：按模型拆开当前窗口（请求数、输入/输出 token、缓存命中率、参考成本、扣减 credits），并给出流式 / BYOK 条数；这份拆分来自已经拉到的记录，不产生额外上游调用；
 - 多凭据分别轮询：一个 CPA 里配置多个 Cline 条目或多把 key 时，每把 key 一个账号卡，页面顶部出现账号下拉（≥2 个凭据时）；
 - 凭据自动发现：读 CPA 自己的 `config.yaml`，通常不需要手填任何 key；key 只留在内存，不落盘、不打日志、不返回给页面；
 - 自诊断：`/health` 暴露 `plan`（完整套餐快照）、`plan_usage`（官方逐条用量的采集状态）、`plan_accounts`（每个凭据的来源、账号、可用性与错误）；
@@ -138,6 +139,12 @@ v0.1.x 的统计专用键（`require_routing_marker`、`unmatched_host_samples`�
 - 官方记录覆盖不到窗口起点时，标题下方会标出「官方数值偏低」；页面「概览」标题旁的感叹号里写明当前口径；
 - v0.1.x 的「平均延时 / 生成速度」两块是本机口径，数据来自已被移除的逐请求统计，v0.2.0 起不再显示；大数单位是 K / M / B / T（B = billion，十亿），例如 `1.77B token`。
 
+**套餐详情与订阅周期**：同一条 `/users/me/plan` 响应里还有套餐说明、权益清单（`features.included`）、计费周期（`interval`、`type`）与订阅周期（`currentPeriodStart` ~ `currentPeriodEnd`）。`canceledAt` 有值表示这个订阅**已取消但当前周期结束前仍然有效**，页面顶部会标出「已取消，<到期日> 到期」。这些字段一直都在同一条响应里，显示它们不需要任何新请求。
+
+**按模型明细**：同一个窗口可以按模型拆开。近 1 小时 / 近 24 小时取记录里的 `metadata.raw_model`（**真正跑的模型**，例如 `deepseek/deepseek-v4.1-flash`），并给出请求数、缓存命中率、参考成本与扣减的 credits；近 7 天窗口来自官方逐日汇总，官方只给**路由名**（例如 `cline-pass/deepseek-v4.1-flash`），也拿不到请求数与缓存列，所以那两列显示 `—`。这份拆分同样是从已经拉到的记录里算出来的，不产生额外上游调用。
+
+**官方记录里没有的东西**：最终上游渠道（`finalProvider`）、平均延时、TTFT、生成速度、失败状态码。渠道只出现在响应体的 `provider_metadata.gateway.routing` 里，需要插件待在请求路径上才能看到——这正是 v0.2.0 为性能移除的那部分，官方接口无法补回。
+
 **多个 Cline 条目 / 多把 key**：官方套餐与限额是**按账号**算的，所以插件把每把 key 当成一个账号分别轮询：
 
 - 发现范围：所有 base-url 命中 `hosts` 的 `openai-compatibility` 条目，以及名称恰为 `Cline` 的条目，取它们的 `api-keys` 与 `api-key-entries`（同一个 key 出现在多处只算一次，最多 8 个）；
@@ -221,7 +228,7 @@ v0.1.x 的 `/stats`、`/events`、`/export` 三条路由已移除，请求它们
 | 字段 | 含义 |
 |---|---|
 | `plugin` / `version` / `enabled` / `uptime` | 插件标识、版本、配置里的启用开关与本次加载后的运行时长 |
-| `plan` | 完整套餐快照，页面直接渲染它：`available`、`source`、`account`、`plan_name`、`plan_price`、`limits[]`（`percent_used` / `resets_at` / `resets_in`）、`tokens`（31 天输入/输出/总量、成本、余额、计费条目数）、`usage`、`fetched_at`、`error`、`accounts[]` |
+| `plan` | 完整套餐快照，页面直接渲染它：`available`、`source`、`account`、`plan_name`、`plan_price`、`plan_description`、`plan_interval` / `plan_type` / `plan_active`、`plan_benefits[]`、`plan_period_start` / `plan_period_end` / `plan_canceled_at`、`limits[]`（`percent_used` / `resets_at` / `resets_in`）、`tokens`（31 天输入/输出/总量、成本、余额、计费条目数）、`usage`、`fetched_at`、`error`、`accounts[]`；`accounts[].windows[1h\|24h\|7d]` 里另有 `models[]`（按模型拆分：`model` / `requests` / `input_tokens` / `output_tokens` / `cached_tokens` / `cache_ratio` / `cost_usd` / `credits_used`）、`stream_requests`、`byok_requests`、`credits_used` |
 | `plan_enabled` | 官方套餐轮询是否开启 |
 | `plan_usage` | 官方逐条用量的采集状态：`enabled`、`items`、`oldest`、`fetched_at`、`truncated`、`failures`、`retry_at`、`error` |
 | `plan_accounts` | 每个 Cline 凭据一行：`id`、`label`（掩码后的 key）、`source`（`plugin-config` / `config-file` / `host-auth`）、`available`、`rejected`、`account`、`items`、`oldest`、`truncated`、`failures`、`error` |

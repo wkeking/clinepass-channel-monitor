@@ -58,8 +58,11 @@ func fakeUsageAPI(t *testing.T, items *[]officialUsageRawItem) (*httptest.Server
 	return server, &pages
 }
 
+// usageItem builds one official record the way the upstream returns it. The routed name and
+// the raw model differ on purpose: the page shows the raw one, so a fixture whose only model
+// field was aiModelName would not catch the wrong field being read.
 func usageItem(id string, at time.Time, prompt, completion, cached, costMicro int64) officialUsageRawItem {
-	return officialUsageRawItem{
+	item := officialUsageRawItem{
 		ID:               id,
 		CreatedAt:        at.UTC().Format(time.RFC3339Nano),
 		Operation:        "chat_completion",
@@ -71,6 +74,10 @@ func usageItem(id string, at time.Time, prompt, completion, cached, costMicro in
 		CachedTokens:     cached,
 		CostUnits:        costMicro,
 	}
+	item.Metadata.RawModel = "deepseek/deepseek-v4.1-flash"
+	item.Metadata.ModelTyp = "cline-pass"
+	item.Metadata.IsStream = true
+	return item
 }
 
 func usageClient(t *testing.T, server *httptest.Server) *planClient {
@@ -96,6 +103,10 @@ func TestOfficialUsageWindowsAggregateOfficialRecords(t *testing.T) {
 		usageItem("usg-4", now.Add(-40*time.Hour), 700, 70, 200, 250_000),
 		{ID: "usg-broken", CreatedAt: "not-a-timestamp", PromptTokens: 999},
 	}
+	// A second model and a credit deduction, so the per-model split and the credit counter
+	// have something real to report.
+	items[1].Metadata.RawModel = "z-ai/glm-5.3"
+	items[1].CreditsUsed = 7
 	server, pages := fakeUsageAPI(t, &items)
 	collector := newTestCollector()
 	collector.fetch(usageClient(t, server), "usr-test", planDefaultUsageRefresh, now)
@@ -148,6 +159,23 @@ func TestOfficialUsageWindowsAggregateOfficialRecords(t *testing.T) {
 	if seriesTokens != day.TotalTokens || seriesRequests != day.Requests || seriesCached != day.CachedTokens {
 		t.Errorf("折线桶合计 (%d/%d/%d) 与窗口总计 (%d/%d/%d) 不一致",
 			seriesRequests, seriesTokens, seriesCached, day.Requests, day.TotalTokens, day.CachedTokens)
+	}
+	// The per-model split and the BYOK/stream/credit counters come from the same retained
+	// records, so they must describe exactly the same window.
+	if len(day.Models) != 2 {
+		t.Fatalf("24h 按模型 = %+v，期望两个模型（usg-2 换成另一把模型）", day.Models)
+	}
+	if day.Models[0].Model != "z-ai/glm-5.3" || day.Models[0].TotalTokens != 2200 || day.Models[0].Requests != 1 {
+		t.Errorf("按模型首行 = %+v，期望 token 最多的 glm-5.3", day.Models[0])
+	}
+	if day.Models[1].Model != "deepseek/deepseek-v4.1-flash" || day.Models[1].TotalTokens != 1540 {
+		t.Errorf("按模型次行 = %+v，期望 deepseek 两条的合计", day.Models[1])
+	}
+	if day.CreditsUsed != 7 || day.Models[0].CreditsUsed != 7 {
+		t.Errorf("credits = %d / %d，期望 7", day.CreditsUsed, day.Models[0].CreditsUsed)
+	}
+	if day.StreamRequests != 3 || day.BYOKRequests != 0 {
+		t.Errorf("窗口构成 = stream %d byok %d，期望 stream=3 byok=0", day.StreamRequests, day.BYOKRequests)
 	}
 }
 
@@ -363,11 +391,11 @@ func TestOfficialDailyWindowGroupsByNaturalDay(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	day := func(offset int) string { return now.AddDate(0, 0, offset).Format("2006-01-02") }
 	rows := []dailyUsageItem{
-		{Date: day(0), CostUnits: 1_000_000, PromptTokens: 1000, CompletionTokens: 100},
-		{Date: day(-1), CostUnits: 500_000, PromptTokens: 2000, CompletionTokens: 200},
-		{Date: day(-6), CostUnits: 250_000, PromptTokens: 400, CompletionTokens: 40},
+		{Date: day(0), CostUnits: 1_000_000, PromptTokens: 1000, CompletionTokens: 100, AIModelName: "cline-pass/deepseek-v4.1-flash"},
+		{Date: day(-1), CostUnits: 500_000, PromptTokens: 2000, CompletionTokens: 200, AIModelName: "cline-pass/glm-5.3"},
+		{Date: day(-6), CostUnits: 250_000, PromptTokens: 400, CompletionTokens: 40, AIModelName: "cline-pass/deepseek-v4.1-flash"},
 		// 窗口之外：7 天窗口是今天-6 ~ 今天
-		{Date: day(-7), CostUnits: 99_000_000, PromptTokens: 999_999, CompletionTokens: 9},
+		{Date: day(-7), CostUnits: 99_000_000, PromptTokens: 999_999, CompletionTokens: 9, AIModelName: "cline-pass/kimi-k3"},
 		{Date: "bad-date", CostUnits: 1, PromptTokens: 1},
 	}
 	window := officialDailyWindow(rows, now, now.AddDate(0, 0, -30))
@@ -383,6 +411,20 @@ func TestOfficialDailyWindowGroupsByNaturalDay(t *testing.T) {
 	}
 	if math.Abs(window.CostUSD-1.75) > 1e-9 {
 		t.Errorf("7d 成本 = %v，期望 1.75 USD（微美元换算）", window.CostUSD)
+	}
+	// The same rows already split the window by model; the daily endpoint reports no request
+	// count or cache columns, so those stay empty rather than zero.
+	if len(window.Models) != 2 {
+		t.Fatalf("7d 按模型 = %+v，期望两个模型", window.Models)
+	}
+	if window.Models[0].Model != "cline-pass/glm-5.3" || window.Models[0].TotalTokens != 2200 {
+		t.Errorf("按模型首行 = %+v，期望 token 最多的 glm-5.3", window.Models[0])
+	}
+	if window.Models[0].Requests != 0 || window.Models[0].CachedTokens != 0 {
+		t.Errorf("按日汇总没有请求数与缓存列，不应编造: %+v", window.Models[0])
+	}
+	if window.Models[1].Model != "cline-pass/deepseek-v4.1-flash" || window.Models[1].TotalTokens != 1540 {
+		t.Errorf("按模型次行 = %+v，期望 deepseek 两天的合计", window.Models[1])
 	}
 	if !window.Covered {
 		t.Errorf("账号创建于窗口之前，covered 应为 true")

@@ -58,6 +58,20 @@ input::placeholder{color:var(--muted)}
 .plan-head select{padding:5px 9px;font-size:12.5px;border-radius:9px;max-width:100%}
 .plan-warn{color:var(--warn)}
 .plan-err{color:var(--err)}
+/* 套餐详情：默认折叠，只有官方真给了说明或权益时才显示 */
+details.plan-detail{margin-top:14px;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:12px 16px}
+details.plan-detail summary{cursor:pointer;color:var(--muted);font-size:12.5px;font-weight:600;letter-spacing:.4px}
+details.plan-detail p{margin:10px 0 0;color:var(--fg);font-size:13px;line-height:1.7}
+details.plan-detail ul{margin:10px 0 0;padding-left:18px;color:var(--muted);font-size:12.5px;line-height:1.8}
+.wrap{overflow-x:auto;border:1px solid var(--line);border-radius:14px;background:var(--card)}
+table{width:100%;border-collapse:separate;border-spacing:0}
+th,td{padding:10px 13px;text-align:left;white-space:nowrap;vertical-align:middle}
+th{font-size:12px;color:var(--muted);font-weight:600;background:color-mix(in srgb,var(--card) 84%,var(--bg));border-bottom:1px solid var(--line)}
+td{border-bottom:1px solid var(--line);font-variant-numeric:tabular-nums}
+tbody tr:last-child td{border-bottom:none}
+td.num,th.num{text-align:right}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12.5px}
+.empty-row td{text-align:center;color:var(--muted);padding:20px}
 </style>
 </head>
 <body>
@@ -94,6 +108,11 @@ input::placeholder{color:var(--muted)}
       <span id="plan-head"></span>
     </div>
     <div class="plan" id="plan-cards"></div>
+    <details class="plan-detail hidden" id="plan-detail">
+      <summary id="plan-detail-summary">套餐详情</summary>
+      <p id="plan-desc" class="hidden"></p>
+      <ul id="plan-benefits" class="hidden"></ul>
+    </details>
     <div class="msg hidden" id="plan-msg"></div>
   </section>
 
@@ -101,6 +120,15 @@ input::placeholder{color:var(--muted)}
     <h2>概览<span class="info" id="overview-info" tabindex="0" aria-describedby="overview-info-tip" aria-label="概览口径说明">!<span class="tip" id="overview-info-tip" role="tooltip"></span></span></h2>
     <div class="sub hidden" id="overview-warn" style="margin:-4px 0 12px"></div>
     <div class="cards" id="cards"></div>
+  </section>
+
+  <section>
+    <h2>官方用量明细<span class="info" id="models-info" tabindex="0" aria-describedby="models-info-tip" aria-label="按模型明细口径说明">!<span class="tip" id="models-info-tip" role="tooltip"></span></span></h2>
+    <div class="sub hidden" id="models-note" style="margin:-4px 0 12px"></div>
+    <div class="wrap"><table id="models"><thead>
+      <tr><th>模型</th><th class="num">请求</th><th class="num">输入 / 输出</th><th class="num">缓存命中率</th><th class="num">参考成本</th><th class="num">扣 credits</th></tr>
+    </thead><tbody></tbody></table></div>
+    <div class="msg hidden" id="models-msg"></div>
   </section>
 </main>
 <script>
@@ -131,6 +159,8 @@ function scaled(v){
 function fmtTime(ts){if(!ts)return "-";const d=new Date(ts);if(isNaN(d))return ts;const p=x=>String(x).padStart(2,"0");return d.getFullYear()+"-"+p(d.getMonth()+1)+"-"+p(d.getDate())+" "+p(d.getHours())+":"+p(d.getMinutes())+":"+p(d.getSeconds())}
 // 官方区间有时是空的（还没取到汇总），此时不要渲染出一个空的 "~"。
 function dateRange(from,to){if(!from&&!to)return "";return "（"+(from||"")+" ~ "+(to||"")+"）"}
+// 只到天：订阅周期用得上，不需要时分秒
+function fmtDate(ts){if(!ts)return "";const d=new Date(ts);if(isNaN(d))return String(ts).slice(0,10);const p=x=>String(x).padStart(2,"0");return d.getFullYear()+"-"+p(d.getMonth()+1)+"-"+p(d.getDate())}
 
 async function api(path){
   const url=new URL(BASE+path,location.origin);
@@ -221,6 +251,7 @@ function renderPlan(plan){
   if(!view||view.available===false){
     cards.innerHTML="";
     head.innerHTML="";
+    renderPlanDetail(null);
     msg.classList.remove("hidden");
     msg.className="msg plan-err";
     const error=(view&&view.error)||(plan&&plan.error)||"";
@@ -245,9 +276,15 @@ function renderPlan(plan){
   if(view.plan_price)bits.push(esc(view.plan_price));
   if(view.account)bits.push("账号 "+esc(view.account));
   if(view.fetched_at)bits.push("套餐更新于 "+esc(fmtTime(view.fetched_at).slice(11,19)));
+  if(view.plan_interval)bits.push(esc(view.plan_interval));
+  const periodStart=fmtDate(view.plan_period_start), periodEnd=fmtDate(view.plan_period_end);
+  if(periodStart&&periodEnd)bits.push("周期 "+esc(periodStart)+" ~ "+esc(periodEnd));
+  // canceledAt 有值说明这个订阅已经取消，但当前周期结束前仍然有效。
+  if(view.plan_canceled_at)bits.push('<span class="plan-warn">已取消'+(periodEnd?"，"+esc(periodEnd)+" 到期":"")+"</span>");
   if(view.tokens_error)bits.push('<span class="plan-warn">官方汇总未取到：'+esc(view.tokens_error)+"</span>");
   if(view.usage&&view.usage.error)bits.push('<span class="plan-warn">官方逐条用量刷新失败：'+esc(view.usage.error)+"</span>");
   head.innerHTML=bits.join(" · ");
+  renderPlanDetail(view);
 
   const blocks=(view.limits||[]).map(function(limit){
     const pct=n(limit.percent_used);
@@ -320,6 +357,63 @@ function renderOverviewNote(view){
   warn.classList.toggle("hidden",warns.length===0);
 }
 
+// 套餐详情来自同一个 /users/me/plan 响应：说明、权益列表、计费周期。官方没给就整块不显示。
+function renderPlanDetail(view){
+  const box=$("plan-detail"), desc=$("plan-desc"), benefits=$("plan-benefits"), summary=$("plan-detail-summary");
+  if(!box)return;
+  const text=(view&&view.plan_description)||"";
+  const items=(view&&view.plan_benefits)||[];
+  box.classList.toggle("hidden",!text&&!items.length);
+  desc.classList.toggle("hidden",!text);
+  desc.textContent=text;
+  benefits.classList.toggle("hidden",!items.length);
+  benefits.innerHTML=items.map(item=>"<li>"+esc(item)+"</li>").join("");
+  const bits=[];
+  if(view&&view.plan_interval)bits.push(view.plan_interval);
+  if(view&&view.plan_type)bits.push(view.plan_type);
+  summary.textContent="套餐详情"+(bits.length?"（"+bits.join(" · ")+"）":"");
+}
+
+// 官方用量明细：按模型拆开当前窗口。数据全部来自已经拉到的记录（逐条用量或逐日汇总），
+// 不产生任何额外请求。
+function renderModels(plan){
+  const view=officialView(plan), off=view.off;
+  const body=$("models").querySelector("tbody"), note=$("models-note"), tip=$("models-info-tip");
+  const rows=(off&&off.models)||[];
+  const detail=!!(off&&off.detail!==false);
+  if(!rows.length){
+    body.innerHTML='<tr class="empty-row"><td colspan="6">'+
+      esc(off?"该窗口官方没有分模型明细。":"该账号在这个窗口还没有官方数据。")+"</td></tr>";
+  }else{
+    body.innerHTML=rows.map(row=>"<tr>"+
+      '<td><span class="mono">'+esc(row.model||"—")+"</span></td>"+
+      '<td class="num">'+(detail?int(row.requests):"—")+"</td>"+
+      '<td class="num">'+scaled(row.input_tokens)+" / "+scaled(row.output_tokens)+"</td>"+
+      '<td class="num">'+(detail?fixed(n(row.cache_ratio)*100,2)+"%":"—")+"</td>"+
+      '<td class="num">'+(row.cost_usd?"$"+fixed(row.cost_usd,4):"—")+"</td>"+
+      '<td class="num">'+(row.credits_used?int(row.credits_used):"—")+"</td>"+
+      "</tr>").join("");
+  }
+  const bits=[];
+  if(detail){
+    bits.push("官方逐条 "+int(off.requests)+" 条");
+    bits.push("流式 "+int(off.stream_requests)+" 条");
+    if(n(off.byok_requests))bits.push("BYOK "+int(off.byok_requests)+" 条");
+    bits.push(off.credits_used?("扣 credits "+int(off.credits_used)):"未扣 credits（包月套餐）");
+  }else if(off){
+    bits.push("该窗口来自官方逐日汇总，只有 token 与成本");
+  }
+  note.textContent=bits.join(" · ");
+  note.classList.toggle("hidden",bits.length===0);
+  if(tip){
+    const notes=["按官方用量记录里的模型聚合；同一个账号下其他客户端（Cline IDE 等）的请求也在里面。"];
+    if(detail)notes.push("模型名取记录里的 metadata.raw_model，也就是真正跑的那个模型。");
+    else notes.push("近 7 天窗口来自官方逐日汇总，官方只给路由名（带供应商前缀的那种），也拿不到请求数与缓存列。");
+    notes.push("官方记录里没有最终上游渠道，也没有平均延时与解码速度。");
+    tip.textContent=notes.join("\n");
+  }
+}
+
 function renderCards(plan){
   const view=officialView(plan), off=view.off;
   const tok=view.account.tokens||{};
@@ -382,6 +476,7 @@ async function load(){
     // can still have usable official usage, and a failed account must never leave the
     // previous account's numbers on screen.
     renderCards(health.plan);
+    renderModels(health.plan);
     $("gate").classList.add("hidden");
   }catch(err){
     if(err.code===401||err.code===403){
@@ -397,8 +492,8 @@ $("save").addEventListener("click",()=>{const v=$("token").value.trim();if(!v)re
 $("token").addEventListener("keydown",e=>{if(e.key==="Enter")$("save").click()});
 $("forget").addEventListener("click",()=>{store.del(TOKEN_KEY);$("token").value="";$("gate").classList.remove("hidden");$("statusline").textContent="已清除本机保存的密钥"});
 $("refresh").addEventListener("click",()=>load());
-$("window").addEventListener("change",()=>{renderCards(planSnapshot||{})});
-$("plan-account").addEventListener("change",()=>{store.set(PLAN_ACCOUNT_KEY,$("plan-account").value);renderPlan(planSnapshot||{});renderCards(planSnapshot||{})});
+$("window").addEventListener("change",()=>{renderCards(planSnapshot||{});renderModels(planSnapshot||{})});
+$("plan-account").addEventListener("change",()=>{store.set(PLAN_ACCOUNT_KEY,$("plan-account").value);renderPlan(planSnapshot||{});renderCards(planSnapshot||{});renderModels(planSnapshot||{})});
 
 if(!store.get(TOKEN_KEY))$("gate").classList.remove("hidden");
 load();

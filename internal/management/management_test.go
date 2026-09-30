@@ -90,6 +90,21 @@ func TestHealthPlanSnapshotRenders(t *testing.T) {
 	if usage := account.Usage; usage.FetchedAt == "" || usage.Items == 0 {
 		t.Errorf("the page needs the collector's own fetch time and item count: %+v", usage)
 	}
+	// The plan detail and the per-model rows ride along in the same responses: the page
+	// shows them without asking Cline for anything else.
+	if payload.Plan.PlanDescription == "" || len(payload.Plan.PlanBenefits) == 0 || payload.Plan.PlanPeriodEnd == "" {
+		t.Errorf("the plan detail must reach the page: description=%q benefits=%d period_end=%q",
+			payload.Plan.PlanDescription, len(payload.Plan.PlanBenefits), payload.Plan.PlanPeriodEnd)
+	}
+	if len(payload.Plan.PlanCanceledAt) == 0 {
+		t.Error("a cancelled subscription must stay visible")
+	}
+	if rows := day.Models; len(rows) != 2 || rows[0].Model != "deepseek/deepseek-v4.1-flash" {
+		t.Errorf("the 24h window must carry its per-model split, raw model names first: %+v", rows)
+	}
+	if rows := account.Windows["7d"].Models; len(rows) != 2 || rows[0].Requests != 0 {
+		t.Errorf("the 7d rows come from the daily totals and invent no request count: %+v", rows)
+	}
 	if len(payload.PlanAccounts) != 1 || payload.PlanAccounts[0].Items == 0 {
 		t.Errorf("plan_accounts = %+v, want the credential diagnostics", payload.PlanAccounts)
 	}
@@ -141,14 +156,14 @@ func TestIndexPageCarriesNoData(t *testing.T) {
 			t.Errorf("page is missing %q", needle)
 		}
 	}
-	for _, needle := range []string{"Cline 套餐用量", "plan-cards", "% 已用", "近 31 天已用 Token（官方）"} {
+	for _, needle := range []string{"Cline 套餐用量", "plan-cards", "% 已用", "近 31 天已用 Token（官方）", "套餐详情"} {
 		if !strings.Contains(page, needle) {
 			t.Errorf("page is missing the %q plan element", needle)
 		}
 	}
 	// The overview keeps the official usage view the collector still gathers: the window
-	// selector, the three official cards and their charts.
-	for _, needle := range []string{"概览", "请求数", "总 Token 数", "缓存命中率", "sparkline", "近 7 天"} {
+	// selector, the three official cards, their charts, and the per-model table below.
+	for _, needle := range []string{"概览", "请求数", "总 Token 数", "缓存命中率", "sparkline", "近 7 天", "官方用量明细", "id=\"models\""} {
 		if !strings.Contains(page, needle) {
 			t.Errorf("page is missing the %q overview element", needle)
 		}
@@ -157,8 +172,11 @@ func TestIndexPageCarriesNoData(t *testing.T) {
 		t.Errorf("the overview must render its three cards on a single row")
 	}
 	// The statistics the local store produced are gone with it: no local latency or
-	// generation-speed cards, no per-request views, no CSV export.
-	for _, needle := range []string{"/stats", "/events", "/export", "渠道分布", "cache-bar", "导出 CSV", "平均延时", "生成速度"} {
+	// generation-speed card, no per-request views, no CSV export. The labels are matched
+	// with their card syntax so an explanatory sentence about what the official API does
+	// not provide (which the page legitimately carries) is not mistaken for the card.
+	for _, needle := range []string{"/stats", "/events", "/export", "渠道分布", "cache-bar", "导出 CSV",
+		`label:"平均延时"`, `label:"生成速度"`} {
 		if strings.Contains(page, needle) {
 			t.Errorf("page must not keep the %q local statistics element", needle)
 		}
@@ -189,14 +207,19 @@ func jsFunctionBody(t *testing.T, page, name string) string {
 // misattributed. The overview must be rendered by its callers instead.
 func TestOverviewRendersIndependentlyOfThePlanCard(t *testing.T) {
 	page := string(indexHTML(nil))
-	if body := jsFunctionBody(t, page, "renderPlan"); strings.Contains(body, "renderCards(") {
-		t.Error("renderPlan must not render the overview: its early return would leave the previous account's numbers on screen")
+	if body := jsFunctionBody(t, page, "renderPlan"); strings.Contains(body, "renderCards(") || strings.Contains(body, "renderModels(") {
+		t.Error("renderPlan must not render the overview or the per-model table: its early return would leave the previous account's numbers on screen")
 	}
 	if body := jsFunctionBody(t, page, "renderCards"); strings.Contains(body, "renderPlan(") {
 		t.Error("renderCards must not depend on renderPlan")
 	}
-	if !strings.Contains(page, "renderCards(health.plan)") {
-		t.Error("load() must render the overview for every refresh, independent of the plan card")
+	if body := jsFunctionBody(t, page, "renderModels"); strings.Contains(body, "renderPlan(") {
+		t.Error("renderModels must not depend on renderPlan")
+	}
+	for _, call := range []string{"renderCards(health.plan)", "renderModels(health.plan)"} {
+		if !strings.Contains(page, call) {
+			t.Errorf("load() must call %s for every refresh, independent of the plan card", call)
+		}
 	}
 	if !strings.Contains(page, `$("plan-account").addEventListener("change"`) {
 		t.Fatal("page is missing the account picker listener")
@@ -204,8 +227,10 @@ func TestOverviewRendersIndependentlyOfThePlanCard(t *testing.T) {
 	lineStart := strings.Index(page, `$("plan-account").addEventListener("change"`)
 	lineEnd := strings.Index(page[lineStart:], "\n")
 	listener := page[lineStart : lineStart+lineEnd]
-	if !strings.Contains(listener, "renderPlan(") || !strings.Contains(listener, "renderCards(") {
-		t.Errorf("switching accounts must re-render both the plan card and the overview, got: %s", listener)
+	for _, call := range []string{"renderPlan(", "renderCards(", "renderModels("} {
+		if !strings.Contains(listener, call) {
+			t.Errorf("switching accounts must re-render everything, %s is missing from: %s", call, listener)
+		}
 	}
 }
 

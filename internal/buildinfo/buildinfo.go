@@ -10,10 +10,10 @@ const (
 	Author     = "wkeking"
 	Repository = "https://github.com/wkeking/clinepass-channel-monitor"
 	// Description is the one-line summary of the plugin.
-	Description = "逐条记录 Cline 请求实际命中的上游渠道、用量与成本，并提供管理页。"
+	Description = "展示 Cline 套餐、限额与官方用量，并提供管理页。"
 )
 
 // Version is stamped at build time:
 //
 //	-ldflags "-X github.com/wkeking/clinepass-channel-monitor/internal/buildinfo.Version=..."
-var Version = "0.1.1"
+var Version = "0.2.0"

@@ -16,8 +16,8 @@ h1 span{color:var(--muted);font-weight:400;font-size:12px;margin-left:6px}
 main{padding:22px 24px 44px;max-width:1800px;margin:0 auto}
 section{margin-bottom:26px}
 h2{margin:0 0 12px;font-size:12px;font-weight:600;color:var(--muted);letter-spacing:.6px;text-transform:uppercase}
-/* 概览固定五个数据块，任何宽度下都排在同一行，不做换行 */
-.cards{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:14px}
+/* 概览固定三块（请求数 / 总 Token 数 / 缓存命中率），任何宽度下都排在同一行 */
+.cards{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
 @media (max-width:1180px){.cards{gap:10px}.card{padding:13px 14px 12px}.card .k{font-size:12px}.card .v{margin-top:10px;font-size:24px}.card .v small{font-size:12px}.card .s{font-size:11.5px;gap:3px 10px}.card .spark,.card .spark svg{height:28px}}
 .card{position:relative;background:linear-gradient(180deg,color-mix(in srgb,var(--tint,var(--accent)) 7%,var(--card)) 0,var(--card) 58%);border:1px solid var(--line);border-radius:14px;padding:16px 18px 14px;overflow:hidden;display:flex;flex-direction:column}
 .card::before{content:"";position:absolute;inset:0 0 auto 0;height:3px;background:var(--tint,var(--accent));opacity:.85}
@@ -26,47 +26,17 @@ h2{margin:0 0 12px;font-size:12px;font-weight:600;color:var(--muted);letter-spac
 .card .ico{width:26px;height:26px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:14px;line-height:1;background:color-mix(in srgb,var(--tint,var(--accent)) 18%,transparent);color:var(--tint,var(--accent))}
 .card .v{margin-top:12px;font-size:30px;font-weight:680;letter-spacing:-.6px;font-variant-numeric:tabular-nums;display:flex;align-items:baseline;gap:5px}
 .card .v small{font-size:13px;font-weight:500;color:var(--muted);letter-spacing:0}
-.card .s{margin-top:8px;color:var(--muted);font-size:12px;display:flex;flex-wrap:wrap;gap:4px 12px}
-/* 折线图固定贴在卡片底部：五个块的图因此落在同一水平线上 */
+.card .s{margin-top:8px;margin-bottom:2px;color:var(--muted);font-size:12px;display:flex;flex-wrap:wrap;gap:4px 12px}
+/* 折线图固定贴在卡片底部：三块的图因此落在同一水平线上 */
 .card .spark{margin-top:auto;padding-top:12px;height:46px}
 .card .spark svg{display:block;width:100%;height:34px}
-.card .s{margin-bottom:2px}
 .bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:12px}
 button,select,input{font:inherit;color:inherit;background:var(--card);border:1px solid var(--line);border-radius:9px;padding:7px 12px;transition:border-color .15s,background .15s}
 button{cursor:pointer}
 button:hover{border-color:var(--accent)}
 button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
-button:disabled{opacity:.45;cursor:not-allowed;border-color:var(--line)}
 input::placeholder{color:var(--muted)}
-.wrap{overflow-x:auto;border:1px solid var(--line);border-radius:14px;background:var(--card)}
-table{width:100%;border-collapse:separate;border-spacing:0}
-th,td{padding:10px 13px;text-align:left;white-space:nowrap;vertical-align:middle}
-th{font-size:12px;color:var(--muted);font-weight:600;background:color-mix(in srgb,var(--card) 84%,var(--bg));border-bottom:1px solid var(--line);position:sticky;top:0}
-td{border-bottom:1px solid var(--line);font-variant-numeric:tabular-nums}
-tbody tr:last-child td{border-bottom:none}
-tbody tr.row{cursor:pointer}
-tbody tr.row:hover td{background:var(--accent-soft)}
-td.num,th.num{text-align:right}
-.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12.5px}
-.stack{display:flex;flex-direction:column;gap:1px;line-height:1.4}
-.stack .m{color:var(--muted);font-size:11.5px}
-.tok{display:flex;flex-direction:column;gap:1px;line-height:1.45}
-.tok .row2{display:flex;justify-content:space-between;gap:14px}
-.tok .lbl{color:var(--muted);font-size:11.5px}
-.tag{display:inline-block;padding:2px 9px;border-radius:999px;border:1px solid var(--line);font-size:12px;line-height:1.5}
-.tag.ok{color:var(--ok);border-color:color-mix(in srgb,var(--ok) 45%,var(--line));background:color-mix(in srgb,var(--ok) 10%,transparent)}
-.tag.err{color:var(--err);border-color:color-mix(in srgb,var(--err) 45%,var(--line));background:color-mix(in srgb,var(--err) 10%,transparent)}
-.tag.miss{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 45%,var(--line));background:color-mix(in srgb,var(--warn) 10%,transparent)}
 .chip{display:inline-block;padding:1px 8px;border-radius:7px;background:var(--chip);color:var(--accent);font-size:12px;font-weight:600}
-.cache-bar{position:relative;height:4px;border-radius:3px;background:color-mix(in srgb,var(--err) 30%,var(--line));margin-top:5px;overflow:hidden;min-width:72px}
-.cache-bar i{position:absolute;inset:0 auto 0 0;background:var(--ok);border-radius:3px}
-.detail td{background:color-mix(in srgb,var(--bg) 55%,var(--card));white-space:normal;padding:0}
-.detail .inner{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:16px;padding:16px 18px}
-.detail h3{margin:0 0 7px;font-size:12px;color:var(--muted);font-weight:600}
-.detail dl{margin:0;display:grid;grid-template-columns:auto 1fr;gap:2px 12px;font-size:12.5px}
-.detail dt{color:var(--muted)}
-.detail dd{margin:0;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;word-break:break-all}
-.detail pre{margin:0;max-height:260px;overflow:auto;font-size:12px;line-height:1.5;background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:11px}
 .msg{color:var(--muted);padding:16px}
 .hidden{display:none}
 /* 标题旁的说明图标：悬停/聚焦时自己画气泡，不用原生 title（原生提示依赖浏览器
@@ -76,7 +46,6 @@ td.num,th.num{text-align:right}
 .info:focus{outline:none}
 .tip{display:none;position:absolute;left:0;top:calc(100% + 8px);z-index:40;width:max-content;max-width:min(620px,86vw);padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:var(--card);color:var(--fg);font-size:12px;font-weight:400;line-height:1.7;letter-spacing:0;text-transform:none;text-align:left;white-space:pre-line;box-shadow:0 12px 32px rgba(0,0,0,.28)}
 .info:hover .tip,.info:focus .tip{display:block}
-.empty-row td{text-align:center;color:var(--muted);padding:20px}
 .plan{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:14px}
 .pcard{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px 16px}
 .pcard .pk{display:flex;align-items:center;justify-content:space-between;gap:8px;color:var(--muted);font-size:12.5px}
@@ -90,6 +59,8 @@ td.num,th.num{text-align:right}
 .plan-warn{color:var(--warn)}
 .plan-err{color:var(--err)}
 </style>
+</head>
+<body>
 <header>
   <div>
     <h1>Cline 渠道监控<span id="ver"></span></h1>
@@ -102,7 +73,6 @@ td.num,th.num{text-align:right}
       <option value="7d">近 7 天</option>
     </select>
     <button id="refresh">刷新</button>
-    <button id="export">导出 CSV</button>
     <button id="forget" title="清除本机保存的管理密钥">清除密钥</button>
   </div>
 </header>
@@ -132,42 +102,12 @@ td.num,th.num{text-align:right}
     <div class="sub hidden" id="overview-warn" style="margin:-4px 0 12px"></div>
     <div class="cards" id="cards"></div>
   </section>
-
-  <section>
-    <h2>渠道分布</h2>
-    <div class="wrap"><table id="channels"><thead>
-      <tr><th>渠道</th><th class="num">请求</th><th class="num">失败</th><th class="num">成本($)</th><th class="num">平均延时</th><th class="num">平均 TTFT</th><th class="num">Token 输入/输出</th><th class="num">上游缓存命中率</th></tr>
-    </thead><tbody></tbody></table></div>
-  </section>
-
-  <section>
-    <h2>明细</h2>
-    <div class="bar">
-      <input id="f-channel" placeholder="渠道" size="10">
-      <input id="f-model" placeholder="模型" size="20">
-      <input id="f-source" placeholder="来源 key" size="14">
-      <select id="f-result"><option value="">全部结果</option><option value="success">成功</option><option value="failed">失败</option><option value="missing_channel">无渠道</option></select>
-      <button id="apply" class="primary">应用过滤</button>
-      <span class="sub" id="pageinfo"></span>
-      <button id="prev">上一页</button>
-      <button id="next">下一页</button>
-    </div>
-    <div class="wrap"><table id="events"><thead>
-      <tr>
-        <th>时间</th><th>来源</th><th>渠道</th><th>模型</th><th>思考等级</th><th>结果</th><th>请求</th>
-        <th class="num">延时 / TTFT</th><th class="num">生成速度</th><th class="num">Token</th><th class="num">缓存</th><th class="num">成本</th>
-      </tr>
-    </thead><tbody></tbody></table></div>
-    <div class="msg hidden" id="empty">当前筛选条件下没有记录。</div>
-  </section>
 </main>
 <script>
 (function(){
 "use strict";
 const BASE="/v0/management/plugins/clinepass-channel-monitor";
 const TOKEN_KEY="cpm-management-key";
-const PAGE_SIZE=50;
-const state={offset:0,total:0};
 const store={
   get(k){try{return localStorage.getItem(k)||""}catch(e){return ""}},
   set(k,v){try{localStorage.setItem(k,v)}catch(e){}},
@@ -188,22 +128,12 @@ function scaled(v){
   if(Math.abs(x)>=1e3)return (x/1e3).toFixed(2)+"K";
   return String(Math.round(x));
 }
-// 时长：<1000ms 用 ms，>=1000ms 转 s 保留两位小数
-function dur(v){
-  const x=n(v);
-  if(!x)return "-";
-  if(x<1000)return Math.round(x)+" ms";
-  return (x/1000).toFixed(2)+" s";
-}
-function shortKey(k){if(!k)return "-";return k.length>16?k.slice(0,4)+"…"+k.slice(-4):k}
 function fmtTime(ts){if(!ts)return "-";const d=new Date(ts);if(isNaN(d))return ts;const p=x=>String(x).padStart(2,"0");return d.getFullYear()+"-"+p(d.getMonth()+1)+"-"+p(d.getDate())+" "+p(d.getHours())+":"+p(d.getMinutes())+":"+p(d.getSeconds())}
-function endpointLabel(v){if(!v)return "-";if(v==="openai-response")return "/v1/responses";if(v==="openai"||v==="chat-completions")return "/v1/chat/completions";if(v==="claude"||v==="anthropic")return "/v1/messages";return v}
-function ratio(hit,miss){const t=n(hit)+n(miss);return t>0?n(hit)/t:0}
-function effort(v){const map={max:"最高",xhigh:"极高",high:"高",medium:"中",low:"低",minimal:"极低"};return map[v]||v||"-"}
+// 官方区间有时是空的（还没取到汇总），此时不要渲染出一个空的 "~"。
+function dateRange(from,to){if(!from&&!to)return "";return "（"+(from||"")+" ~ "+(to||"")+"）"}
 
-async function api(path,params){
+async function api(path){
   const url=new URL(BASE+path,location.origin);
-  if(params)Object.entries(params).forEach(([k,v])=>{if(v!==""&&v!=null)url.searchParams.set(k,v)});
   const res=await fetch(url,{headers:{"Authorization":"Bearer "+store.get(TOKEN_KEY)},cache:"no-store"});
   if(res.status===401||res.status===403){const e=new Error("unauthorized");e.code=res.status;throw e}
   if(!res.ok)throw new Error("HTTP "+res.status);
@@ -242,13 +172,10 @@ function card(opt){
     "</div>";
 }
 
-// 概览的数据口径：请求数 / 总 Token 数 / 缓存命中率优先用 Cline 官方逐条用量
-// （stats.plan.windows[当前时间窗]），官方没有延时与生成速度，这两块始终是本机口径。
-function windowLabel(w){return w==="1h"?"近 1 小时":w==="7d"?"近 7 天":"近 24 小时"}
-
 // 一个 CPA 里可能配置了多个 Cline 条目或多把 key，每把 key 对应一个 Cline 账号：
 // 官方套餐/限额/用量都是按账号（key）分开的，所以页面顶部有一个账号下拉。
 const PLAN_ACCOUNT_KEY="cpm-plan-account";
+let planSnapshot=null;
 
 function planAccountList(plan){
   const all=(plan&&plan.accounts)||[];
@@ -283,112 +210,6 @@ function renderAccountPicker(picker,list){
   picker.classList.remove("hidden");
 }
 
-function officialView(s){
-  const account=selectedPlanAccount(s&&s.plan)||{};
-  const usage=account.usage||{};
-  const win=$("window").value||"24h";
-  return {win:win,account:account,usage:usage,fetchedAt:usage.fetched_at||"",off:(account.windows||{})[win]||null};
-}
-
-// 概览口径说明挂在「概览」标题旁的感叹号上（悬停显示）；真正需要留意的告警仍然
-// 显示在标题下方，不能藏进 tooltip。
-function renderOverviewNote(view){
-  const icon=$("overview-info"), tip=$("overview-info-tip"), warn=$("overview-warn");
-  if(!icon||!tip||!warn)return;
-  const off=view.off, notes=[], warns=[];
-  const acctTokens=(view.account&&view.account.tokens)||{};
-  const cumRange=acctTokens.total_tokens?("（"+(acctTokens.from_date||"")+" ~ "+(acctTokens.to_date||"")+"）"):"";
-  if(off&&off.detail!==false){
-    notes.push("「请求数 / 缓存命中率」为官方口径：Cline 账号（含 Cline IDE 等其他客户端）在"+windowLabel(view.win)+"内的计费记录。");
-    notes.push("「总 Token 数」为官方累计"+cumRange+"，与上方套餐区同口径，不是该时间窗的量。");
-    notes.push("「平均延时 / 生成速度」为本机口径：只统计经过本 CPA 的 Cline 请求。");
-    if(off.covered===false){
-      warns.push("官方逐条记录覆盖自 "+fmtTime(view.usage.oldest||"")+"，该窗口更早的部分未统计，官方数值偏低。");
-    }
-    if(view.usage.error)warns.push("官方用量刷新失败："+view.usage.error);
-  }else if(off){
-    notes.push("「总 Token 数」为官方累计"+(cumRange||("（"+(off.from||"")+" ~ "+(off.to||"")+"）"))+"。");
-    notes.push("「请求数 / 缓存命中率 / 平均延时 / 生成速度」为本机口径：官方逐条明细不支持按时间过滤，7 天要上百次分页，因此这个窗口的明细仍取本机记录。");
-    if(off.covered===false)warns.push("官方汇总的覆盖范围待确认，数值可能偏低。");
-  }else{
-    notes.push("「"+windowLabel(view.win)+"」使用本机口径：只统计经过本 CPA 的 Cline 请求。");
-    // plan.source 有值才算轮询跑过一轮：刚重载时快照还是空的，那种情况是"还没取到"，
-    // 不是"没启用"。
-    const polled=!!(planSnapshot&&planSnapshot.source);
-    if(view.usage.error)warns.push("官方用量不可用："+view.usage.error);
-    else if(!polled)warns.push("官方用量尚未取到。");
-    else if(view.usage.enabled!==true)warns.push("官方用量未启用。");
-  }
-  tip.textContent=notes.join("\n");
-  warn.innerHTML=warns.map(text=>'<span class="plan-warn">'+esc(text)+"</span>").join(" ");
-  warn.classList.toggle("hidden",warns.length===0);
-}
-
-function renderCards(s){
-  const tok=s.tokens||{}, pc=s.prompt_cache||{}, series=s.series||{};
-  const cacheRatio=ratio(pc.hit,pc.miss);
-  const view=officialView(s), off=view.off;
-  // detail=false 的窗口（近 7 天，来自官方按自然日汇总）只有 token 与成本是官方口径
-  const offDetail=!!(off&&off.detail!==false);
-  const offTokens=!!off;
-  const fetched=view.fetchedAt?fmtTime(view.fetchedAt).slice(11,19):"—";
-  const localRequests=int(s.requests);
-  const successRate=fixed(100-n(s.error_rate)*100,2);
-  // 总 Token 数用官方累计（近 31 天汇总，与套餐区一致），不是当前时间窗的量；
-  // 时间窗的官方数值放在副行。
-  const acctTokens=(view.account&&view.account.tokens)||{};
-  const hasCumulative=n(acctTokens.total_tokens)>0;
-  const cumTotal=hasCumulative?n(acctTokens.total_tokens):n(off&&off.total_tokens);
-  const cumSubs=hasCumulative?[
-      "官方累计 "+esc((acctTokens.from_date||"")+" ~ "+(acctTokens.to_date||""))+" · $"+fixed(n(acctTokens.cost_usd),2),
-      "官方 输入 "+scaled(acctTokens.input_tokens)+" / 输出 "+scaled(acctTokens.output_tokens),
-      "本机"+windowLabel(view.win)+" "+scaled(tok.total)
-    ]:(off?[
-      "官方 "+windowLabel(view.win)+" 输入 "+scaled(off.input_tokens)+" / 输出 "+scaled(off.output_tokens),
-      "本机 "+scaled(tok.total)+"（入 "+scaled(tok.input)+" / 出 "+scaled(tok.output)+"）"
-    ]:[]);
-  const cards=[
-    offDetail
-      ? card({label:"请求数",icon:"⇄",tint:"#60a5fa",tip:"官方口径：Cline 账号在该时间窗内的计费请求数（含其他客户端）。副行为本机 CPA 记录。",
-          value:int(off.requests),unit:"条",
-          sub:["官方 · 更新于 "+fetched,"本机 "+localRequests+" 条 · 成功率 "+successRate+"%"],
-          spark:off.series&&off.series.requests})
-      : card({label:"请求数",icon:"⇄",tint:"#60a5fa",tip:"当前时间窗内落盘的 Cline 请求数（本机口径）",
-          value:localRequests,unit:"条",
-          sub:[s.failed?("失败 "+int(s.failed)+"（"+fixed(n(s.error_rate)*100,2)+"%）"):"无失败","成功率 "+successRate+"%"],
-          spark:series.requests}),
-    offTokens
-      ? card({label:"总 Token 数",icon:"Σ",tint:"#38bdf8",tip:"官方口径：Cline 账号自账号创建以来的累计 token（近 31 天逐日汇总）。副行为官方输入/输出与本机时间窗数值。",
-          value:scaled(cumTotal),unit:"token",
-          sub:cumSubs,
-          spark:(acctTokens.series&&acctTokens.series.length?acctTokens.series:(off.series&&off.series.tokens))})
-      : card({label:"总 Token 数",icon:"Σ",tint:"#38bdf8",tip:"时间窗内输入 token 与输出 token 的总量（本机口径）",
-          value:scaled(tok.total),unit:"token",
-          sub:["输入 "+scaled(tok.input)+" / 输出 "+scaled(tok.output),"思考 "+scaled(tok.reasoning)],spark:series.tokens}),
-    offDetail
-      ? card({label:"缓存命中率",icon:"%",tint:"#34d399",tip:"官方口径：cachedTokens / promptTokens。副行为本机 CPA 记录。",
-          value:fixed(n(off.cache_ratio)*100,2),unit:"%",
-          sub:["官方 cached "+scaled(off.cached_tokens)+" / prompt "+scaled(off.input_tokens),
-            "本机 上游口径 "+fixed(cacheRatio*100,2)+"% · CPA 口径 "+fixed(n(s.cache_ratio)*100,2)+"%"],
-          spark:off.series&&off.series.cached})
-      : card({label:"缓存命中率",icon:"%",tint:"#34d399",tip:"上游网关口径：promptCacheHit/(hit+miss)；CPA 口径见副值（本机口径）",
-          value:fixed(cacheRatio*100,2),unit:"%",
-          sub:["上游口径 hit "+scaled(pc.hit)+" / miss "+scaled(pc.miss),"CPA 口径 "+fixed(n(s.cache_ratio)*100,2)+"%（cached/input）"],
-          spark:series.cache_hits}),
-    card({label:"平均延时",icon:"◷",tint:"#a78bfa",tip:"本机口径：平均总延时；副值为平均首 token 延时（TTFT）",
-      value:fixed(n(s.avg_latency_ms)/1000,2),unit:"s",
-      sub:["平均 TTFT "+dur(s.avg_ttft_ms),"样本 "+int(s.ttft_requests)+" 条"],
-      spark:series.latency_ms}),
-    card({label:"生成速度",icon:"⚡",tint:"#f59e0b",tip:"本机口径：平均生成速度 = output_tokens / 生成耗时",
-      value:fixed(s.tokens_per_second_avg,2),unit:"tok/s",sub:["越高越快"],spark:series.tokens_per_second})
-  ];
-  $("cards").innerHTML=cards.join("");
-  renderOverviewNote(view);
-}
-
-let planSnapshot=null;
-let lastStats=null;
-
 function quotaTint(pct){if(pct>=90)return "#f87171";if(pct>=70)return "#fbbf24";return "#34d399"}
 
 function renderPlan(plan){
@@ -408,7 +229,7 @@ function renderPlan(plan){
         '插件会自动读取 CPA 自己的 Cline 凭据，通常不需要配置：确认 CPA 里有 Cline 供应商条目'+
         '（<code>openai-compatibility</code>，条目名是 <code>Cline</code> 或 base-url 命中插件配置的 <code>hosts</code>），'+
         '并确认 <code>plan_config_path</code> 指向容器内可读的 config.yaml。'+
-        '<br>读取顺序：CPA config.yaml（<code>openai-compatibility[].api-key-entries</code>）→ CPA 凭据接口 → 最近一次上游请求的 Authorization 头。';
+        '<br>读取顺序：CPA config.yaml（<code>openai-compatibility[].api-key-entries</code>）→ CPA 凭据接口。';
     }else if(list.length>1&&error){
       msg.textContent="该账号官方用量暂不可用（"+(view.label||"")+"）："+error;
     }else{
@@ -423,8 +244,9 @@ function renderPlan(plan){
   if(view.plan_name)bits.push('<span class="chip">'+esc(view.plan_name)+"</span>");
   if(view.plan_price)bits.push(esc(view.plan_price));
   if(view.account)bits.push("账号 "+esc(view.account));
-  if(view.fetched_at)bits.push("更新于 "+esc(fmtTime(view.fetched_at).slice(11,19)));
+  if(view.fetched_at)bits.push("套餐更新于 "+esc(fmtTime(view.fetched_at).slice(11,19)));
   if(view.tokens_error)bits.push('<span class="plan-warn">官方汇总未取到：'+esc(view.tokens_error)+"</span>");
+  if(view.usage&&view.usage.error)bits.push('<span class="plan-warn">官方逐条用量刷新失败：'+esc(view.usage.error)+"</span>");
   head.innerHTML=bits.join(" · ");
 
   const blocks=(view.limits||[]).map(function(limit){
@@ -454,109 +276,108 @@ function renderPlan(plan){
   cards.innerHTML=blocks+tokenCard;
 }
 
-function renderChannels(rows){
-  const body=$("channels").querySelector("tbody");
-  if(!rows||!rows.length){body.innerHTML='<tr class="empty-row"><td colspan="8">该时间窗内没有渠道数据。</td></tr>';return}
-  body.innerHTML=rows.map(r=>"<tr>"+
-    '<td><span class="chip">'+esc(r.key)+"</span></td>"+
-    '<td class="num">'+int(r.requests)+"</td>"+
-    '<td class="num">'+(r.failed?'<span class="tag err">'+int(r.failed)+"</span>":"0")+"</td>"+
-    '<td class="num">'+fixed(r.cost,6)+"</td>"+
-    '<td class="num">'+dur(r.avg_latency_ms)+"</td>"+
-    '<td class="num">'+dur(r.avg_ttft_ms)+"</td>"+
-    '<td class="num">'+scaled(r.avg_input_tokens)+" / "+scaled(r.avg_output_tokens)+"</td>"+
-    '<td class="num">'+fixed(n(r.prompt_cache_ratio)*100,2)+"%</td>"+
-    "</tr>").join("");
+function windowLabel(w){return w==="1h"?"近 1 小时":w==="7d"?"近 7 天":"近 24 小时"}
+
+// officialView returns the selected account's official aggregate for the chosen window.
+// Every number on the overview comes from Cline's own API: the local per-request records
+// this plugin used to keep are gone, so there is no local fallback left.
+function officialView(plan){
+  const account=selectedPlanAccount(plan)||{};
+  const win=$("window").value||"24h";
+  return {win:win,account:account,usage:account.usage||{},off:(account.windows||{})[win]||null};
 }
 
-function detailPanel(e){
-  const dl=pairs=>'<dl>'+pairs.filter(p=>p[1]!==undefined&&p[1]!==null&&p[1]!=="").map(p=>"<dt>"+esc(p[0])+"</dt><dd>"+esc(p[1])+"</dd>").join("")+"</dl>";
-  return '<tr class="detail hidden"><td colspan="12"><div class="inner">'+
-    "<div><h3>请求</h3>"+dl([
-      ["上游地址",e.base_url],["客户端协议",e.client_protocol],["上游协议",e.upstream_protocol],
-      ["stream",e.stream?"是":"否"],["session",e.session_id],["CPA 内部 provider",e.provider],
-      ["凭据 auth_index",e.auth_index],["凭据类型",e.auth_type],["event_id",e.event_id]
-    ])+"</div>"+
-    "<div><h3>渠道与成本</h3>"+dl([
-      ["finalProvider",e.final_provider],["resolvedProvider",e.resolved_provider],
-      ["canonicalSlug",e.canonical_slug],["originalModelId",e.original_model_id],
-      ["modelAttemptCount",e.model_attempt_count],["totalProviderAttemptCount",e.total_provider_attempt_count],
-      ["fallbacksAvailable",e.fallbacks_available_count],["generationId",e.generation_id],
-      ["cost",e.cost],["inputInferenceCost",e.input_cost],["outputInferenceCost",e.output_cost]
-    ])+"</div>"+
-    "<div><h3>token 与缓存</h3>"+dl([
-      ["input / output",int(e.input_tokens)+" / "+int(e.output_tokens)],
-      ["reasoning",int(e.reasoning_tokens)],["total",int(e.total_tokens)],
-      ["cached / cache_read / cache_creation",int(e.cached_tokens)+" / "+int(e.cache_read_tokens)+" / "+int(e.cache_creation_tokens)],
-      ["prompt_cache hit / miss",int(e.prompt_cache_hit_tokens)+" / "+int(e.prompt_cache_miss_tokens)],
-      ["systemFingerprint",e.system_fingerprint],["失败原因",e.error],["status code",e.status_code?String(e.status_code):""]
-    ])+"</div>"+
-    "<div><h3>planningReasoning</h3><pre>"+esc(e.planning_reasoning||("未落盘（长度 "+int(e.planning_reasoning_length)+" 字符）"))+"</pre></div>"+
-    "</div></td></tr>";
+// 概览口径说明挂在「概览」标题旁的感叹号上（悬停显示）；真正需要留意的告警仍然
+// 显示在标题下方，不能藏进 tooltip。
+function renderOverviewNote(view){
+  const icon=$("overview-info"), tip=$("overview-info-tip"), warn=$("overview-warn");
+  if(!icon||!tip||!warn)return;
+  const off=view.off, notes=[], warns=[];
+  const acctTokens=(view.account&&view.account.tokens)||{};
+  const cumRange=acctTokens.total_tokens?dateRange(acctTokens.from_date,acctTokens.to_date):"";
+  if(off&&off.detail!==false){
+    notes.push("「请求数 / 缓存命中率」为官方口径：Cline 账号（含 Cline IDE 等其他客户端）在"+windowLabel(view.win)+"内的计费记录。");
+    notes.push("「总 Token 数」为官方累计"+cumRange+"，与上方套餐区同口径，不是该时间窗的量。");
+    if(off.covered===false){
+      warns.push("官方逐条记录覆盖自 "+fmtTime(view.usage.oldest||"")+"，该窗口更早的部分未统计，官方数值偏低。");
+    }
+    if(view.usage.error)warns.push("官方用量刷新失败："+view.usage.error);
+  }else if(off){
+    notes.push("「总 Token 数」为官方累计"+(cumRange||("（"+(off.from||"")+" ~ "+(off.to||"")+"）"))+"。");
+    notes.push("「请求数 / 缓存命中率」不适用：「"+windowLabel(view.win)+"」窗口来自官方逐日汇总，官方没有这个窗口的逐条明细。");
+    if(off.covered===false)warns.push("官方汇总的覆盖范围待确认，数值可能偏低。");
+  }else{
+    notes.push("「"+windowLabel(view.win)+"」暂无官方数据。");
+    // plan.source 有值才算轮询跑过一轮：刚重载时快照还是空的，那种情况是"还没取到"，
+    // 不是"没启用"。
+    const polled=!!(planSnapshot&&planSnapshot.source);
+    if(view.usage.error)warns.push("官方用量不可用："+view.usage.error);
+    else if(!polled)warns.push("官方用量尚未取到。");
+    else if(view.usage.enabled!==true)warns.push("官方用量未启用。");
+  }
+  tip.textContent=notes.join("\n");
+  warn.innerHTML=warns.map(text=>'<span class="plan-warn">'+esc(text)+"</span>").join(" ");
+  warn.classList.toggle("hidden",warns.length===0);
 }
 
-function renderEvents(list){
-  const body=$("events").querySelector("tbody");
-  $("empty").classList.toggle("hidden",!!(list&&list.length));
-  if(!list||!list.length){body.innerHTML="";return}
-  body.innerHTML=list.map((e,i)=>{
-    const tag=e.failed?'<span class="tag err">失败'+(e.status_code?" "+e.status_code:"")+"</span>":(e.channel_missing?'<span class="tag miss">无渠道</span>':'<span class="tag ok">成功</span>');
-    const hit=n(e.prompt_cache_hit_tokens),miss=n(e.prompt_cache_miss_tokens);
-    const cacheRatio=ratio(hit,miss);
-    return '<tr class="row" data-i="'+i+'">'+
-      '<td><div class="stack">'+esc(fmtTime(e.timestamp))+"</div></td>"+
-      '<td title="'+esc(e.api_key)+'"><span class="mono">'+esc(shortKey(e.api_key))+"</span></td>"+
-      '<td><span class="chip">'+esc(e.final_provider||"—")+"</span></td>"+
-      '<td><div class="stack">'+esc(e.model_alias||e.model||"-")+'<span class="m">'+esc(e.model||"")+"</span></div></td>"+
-      "<td>"+esc(effort(e.reasoning_effort))+"</td>"+
-      "<td>"+tag+"</td>"+
-      '<td><div class="stack">'+esc(endpointLabel(e.client_protocol))+'<span class="m">'+(e.stream?"SSE":"非流式")+'</span></div></td>'+
-      '<td class="num"><div class="stack">'+esc(dur(e.latency_ms))+'<span class="m">TTFT '+esc(dur(e.ttft_ms))+'</span></div></td>'+
-      '<td class="num"><div class="stack">'+fixed(e.tokens_per_second,2)+' t/s<span class="m">TTFT 后 '+fixed(e.tokens_per_second_after_ttft,2)+' t/s</span></div></td>'+
-      '<td class="num"><div class="tok">'+
-        '<span class="row2"><span class="lbl">↑ 输入</span><span>'+scaled(e.input_tokens)+"</span></span>"+
-        '<span class="row2"><span class="lbl">↓ 输出</span><span>'+scaled(e.output_tokens)+"</span></span>"+
-        (n(e.reasoning_tokens)?'<span class="row2"><span class="lbl">◇ 思考</span><span>'+scaled(e.reasoning_tokens)+"</span></span>":"")+
-      "</div></td>"+
-      '<td class="num"><div class="stack"><span>'+scaled(hit)+" / "+scaled(miss)+"</span>"+
-        '<span class="m">命中 '+fixed(cacheRatio*100,2)+'%</span><span class="cache-bar"><i style="width:'+fixed(cacheRatio*100,2)+'%"></i></span></div></td>'+
-      '<td class="num">'+(e.cost?esc("$"+e.cost):"—")+"</td>"+
-      "</tr>"+detailPanel(e);
-  }).join("");
-  body.querySelectorAll("tr.row").forEach(tr=>{
-    tr.addEventListener("click",()=>{
-      const next=tr.nextElementSibling;
-      if(next&&next.classList.contains("detail"))next.classList.toggle("hidden");
-    });
-  });
+function renderCards(plan){
+  const view=officialView(plan), off=view.off;
+  const tok=view.account.tokens||{};
+  // 逐条用量的刷新时间来自采集器本身（默认 10 分钟一轮），不是套餐轮询的时间戳：
+  // 后者每 5 分钟就前进一次，用它会让卡片显示"刚更新过"而数据其实没动。
+  const fetched=view.usage&&view.usage.fetched_at?fmtTime(view.usage.fetched_at).slice(11,19):"—";
+  // detail=false 的窗口（近 7 天，官方按自然日汇总）只有 token 与成本
+  const offDetail=!!(off&&off.detail!==false);
+  const series=(off&&off.series)||{};
+  // 两种"没有数"要分开说：这个窗口官方本来就没有逐条明细（7 天），和这个账号当前没有
+  // 任何官方数据（凭据不可用 / 采集还没覆盖），含义完全不同。
+  const noWindow="该账号在这个窗口还没有官方数据（凭据不可用，或官方采集尚未覆盖）";
+  const dailyOnly="官方没有该窗口的逐条明细（近 7 天窗口来自官方逐日汇总，只有 token 与成本）";
+  const acctRange="官方累计"+dateRange(tok.from_date,tok.to_date);
+  const acctSeries=tok.series&&tok.series.length?tok.series:(series.tokens||null);
+  const cards=[
+    offDetail
+      ? card({label:"请求数",icon:"⇄",tint:"#60a5fa",tip:"官方口径：Cline 账号在该时间窗内的计费请求数（含其他客户端）。",
+          value:int(off.requests),unit:"条",
+          sub:["官方逐条用量 · 更新于 "+fetched,"窗口 "+(off.from?fmtTime(off.from).slice(5,16):"—")+" ~ "+(off.to?fmtTime(off.to).slice(5,16):"—")],
+          spark:series.requests})
+      : card({label:"请求数",icon:"⇄",tint:"#60a5fa",tip:off?dailyOnly:noWindow,value:"—",unit:"条",sub:[off?dailyOnly:noWindow]}),
+    off
+      ? card({label:"总 Token 数",icon:"Σ",tint:"#38bdf8",tip:"官方口径：主值为账号累计 token（近 31 天逐日汇总），副行为本窗口官方输入/输出。",
+          value:scaled(tok.total_tokens||off.total_tokens),unit:"token",
+          sub:[
+            acctRange,
+            "本窗口 输入 "+scaled(off.input_tokens)+" / 输出 "+scaled(off.output_tokens)+(off.cost_usd?" · $"+fixed(off.cost_usd,4):"")
+          ],
+          spark:acctSeries})
+      : card({label:"总 Token 数",icon:"Σ",tint:"#38bdf8",tip:"官方口径：账号累计 token（近 31 天逐日汇总）",
+          value:scaled(tok.total_tokens),unit:"token",
+          sub:[acctRange,"输入 "+scaled(tok.input_tokens)+" / 输出 "+scaled(tok.output_tokens)],
+          spark:acctSeries}),
+    offDetail
+      ? card({label:"缓存命中率",icon:"%",tint:"#34d399",tip:"官方口径：cachedTokens / promptTokens（本窗口）。",
+          value:fixed(n(off.cache_ratio)*100,2),unit:"%",
+          sub:["官方 cached "+scaled(off.cached_tokens)+" / prompt "+scaled(off.input_tokens)],
+          spark:series.cached})
+      : card({label:"缓存命中率",icon:"%",tint:"#34d399",tip:off?dailyOnly:noWindow,value:"—",unit:"%",sub:[off?dailyOnly:noWindow]})
+  ];
+  $("cards").innerHTML=cards.join("");
+  renderOverviewNote(view);
 }
 
 async function load(){
-  const w=$("window").value;
   try{
     const health=await api("/health");
     $("ver").textContent="v"+health.version;
-    const bits=["记录 "+int(health.recorded)+" 条","已索引 "+int(health.ring_used)+"/"+int(health.ring_size),
-      "marker 缺失 "+int(health.marker_missing),"host 未命中 "+int(health.skipped_unmatched_host),
-      "解析失败 "+int(health.parse_errors),"写盘失败 "+int(health.write_error)];
-    if(health.jsonl_enabled)bits.push("JSONL "+health.jsonl_dir);
-    $("statusline").textContent=bits.join(" · ");
-
-    const stats=await api("/stats",{window:w});
-    lastStats=stats;
-    renderPlan(stats.plan);
-    renderCards(stats);
-    renderChannels(stats.channels);
-
-    const events=await api("/events",{window:w,limit:PAGE_SIZE,offset:state.offset,
-      channel:$("f-channel").value.trim(),model:$("f-model").value.trim(),
-      source:$("f-source").value.trim(),result:$("f-result").value});
-    state.total=n(events.total);
-    renderEvents(events.events);
-    const from=state.total?state.offset+1:0,to=Math.min(state.offset+PAGE_SIZE,state.total);
-    $("pageinfo").textContent="第 "+from+"-"+to+" 条 / 共 "+int(state.total)+" 条";
-    $("prev").disabled=state.offset<=0;
-    $("next").disabled=state.offset+PAGE_SIZE>=state.total;
+    const bits=["运行 "+esc(health.uptime||"-")];
+    if(health.plan_enabled===false)bits.push('<span class="plan-warn">套餐轮询未启用</span>');
+    if(health.plan_usage&&health.plan_usage.enabled)bits.push("官方逐条用量已启用");
+    $("statusline").innerHTML=bits.join(" · ");
+    renderPlan(health.plan);
+    // The overview is rendered independently: a credential whose plan/limits call failed
+    // can still have usable official usage, and a failed account must never leave the
+    // previous account's numbers on screen.
+    renderCards(health.plan);
     $("gate").classList.add("hidden");
   }catch(err){
     if(err.code===401||err.code===403){
@@ -568,29 +389,12 @@ async function load(){
   }
 }
 
-$("save").addEventListener("click",()=>{const v=$("token").value.trim();if(!v)return;store.set(TOKEN_KEY,v);state.offset=0;load()});
+$("save").addEventListener("click",()=>{const v=$("token").value.trim();if(!v)return;store.set(TOKEN_KEY,v);load()});
 $("token").addEventListener("keydown",e=>{if(e.key==="Enter")$("save").click()});
 $("forget").addEventListener("click",()=>{store.del(TOKEN_KEY);$("token").value="";$("gate").classList.remove("hidden");$("statusline").textContent="已清除本机保存的密钥"});
 $("refresh").addEventListener("click",()=>load());
-$("window").addEventListener("change",()=>{state.offset=0;load()});
-$("plan-account").addEventListener("change",()=>{store.set(PLAN_ACCOUNT_KEY,$("plan-account").value);renderPlan(planSnapshot);renderCards(lastStats||{})});
-$("apply").addEventListener("click",()=>{state.offset=0;load()});
-$("prev").addEventListener("click",()=>{state.offset=Math.max(0,state.offset-PAGE_SIZE);load()});
-$("next").addEventListener("click",()=>{state.offset+=PAGE_SIZE;load()});
-$("export").addEventListener("click",()=>{
-  const url=new URL(BASE+"/export",location.origin);
-  const params={window:$("window").value,channel:$("f-channel").value.trim(),model:$("f-model").value.trim(),
-    source:$("f-source").value.trim(),result:$("f-result").value};
-  Object.entries(params).forEach(([k,v])=>{if(v!==""&&v!=null)url.searchParams.set(k,v)});
-  fetch(url,{headers:{"Authorization":"Bearer "+store.get(TOKEN_KEY)},cache:"no-store"}).then(res=>{
-    if(!res.ok)throw new Error("HTTP "+res.status);
-    return res.blob();
-  }).then(blob=>{
-    const a=document.createElement("a");a.href=URL.createObjectURL(blob);
-    a.download="clinepass-channel-monitor-"+new Date().toISOString().slice(0,19).replace(/[:T]/g,"-")+".csv";
-    document.body.appendChild(a);a.click();a.remove();
-  }).catch(err=>{alert("导出失败："+err.message)});
-});
+$("window").addEventListener("change",()=>{renderCards(planSnapshot||{})});
+$("plan-account").addEventListener("change",()=>{store.set(PLAN_ACCOUNT_KEY,$("plan-account").value);renderPlan(planSnapshot||{});renderCards(planSnapshot||{})});
 
 if(!store.get(TOKEN_KEY))$("gate").classList.remove("hidden");
 load();

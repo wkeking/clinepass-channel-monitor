@@ -1,21 +1,18 @@
 package management
 
 import (
-	"github.com/wkeking/clinepass-channel-monitor/internal/buildinfo"
-	"github.com/wkeking/clinepass-channel-monitor/internal/config"
-	"github.com/wkeking/clinepass-channel-monitor/internal/plan"
-	"github.com/wkeking/clinepass-channel-monitor/internal/state"
-	"github.com/wkeking/clinepass-channel-monitor/internal/store"
-	"os"
-	"path/filepath"
-
 	"encoding/json"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+
+	"github.com/wkeking/clinepass-channel-monitor/internal/buildinfo"
+	"github.com/wkeking/clinepass-channel-monitor/internal/config"
+	"github.com/wkeking/clinepass-channel-monitor/internal/state"
 )
 
 // defaultConfigBytes is the configuration a host with an empty plugin block sends.
@@ -32,29 +29,98 @@ func pluginAPIRequest(rawPath string) pluginapi.ManagementRequest {
 	return pluginapi.ManagementRequest{Method: "GET", Path: parsed.Path, Query: parsed.Query()}
 }
 
-// TestRouteManagementHealthMatchesRealPayload feeds a recorded /health payload through
-// the page's data path to make sure the shape the page depends on stays intact.
+// TestHealthResponseShape pins the payload the page reads: the subscription view is there,
+// and the per-request statistics counters are gone.
 func TestHealthResponseShape(t *testing.T) {
 	loadTestConfig(defaultConfigBytes())
-	resp := buildHealthResponse()
-	if resp.Mode != "host+marker" {
-		t.Errorf("mode = %q, want host+marker", resp.Mode)
-	}
-	if len(resp.Hosts) != 1 || resp.Hosts[0] != "api.cline.bot" {
-		t.Errorf("hosts = %v", resp.Hosts)
-	}
-	if resp.RingSize != config.DefaultRingSize {
-		t.Errorf("ring_size = %d, want %d", resp.RingSize, config.DefaultRingSize)
-	}
-	if _, errMarshal := json.Marshal(resp); errMarshal != nil {
+	raw, errMarshal := json.Marshal(buildHealthResponse())
+	if errMarshal != nil {
 		t.Fatalf("health payload must marshal: %v", errMarshal)
+	}
+	var decoded map[string]any
+	if errUnmarshal := json.Unmarshal(raw, &decoded); errUnmarshal != nil {
+		t.Fatalf("health payload must be an object: %v", errUnmarshal)
+	}
+	for _, key := range []string{"plugin", "version", "enabled", "uptime", "plan", "plan_enabled", "plan_usage"} {
+		if _, ok := decoded[key]; !ok {
+			t.Errorf("health payload is missing %q", key)
+		}
+	}
+	for _, key := range []string{
+		"mode", "hosts", "require_routing_marker", "jsonl_enabled", "jsonl_dir", "retention_days",
+		"ring_size", "ring_used", "pending_observations", "in_flight_identities",
+		"recorded", "marker_missing", "unmatched_host_samples",
+	} {
+		if _, ok := decoded[key]; ok {
+			t.Errorf("health payload must not carry the statistics field %q", key)
+		}
 	}
 }
 
-func TestHealthModeMarkerOnly(t *testing.T) {
-	loadTestConfig([]byte("enabled: true\nhosts: []\n"))
-	if got := buildHealthResponse().Mode; got != "marker-only" {
-		t.Errorf("mode = %q, want marker-only for an explicit empty hosts list", got)
+// TestHealthPlanSnapshotRenders feeds a recorded /health payload through the shape the page
+// depends on, so a field renamed in plan would fail here rather than on the deployed page.
+func TestHealthPlanSnapshotRenders(t *testing.T) {
+	raw := readFixture(t, "management-health.json")
+	var payload healthResponse
+	if errUnmarshal := json.Unmarshal(raw, &payload); errUnmarshal != nil {
+		t.Fatalf("recorded health payload: %v", errUnmarshal)
+	}
+	if !payload.Plan.Available || len(payload.Plan.Accounts) != 1 {
+		t.Fatalf("plan snapshot = %+v, want one available account", payload.Plan)
+	}
+	account := payload.Plan.Accounts[0]
+	if len(account.Limits) == 0 {
+		t.Fatal("the account must carry its rolling limits")
+	}
+	if account.PlanName == "" && account.PlanPrice == "" {
+		t.Error("the account must report a plan name or price")
+	}
+	if got := payload.Plan.Tokens.TotalTokens; got == 0 {
+		t.Error("the official token totals must reach the page")
+	}
+	// The overview reads the per-account windows, not just the Quota mirror: a page that
+	// only saw the mirror would show empty cards as soon as several credentials exist.
+	day, ok := account.Windows["24h"]
+	if !ok || day.Requests == 0 || day.CacheRatio == 0 || len(day.Series.Requests) == 0 {
+		t.Errorf("the account must carry the official window the overview plots: %+v", day)
+	}
+	if week, ok := account.Windows["7d"]; !ok || week.Detail {
+		t.Errorf("the 7d window must come from the daily totals and report detail=false: %+v", week)
+	}
+	if usage := account.Usage; usage.FetchedAt == "" || usage.Items == 0 {
+		t.Errorf("the page needs the collector's own fetch time and item count: %+v", usage)
+	}
+	if len(payload.PlanAccounts) != 1 || payload.PlanAccounts[0].Items == 0 {
+		t.Errorf("plan_accounts = %+v, want the credential diagnostics", payload.PlanAccounts)
+	}
+}
+
+// TestHealthWithRejectedAndFailedCredentials covers the multi-credential case the page has to
+// survive: one credential answers, a second was refused upstream (401/403) and a third
+// failed for another reason. The healthy account must keep its official windows; the
+// refused one stays in plan_accounts but out of the page's picker; the third is selectable
+// and its empty window map is what keeps the previous account's numbers off the screen.
+func TestHealthWithRejectedAndFailedCredentials(t *testing.T) {
+	raw := readFixture(t, "management-health-multi-account.json")
+	var payload healthResponse
+	if errUnmarshal := json.Unmarshal(raw, &payload); errUnmarshal != nil {
+		t.Fatalf("recorded health payload: %v", errUnmarshal)
+	}
+	if len(payload.Plan.Accounts) != 3 {
+		t.Fatalf("accounts = %d, want 3", len(payload.Plan.Accounts))
+	}
+	good, refused, failed := payload.Plan.Accounts[0], payload.Plan.Accounts[1], payload.Plan.Accounts[2]
+	if !good.Available || len(good.Windows) == 0 {
+		t.Errorf("the healthy account must keep its official windows: %+v", good)
+	}
+	if refused.Available || !refused.Rejected || refused.Error == "" {
+		t.Errorf("the refused account must stay visible and explain itself: %+v", refused)
+	}
+	if failed.Available || failed.Rejected || failed.Error == "" || len(failed.Windows) != 0 {
+		t.Errorf("the selectable failed account must carry no windows and an error: %+v", failed)
+	}
+	if len(payload.PlanAccounts) != 3 || !payload.PlanAccounts[1].Rejected || payload.PlanAccounts[2].Rejected {
+		t.Errorf("plan_accounts = %+v, want all three credentials with only the refused one flagged", payload.PlanAccounts)
 	}
 }
 
@@ -75,24 +141,71 @@ func TestIndexPageCarriesNoData(t *testing.T) {
 			t.Errorf("page is missing %q", needle)
 		}
 	}
-	// The detail table shows the recorded columns; the upstream address and the raw
-	// provider key stay out of the list and only appear in the expanded detail panel.
-	for _, needle := range []string{"思考等级", "延时 / TTFT", "生成速度", "缓存", "Token", "总 Token 数", "sparkline", "cache-bar"} {
+	for _, needle := range []string{"Cline 套餐用量", "plan-cards", "% 已用", "近 31 天已用 Token（官方）"} {
 		if !strings.Contains(page, needle) {
-			t.Errorf("page is missing the %q column", needle)
+			t.Errorf("page is missing the %q plan element", needle)
 		}
 	}
-	// 概览固定五块：输入/输出 每请求与总成本已移除。
-	for _, needle := range []string{"输入 / 输出 每请求", "输入 / 输出 合计", "总成本"} {
+	// The overview keeps the official usage view the collector still gathers: the window
+	// selector, the three official cards and their charts.
+	for _, needle := range []string{"概览", "请求数", "总 Token 数", "缓存命中率", "sparkline", "近 7 天"} {
+		if !strings.Contains(page, needle) {
+			t.Errorf("page is missing the %q overview element", needle)
+		}
+	}
+	if !strings.Contains(page, "grid-template-columns:repeat(3,minmax(0,1fr))") {
+		t.Errorf("the overview must render its three cards on a single row")
+	}
+	// The statistics the local store produced are gone with it: no local latency or
+	// generation-speed cards, no per-request views, no CSV export.
+	for _, needle := range []string{"/stats", "/events", "/export", "渠道分布", "cache-bar", "导出 CSV", "平均延时", "生成速度"} {
 		if strings.Contains(page, needle) {
-			t.Errorf("page must not keep the %q card", needle)
+			t.Errorf("page must not keep the %q local statistics element", needle)
 		}
 	}
-	if !strings.Contains(page, "grid-template-columns:repeat(5,minmax(0,1fr))") {
-		t.Errorf("the overview must render its five cards on a single row")
+}
+
+// jsFunctionBody returns the source of one top-level function, from its declaration up to
+// the first closing brace in column 0. The page is a single embedded script with no test
+// runner of its own, so this is how the render wiring stays checkable.
+func jsFunctionBody(t *testing.T, page, name string) string {
+	t.Helper()
+	marker := "function " + name + "("
+	start := strings.Index(page, marker)
+	if start < 0 {
+		t.Fatalf("page is missing the %s function", name)
 	}
-	if strings.Contains(page, "<th>上游地址</th>") {
-		t.Errorf("the upstream address must not be a table column")
+	end := strings.Index(page[start:], "\n}\n")
+	if end < 0 {
+		t.Fatalf("%s has no closing brace", name)
+	}
+	return page[start : start+end]
+}
+
+// TestOverviewRendersIndependentlyOfThePlanCard pins a regression that only shows up with
+// several credentials: when the selected credential answers 401/403 on the plan and limits
+// calls, renderPlan returns early with an error message. If the overview were rendered from
+// inside renderPlan, the previous credential's numbers would stay on screen and be
+// misattributed. The overview must be rendered by its callers instead.
+func TestOverviewRendersIndependentlyOfThePlanCard(t *testing.T) {
+	page := string(indexHTML(nil))
+	if body := jsFunctionBody(t, page, "renderPlan"); strings.Contains(body, "renderCards(") {
+		t.Error("renderPlan must not render the overview: its early return would leave the previous account's numbers on screen")
+	}
+	if body := jsFunctionBody(t, page, "renderCards"); strings.Contains(body, "renderPlan(") {
+		t.Error("renderCards must not depend on renderPlan")
+	}
+	if !strings.Contains(page, "renderCards(health.plan)") {
+		t.Error("load() must render the overview for every refresh, independent of the plan card")
+	}
+	if !strings.Contains(page, `$("plan-account").addEventListener("change"`) {
+		t.Fatal("page is missing the account picker listener")
+	}
+	lineStart := strings.Index(page, `$("plan-account").addEventListener("change"`)
+	lineEnd := strings.Index(page[lineStart:], "\n")
+	listener := page[lineStart : lineStart+lineEnd]
+	if !strings.Contains(listener, "renderPlan(") || !strings.Contains(listener, "renderCards(") {
+		t.Errorf("switching accounts must re-render both the plan card and the overview, got: %s", listener)
 	}
 }
 
@@ -104,10 +217,10 @@ func TestRouteManagementDispatch(t *testing.T) {
 		wantType   string
 	}{
 		{BasePath + "/health", 200, "application/json"},
-		{BasePath + "/stats", 200, "application/json"},
-		{BasePath + "/events", 200, "application/json"},
-		{BasePath + "/export", 200, "text/csv"},
 		{"/v0/resource/plugins/" + buildinfo.ID + "/index.html", 200, "text/html"},
+		{BasePath + "/stats", 404, "application/json"},
+		{BasePath + "/events", 404, "application/json"},
+		{BasePath + "/export", 404, "application/json"},
 		{BasePath + "/nope", 404, "application/json"},
 	}
 	for _, tc := range cases {
@@ -122,125 +235,6 @@ func TestRouteManagementDispatch(t *testing.T) {
 	}
 }
 
-func TestExportCSVHeader(t *testing.T) {
-	loadTestConfig(defaultConfigBytes())
-	req := pluginAPIRequest(BasePath + "/export?window=24h")
-	resp := route(&req)
-	body := string(resp.Body)
-	if !strings.HasPrefix(body, "timestamp,model,model_alias,session_id,base_url,host,provider") {
-		t.Errorf("unexpected CSV header: %q", strings.SplitN(body, "\n", 2)[0])
-	}
-	if disposition := resp.Headers.Get("Content-Disposition"); !strings.Contains(disposition, "clinepass-channel-monitor-") {
-		t.Errorf("missing download filename, got %q", disposition)
-	}
-}
-
-// TestChannelStatsCacheRatio checks the per-channel upstream cache ratio the page shows.
-func TestChannelStatsCacheRatio(t *testing.T) {
-	loadTestConfig(defaultConfigBytes())
-	st := state.Store()
-	now := time.Now()
-	st.Add(&store.Event{Timestamp: now, Model: "m", FinalProvider: "deepseek", PromptCacheHitTokens: 900, PromptCacheMissTokens: 100, InputTokens: 1000, CachedTokens: 800})
-	st.Add(&store.Event{Timestamp: now, Model: "m", FinalProvider: "deepseek", PromptCacheHitTokens: 90, PromptCacheMissTokens: 10, InputTokens: 100, CachedTokens: 0})
-	stats := st.StatsWindow(store.StatsWindowDay, "24h", now, plan.Quota{})
-	if len(stats.Channels) != 1 {
-		t.Fatalf("channels = %d, want 1", len(stats.Channels))
-	}
-	channel := stats.Channels[0]
-	if channel.PromptCacheHitTokens != 990 || channel.PromptCacheMissTokens != 110 {
-		t.Errorf("cache counters = %d/%d, want 990/110", channel.PromptCacheHitTokens, channel.PromptCacheMissTokens)
-	}
-	if got := channel.PromptCacheRatio; got < 0.89 || got > 0.91 {
-		t.Errorf("prompt cache ratio = %v, want about 0.9", got)
-	}
-	if got := channel.AvgCachedTokens; got != 400 {
-		t.Errorf("avg cached tokens = %v, want 400", got)
-	}
-	if stats.Requests != 2 {
-		t.Errorf("requests = %d, want 2", stats.Requests)
-	}
-}
-
-// TestSeriesBucketKeepsChartsBounded checks the bucket sizing used by the overview charts.
-func TestSeriesBucketKeepsChartsBounded(t *testing.T) {
-	cases := []struct {
-		window        time.Duration
-		wantBucket    int64
-		wantMaxBucket int
-	}{
-		{time.Hour, 120, 48},
-		{24 * time.Hour, 1920, 48},
-		{7 * 24 * time.Hour, 15360, 48},
-	}
-	for _, tc := range cases {
-		bucket, count := store.SeriesBucket(tc.window)
-		if bucket != tc.wantBucket {
-			t.Errorf("store.SeriesBucket(%v) bucket = %d, want %d", tc.window, bucket, tc.wantBucket)
-		}
-		if count > tc.wantMaxBucket {
-			t.Errorf("store.SeriesBucket(%v) count = %d, want <= %d", tc.window, count, tc.wantMaxBucket)
-		}
-	}
-}
-
-// TestStatsSeriesMapsEventsToBuckets verifies the chart data the page plots.
-func TestStatsSeriesMapsEventsToBuckets(t *testing.T) {
-	loadTestConfig(defaultConfigBytes())
-	st := state.Store()
-	now := time.Now()
-	st.Add(&store.Event{Timestamp: now.Add(-2 * time.Minute), TotalTokens: 100, PromptCacheHitTokens: 10, LatencyMS: 200, TTFTMS: 50, TokensPerSecond: 5})
-	st.Add(&store.Event{Timestamp: now.Add(-time.Minute), TotalTokens: 300, PromptCacheMissTokens: 20, LatencyMS: 400, TTFTMS: 60, TokensPerSecond: 7, Failed: true})
-	stats := st.StatsWindow(time.Hour, "1h", now, plan.Quota{})
-	if len(stats.Series.Labels) != len(stats.Series.Requests) {
-		t.Fatalf("series length mismatch: %d labels vs %d values", len(stats.Series.Labels), len(stats.Series.Requests))
-	}
-	var requestSum, tokenSum float64
-	for i := range stats.Series.Requests {
-		requestSum += stats.Series.Requests[i]
-		tokenSum += stats.Series.Tokens[i]
-	}
-	if requestSum != 2 {
-		t.Errorf("series requests = %v, want 2", requestSum)
-	}
-	if tokenSum != 400 {
-		t.Errorf("series tokens = %v, want 400", tokenSum)
-	}
-	last := len(stats.Series.Requests) - 1
-	if stats.Series.Failed[last] != 1 {
-		t.Errorf("failed bucket = %v, want 1 in the last bucket", stats.Series.Failed[last])
-	}
-}
-
-func TestResolveWindow(t *testing.T) {
-	cases := map[string]string{"": "24h", "1h": "1h", "24h": "24h", "7d": "7d", "30m": "30m", "bogus": "24h"}
-	for input, want := range cases {
-		if _, label := resolveWindow(input); label != want {
-			t.Errorf("resolveWindow(%q) = %q, want %q", input, label, want)
-		}
-	}
-}
-
-func TestEventFilterFromQuery(t *testing.T) {
-	values := url.Values{}
-	values.Set("window", "1h")
-	values.Set("limit", "5000")
-	values.Set("offset", "-3")
-	values.Set("channel", " deepseek ")
-	filter := filterFromQuery(values)
-	if filter.Limit != maxEventLimit {
-		t.Errorf("limit = %d, want clamped to %d", filter.Limit, maxEventLimit)
-	}
-	if filter.Offset != 0 {
-		t.Errorf("offset = %d, want 0", filter.Offset)
-	}
-	if filter.Channel != "deepseek" {
-		t.Errorf("channel = %q, want trimmed value", filter.Channel)
-	}
-	if filter.Since != store.StatsWindowHour {
-		t.Errorf("since = %v, want 1h", filter.Since)
-	}
-}
-
 // readFixture loads one captured response from the package testdata directory.
 func readFixture(t *testing.T, name string) []byte {
 	t.Helper()
@@ -251,38 +245,13 @@ func readFixture(t *testing.T, name string) []byte {
 	return raw
 }
 
-func TestRecordedManagementPayloadsStillRender(t *testing.T) {
-	// Captured API responses with every credential and request identifier replaced by a
-	// synthetic value, so the payloads stay realistic without carrying anything real.
-	for _, name := range []string{"management-health.json", "management-stats.json", "management-events.json"} {
-		raw := readFixture(t, name)
-		var decoded map[string]any
-		if errUnmarshal := json.Unmarshal(raw, &decoded); errUnmarshal != nil {
-			t.Fatalf("%s: %v", name, errUnmarshal)
-		}
-		encoded, errMarshal := json.Marshal(decoded)
-		if errMarshal != nil {
-			t.Fatalf("%s: %v", name, errMarshal)
-		}
-		if len(encoded) == 0 {
-			t.Fatalf("%s: empty payload", name)
-		}
-	}
-}
-
-// loadTestConfig mirrors what the plugin package does on load: parse the block, publish it
-// and reset the in-memory view. The management API only reads the published state, so the
-// test wires it directly instead of importing the plugin package (which imports this one).
+// loadTestConfig mirrors what the plugin package does on load: parse the block and publish
+// it. The management API only reads the published state, so the test wires it directly
+// instead of importing the plugin package (which imports this one).
 func loadTestConfig(raw []byte) {
 	cfg, errParse := config.Parse(raw)
 	if errParse != nil {
 		cfg = config.Default()
 	}
 	state.SetConfig(cfg)
-	if existing := state.Store(); existing == nil {
-		state.SetStore(store.New(cfg))
-	} else {
-		existing.Reconfigure(cfg)
-	}
-	state.Store().Reset()
 }

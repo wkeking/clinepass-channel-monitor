@@ -44,7 +44,7 @@ LDFLAGS    := -s -w -X github.com/wkeking/clinepass-channel-monitor/internal/bui
 # Where the CPA container reads plugins from. Override for your own deployment.
 INSTALL_DIR ?= /opt/cpa/plugins/$(GOOS)/$(GOARCH)
 
-.PHONY: all deps build strip test bench vet fmt lint clean clean-cache install uninstall tools help toolchain-dirs
+.PHONY: all deps build strip test vet fmt lint clean clean-cache install uninstall tools help toolchain-dirs
 
 all: build
 
@@ -69,10 +69,6 @@ $(BUILD_DIR)/$(LIB_NAME): $(shell find $(REPO_ROOT)/cmd $(REPO_ROOT)/internal -n
 ## test: run unit tests
 test: toolchain-dirs
 	$(GO_BIN) test ./...
-
-## bench: run the request-path benchmarks (hook cost, hashing, event marshalling)
-bench: toolchain-dirs
-	$(GO_BIN) test -run '^$$' -bench . -benchmem -benchtime 200x .
 
 ## vet: run go vet
 vet: toolchain-dirs

@@ -22,66 +22,28 @@ const (
 	// DefaultPlanUsageRefresh how often the official per-request records are paged. The
 	// usage interval is the longer one on purpose: the quota calls are cheap, while the
 	// per-request endpoint is cursor paginated and rate limited.
-	DefaultPlanRefresh         = 5 * time.Minute
-	DefaultPlanUsageRefresh    = 10 * time.Minute
-	defaultPlanRefresh         = DefaultPlanRefresh
-	defaultPlanUsageRefresh    = DefaultPlanUsageRefresh
-	DefaultRingSize            = 5000
-	defaultRingSize            = DefaultRingSize
-	defaultRetentionDays       = 30
-	defaultJoinWindow          = 5 * time.Second
-	defaultOrphanTTL           = 60 * time.Second
-	defaultUnmatchedHostSample = 20
-	defaultTimezone            = "Asia/Shanghai"
-	// defaultJSONLDir is expressed relative to the CPA working directory so the
-	// default never depends on one particular deployment layout.
-	defaultJSONLDir = "logs/channel-monitor"
+	DefaultPlanRefresh      = 5 * time.Minute
+	DefaultPlanUsageRefresh = 10 * time.Minute
+	defaultPlanRefresh      = DefaultPlanRefresh
+	defaultPlanUsageRefresh = DefaultPlanUsageRefresh
+	defaultTimezone         = "Asia/Shanghai"
 )
 
-// DefaultJoinWindow and DefaultOrphanTTL are the fallbacks for callers that read a
-// configuration which never went through Parse (for example a zero value in a test).
-const (
-	DefaultJoinWindow = defaultJoinWindow
-	DefaultOrphanTTL  = defaultOrphanTTL
-)
-
-// defaultHosts is the only value that carries a Cline assumption. It is a default,
-// never a hard requirement: an empty hosts list means "judge by routing marker only".
+// defaultHosts is what tells credential discovery which entries of CPA's own configuration
+// belong to Cline. It is a default, never a hard requirement: an empty hosts list falls back
+// to matching the entry name.
 var defaultHosts = []string{"api.cline.bot"}
 
-// config mirrors the plugins.configs.<id> block. The host hands that block to the
+// Config mirrors the plugins.configs.<id> block. The host hands that block to the
 // plugin as YAML (see pluginhost.runtimeConfigYAML), so the tags below are the
 // public configuration contract.
 type Config struct {
 	Enabled  bool     `yaml:"enabled"`
 	Priority int      `yaml:"priority"`
 	Hosts    []string `yaml:"hosts"`
-	// RequireRoutingMark switches on the strict mode: only requests whose response
-	// carried provider_metadata.gateway.routing are recorded. It is off by default so
-	// that models served through other routes are recorded too - their channel value
-	// then falls back to the serving provider (and stays empty if the upstream reported
-	// neither).
-	RequireRoutingMark bool `yaml:"require_routing_marker"`
-	UnmatchedHostSmpl  int  `yaml:"unmatched_host_samples"`
 
-	RingSize      int    `yaml:"ring_size"`
-	JSONLEnabled  bool   `yaml:"jsonl_enabled"`
-	JSONLDir      string `yaml:"jsonl_dir"`
-	RetentionDays int    `yaml:"retention_days"`
-
-	JoinWindow Duration `yaml:"join_window"`
-	OrphanTTL  Duration `yaml:"orphan_ttl"`
-
-	// MaskAPIKey, LogEvents, StorePlanningReasoning, CaptureCost and CaptureCache have fixed
-	// defaults and are deliberately absent from the host's configuration panel: a deployment
-	// has no reason to change them. The YAML keys stay readable so an existing configuration
-	// block that still carries them keeps working.
-	MaskAPIKey             bool   `yaml:"mask_api_key"`
-	LogEvents              bool   `yaml:"log_events"`
-	CaptureCost            bool   `yaml:"capture_cost"`
-	CaptureCache           bool   `yaml:"capture_cache"`
-	StorePlanningReasoning bool   `yaml:"store_planning_reasoning"`
-	Timezone               string `yaml:"timezone"`
+	// Timezone is the deployment's display timezone.
+	Timezone string `yaml:"timezone"`
 
 	// ---- Cline 订阅用量（官方接口）----
 	// The card is always on and the credential is discovered automatically, so PlanEnabled,
@@ -95,10 +57,8 @@ type Config struct {
 	PlanConfigPath   string   `yaml:"plan_config_path"`
 	PlanRefresh      Duration `yaml:"plan_refresh"`
 	PlanDailyEnabled bool     `yaml:"plan_daily_enabled"`
-	// PlanUsageEnabled switches the overview cards to Cline's official per-request
-	// records (request count, tokens, cache hit ratio) fetched from
-	// /users/{id}/usages. Latency and generation speed stay local: the official API
-	// does not expose them.
+	// PlanUsageEnabled switches the official per-request collection behind the account
+	// windows (request count, tokens, cache hit ratio) fetched from /users/{id}/usages.
 	PlanUsageEnabled bool     `yaml:"plan_usage_enabled"`
 	PlanUsageRefresh Duration `yaml:"plan_usage_refresh"`
 }
@@ -138,39 +98,27 @@ func (d Duration) Or(def time.Duration) time.Duration {
 	return def
 }
 
-// defaultConfig returns the configuration used when the host passes no YAML at all.
+// Default returns the configuration used when the host passes no YAML at all.
 func Default() Config {
 	return Config{
-		Enabled:            true,
-		Priority:           1,
-		Hosts:              append([]string(nil), defaultHosts...),
-		RequireRoutingMark: false,
-		UnmatchedHostSmpl:  defaultUnmatchedHostSample,
-		RingSize:           defaultRingSize,
-		JSONLEnabled:       true,
-		JSONLDir:           "",
-		RetentionDays:      defaultRetentionDays,
-		JoinWindow:         Duration{Value: defaultJoinWindow, Set: true},
-		OrphanTTL:          Duration{Value: defaultOrphanTTL, Set: true},
-		MaskAPIKey:         false,
-		LogEvents:          true,
-		CaptureCost:        true,
-		CaptureCache:       true,
-		Timezone:           defaultTimezone,
-		PlanEnabled:        true,
-		PlanBaseURL:        DefaultPlanBaseURL,
-		PlanRefresh:        Duration{Value: defaultPlanRefresh, Set: true},
-		PlanDailyEnabled:   true,
-		PlanUsageEnabled:   true,
-		PlanUsageRefresh:   Duration{Value: defaultPlanUsageRefresh, Set: true},
+		Enabled:          true,
+		Priority:         1,
+		Hosts:            append([]string(nil), defaultHosts...),
+		Timezone:         defaultTimezone,
+		PlanEnabled:      true,
+		PlanBaseURL:      DefaultPlanBaseURL,
+		PlanRefresh:      Duration{Value: defaultPlanRefresh, Set: true},
+		PlanDailyEnabled: true,
+		PlanUsageEnabled: true,
+		PlanUsageRefresh: Duration{Value: defaultPlanUsageRefresh, Set: true},
 	}
 }
 
-// parseConfig decodes the host-provided YAML block and normalizes it.
+// Parse decodes the host-provided YAML block and normalizes it.
 //
 // The distinction between "hosts absent" and "hosts: []" is deliberate:
-// absent keeps the Cline default, an explicit empty list switches the plugin
-// into marker-only mode.
+// absent keeps the Cline default, an explicit empty list means "match Cline entries by
+// name only" instead of by base URL host.
 func Parse(raw []byte) (Config, error) {
 	cfg := Default()
 	trimmed := bytes.TrimSpace(raw)
@@ -210,7 +158,7 @@ func decodeJSONConfig(raw []byte, cfg *Config) error {
 	return nil
 }
 
-// hostFromBaseURL returns the lower-cased host of a base URL, or "" when it cannot
+// HostFromBaseURL returns the lower-cased host of a base URL, or "" when it cannot
 // be parsed. It is the only place a base URL is interpreted.
 func HostFromBaseURL(raw string) string {
 	trimmed := strings.TrimSpace(raw)
@@ -228,19 +176,6 @@ func normalize(cfg *Config) {
 	for i := range cfg.Hosts {
 		cfg.Hosts[i] = strings.ToLower(strings.TrimSpace(cfg.Hosts[i]))
 	}
-	if cfg.RingSize < 1 {
-		cfg.RingSize = defaultRingSize
-	}
-	if cfg.RetentionDays < 1 {
-		cfg.RetentionDays = defaultRetentionDays
-	}
-	if cfg.UnmatchedHostSmpl < 0 {
-		cfg.UnmatchedHostSmpl = defaultUnmatchedHostSample
-	}
-	if strings.TrimSpace(cfg.JSONLDir) == "" {
-		cfg.JSONLDir = defaultJSONLDir
-	}
-	cfg.JSONLDir = strings.TrimRight(strings.TrimSpace(cfg.JSONLDir), "/")
 	if strings.TrimSpace(cfg.Timezone) == "" {
 		cfg.Timezone = defaultTimezone
 	}
@@ -254,15 +189,7 @@ func normalize(cfg *Config) {
 	}
 }
 
-// matchMode describes which judgement the current configuration uses.
-func (c Config) MatchMode() string {
-	if len(c.Hosts) == 0 {
-		return "marker-only"
-	}
-	return "host+marker"
-}
-
-// hostMatched reports whether a usage record's base_url host is one of the configured hosts.
+// HostMatched reports whether a Cline entry's base_url host is one of the configured hosts.
 //
 // Matching parses the URL and compares hosts case-insensitively; entries that start
 // with "." match a domain suffix. A prefix comparison would let

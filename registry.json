@@ -4,16 +4,15 @@
     {
       "id": "clinepass-channel-monitor",
       "name": "Cline 渠道监控",
-      "description": "逐条记录 Cline 请求实际命中的上游渠道、用量与成本，并提供管理页。",
+      "description": "展示 Cline 套餐、限额与官方用量，并提供管理页。",
       "author": "wkeking",
-      "version": "0.1.1",
+      "version": "0.2.0",
       "repository": "https://github.com/wkeking/clinepass-channel-monitor",
       "homepage": "https://github.com/wkeking/clinepass-channel-monitor",
       "license": "MIT",
       "tags": [
         "Management",
-        "Cline",
-        "Stats"
+        "Cline"
       ]
     }
   ]

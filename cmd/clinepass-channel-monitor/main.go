@@ -1,8 +1,8 @@
 // Command clinepass-channel-monitor builds a CLIProxyAPI (CPA) plugin shared library.
 //
-// The plugin records which upstream channel actually served each Cline subscription
-// request, together with usage, cost and cache counters. It observes; it never
-// modifies the traffic flowing through CPA.
+// The plugin shows the Cline subscription view (plan, rolling limits, official usage) on a
+// management page. It declares no request capability: it is never on the request path, so
+// it cannot slow the traffic flowing through CPA.
 package main
 
 /*

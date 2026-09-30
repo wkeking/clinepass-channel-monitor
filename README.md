@@ -83,7 +83,7 @@ plugins:
       hosts: ["api.cline.bot"]         # 哪些 openai-compatibility 条目算 Cline（支持 ".cline.bot" 后缀写法）
       timezone: "Asia/Shanghai"
       # ---- Cline 官方用量（套餐 / 限额 / 官方用量，恒定开启）----
-      plan_config_path: "/CLIProxyAPI/config.yaml"   # 容器内 CPA config.yaml 路径，用于读 Cline 凭据
+      plan_config_path: "/CLIProxyAPI/config.yaml"   # 容器内 CPA config.yaml 路径，用于读 Cline 凭据（留空则自动探测）
       plan_refresh: 5m                 # 套餐与限额刷新间隔
 ```
 
@@ -97,7 +97,7 @@ plugins:
 | `priority` | `1` | 插件优先级 |
 | `hosts` | `["api.cline.bot"]` | **只用于凭据发现**：决定 CPA `openai-compatibility` 里哪些条目算 Cline 条目，进而取它们的 `api-keys` / `api-key-entries` 来轮询官方套餐。匹配规则：用 `net/url` 解析条目的 `base-url` 取 host 后**小写精确比较**；以 `.` 开头的项按**域名后缀**匹配（`".cline.bot"` 命中 `api.cline.bot`，不命中 `evil-cline.bot`）。显式留空 `[]` → 不按 host 匹配，只认条目名恰为 `Cline` 的条目 |
 | `timezone` | `Asia/Shanghai` | 展示时区。v0.2.0 起页面按**浏览器本地时区**渲染官方接口返回的绝对时间，所以这个键被保留但**没有代码读取它**（原来的消费方是已移除的本地逐请求统计）；留着是为了兼容既有配置块 |
-| `plan_config_path` | `/CLIProxyAPI/config.yaml` | 容器内 CPA 配置文件路径。Cline 的 key 通常以 `openai-compatibility[].api-key-entries[].api-key` 存在这里 |
+| `plan_config_path` | 空（自动探测） | 容器内 CPA 配置文件路径，用于读 Cline 凭据。留空时按 `/CLIProxyAPI/config.yaml`（容器内挂载点）→ `/app/config.yaml` 依次尝试。Cline 的 key 通常以 `openai-compatibility[].api-key-entries[].api-key` 存在这里 |
 | `plan_refresh` | `5m` | 套餐、限额与官方用量的轮询周期（最小 1 分钟） |
 
 ### 固定值（不在插件配置面板里显示）
@@ -148,7 +148,7 @@ v0.1.x 的统计专用键（`require_routing_marker`、`unmatched_host_samples`�
 - 被上游拒绝的凭据（401/403，例如误把下游客户端 key 当成 Cline key）不进账号下拉，只在 `/health` 的 `plan_accounts` 里保留（带 `rejected: true`）；
 - 上游调用量按账号叠加：账号之间串行并间隔 0.5s，每个账号有自己的 26 小时保留窗口、分页预算与退避。
 
-**凭据发现顺序**：CPA `config.yaml` 里的 `openai-compatibility[].api-keys` / `api-key-entries` → CPA 凭据接口（`host.auth.list` / `host.auth.get`）。多数部署走到第一步就够了：CPA 会把你在供应商配置里填的 key 持久化到 `openai-compatibility[].api-key-entries[].api-key`，不需要手填任何 key（少一份密钥副本）；只有把配置文件放到容器外读不到时才需要手工写 `plan_api_key`。key 只留在内存，不落盘、不打日志、不返回给页面。
+**凭据发现顺序**：插件配置里的 `plan_api_key`（`source: plugin-config`，通常留空）→ CPA `config.yaml` 里的 `openai-compatibility[].api-keys` / `api-key-entries`（`source: config-file`）→ CPA 凭据接口（`host.auth.list` / `host.auth.get`，`source: host-auth`）。多数部署走到第二步就够了：CPA 会把你在供应商配置里填的 key 持久化到 `openai-compatibility[].api-key-entries[].api-key`，不需要手填任何 key（少一份密钥副本）；只有把配置文件放到容器外读不到时才需要手工写 `plan_api_key`。key 只留在内存，不落盘、不打日志、不返回给页面。
 
 **上游调用量与限流**：逐条明细接口不能按时间过滤，窗口内有多少条记录就要翻多少页（实测近 24 小时约 3500 条 ≈ 17 页）。因此插件在内存里保留最近 **26 小时**的记录，稳态下每次只翻到已见过的记录为止（通常 1 页）；首次回填或覆盖不足时按 300ms/页 节流，最多 60 页，遇到 429 等错误会指数退避（上限 30 分钟），所以覆盖范围会在几个刷新周期内长满，而不是一次打满。
 
@@ -224,7 +224,7 @@ v0.1.x 的 `/stats`、`/events`、`/export` 三条路由已移除，请求它们
 | `plan` | 完整套餐快照，页面直接渲染它：`available`、`source`、`account`、`plan_name`、`plan_price`、`limits[]`（`percent_used` / `resets_at` / `resets_in`）、`tokens`（31 天输入/输出/总量、成本、余额、计费条目数）、`usage`、`fetched_at`、`error`、`accounts[]` |
 | `plan_enabled` | 官方套餐轮询是否开启 |
 | `plan_usage` | 官方逐条用量的采集状态：`enabled`、`items`、`oldest`、`fetched_at`、`truncated`、`failures`、`retry_at`、`error` |
-| `plan_accounts` | 每个 Cline 凭据一行：`id`、`label`（掩码后的 key）、`source`（`config-file` / `host-auth`）、`available`、`rejected`、`account`、`items`、`oldest`、`truncated`、`failures`、`error` |
+| `plan_accounts` | 每个 Cline 凭据一行：`id`、`label`（掩码后的 key）、`source`（`plugin-config` / `config-file` / `host-auth`）、`available`、`rejected`、`account`、`items`、`oldest`、`truncated`、`failures`、`error` |
 | `request_header_names` / `request_bearer_len` | 上一次请求路径上看到的 header 名与 bearer 长度。v0.2.0 不声明任何请求能力，所以**恒为空**；保留是因为它们从来只含 header 名与长度，不含凭据值 |
 
 ## 隐私

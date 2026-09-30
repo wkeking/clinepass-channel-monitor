@@ -335,6 +335,8 @@ function renderCards(plan){
   const dailyOnly="官方没有该窗口的逐条明细（近 7 天窗口来自官方逐日汇总，只有 token 与成本）";
   const acctRange="官方累计"+dateRange(tok.from_date,tok.to_date);
   const acctSeries=tok.series&&tok.series.length?tok.series:(series.tokens||null);
+  // 凭据不可用时官方汇总根本没取到，这不是"用量为 0"：显示 0 会把"未知"说成"没有用量"。
+  const accountAvailable=view.account.available!==false;
   const cards=[
     offDetail
       ? card({label:"请求数",icon:"⇄",tint:"#60a5fa",tip:"官方口径：Cline 账号在该时间窗内的计费请求数（含其他客户端）。",
@@ -342,7 +344,9 @@ function renderCards(plan){
           sub:["官方逐条用量 · 更新于 "+fetched,"窗口 "+(off.from?fmtTime(off.from).slice(5,16):"—")+" ~ "+(off.to?fmtTime(off.to).slice(5,16):"—")],
           spark:series.requests})
       : card({label:"请求数",icon:"⇄",tint:"#60a5fa",tip:off?dailyOnly:noWindow,value:"—",unit:"条",sub:[off?dailyOnly:noWindow]}),
-    off
+    !accountAvailable
+      ? card({label:"总 Token 数",icon:"Σ",tint:"#38bdf8",tip:noWindow,value:"—",unit:"token",sub:[noWindow]})
+      : off
       ? card({label:"总 Token 数",icon:"Σ",tint:"#38bdf8",tip:"官方口径：主值为账号累计 token（近 31 天逐日汇总），副行为本窗口官方输入/输出。",
           value:scaled(tok.total_tokens||off.total_tokens),unit:"token",
           sub:[

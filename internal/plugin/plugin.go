@@ -138,7 +138,7 @@ func buildRegistration() registration {
 			Author:           buildinfo.Author,
 			GitHubRepository: buildinfo.Repository,
 			ConfigFields: []pluginapi.ConfigField{
-				{Name: "timezone", Type: pluginapi.ConfigFieldTypeString, Description: "展示时间使用的时区。"},
+				{Name: "timezone", Type: pluginapi.ConfigFieldTypeString, Description: "展示时区。官方接口返回的是绝对时间，页面按浏览器本地时区渲染，所以本版本没有代码读取它；保留是为了兼容既有配置块。"},
 				{Name: "plan_config_path", Type: pluginapi.ConfigFieldTypeString, Description: "容器内 CPA config.yaml 的路径，用于读取 Cline 凭据。"},
 				{Name: "plan_refresh", Type: pluginapi.ConfigFieldTypeString, Description: "官方套餐、限额与官方用量的轮询周期（例如 5m）。留空即用默认 5m，最小 1 分钟。"},
 			},

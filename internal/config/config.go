@@ -42,7 +42,9 @@ type Config struct {
 	Priority int      `yaml:"priority"`
 	Hosts    []string `yaml:"hosts"`
 
-	// Timezone is the deployment's display timezone.
+	// Timezone is the deployment's display timezone. Nothing reads it any more: it used to
+	// bucket the local per-request records by day, and those are gone. It stays because an
+	// existing configuration block still carries it.
 	Timezone string `yaml:"timezone"`
 
 	// ---- Cline 订阅用量（官方接口）----

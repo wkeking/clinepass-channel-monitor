@@ -96,7 +96,7 @@ plugins:
 | `enabled` | `true` | 关闭后不再注册路由、不再轮询官方用量 |
 | `priority` | `1` | 插件优先级 |
 | `hosts` | `["api.cline.bot"]` | **只用于凭据发现**：决定 CPA `openai-compatibility` 里哪些条目算 Cline 条目，进而取它们的 `api-keys` / `api-key-entries` 来轮询官方套餐。匹配规则：用 `net/url` 解析条目的 `base-url` 取 host 后**小写精确比较**；以 `.` 开头的项按**域名后缀**匹配（`".cline.bot"` 命中 `api.cline.bot`，不命中 `evil-cline.bot`）。显式留空 `[]` → 不按 host 匹配，只认条目名恰为 `Cline` 的条目 |
-| `timezone` | `Asia/Shanghai` | 展示时区 |
+| `timezone` | `Asia/Shanghai` | 展示时区。v0.2.0 起页面按**浏览器本地时区**渲染官方接口返回的绝对时间，所以这个键被保留但**没有代码读取它**（原来的消费方是已移除的本地逐请求统计）；留着是为了兼容既有配置块 |
 | `plan_config_path` | `/CLIProxyAPI/config.yaml` | 容器内 CPA 配置文件路径。Cline 的 key 通常以 `openai-compatibility[].api-key-entries[].api-key` 存在这里 |
 | `plan_refresh` | `5m` | 套餐、限额与官方用量的轮询周期（最小 1 分钟） |
 

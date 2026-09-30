@@ -209,6 +209,20 @@ func TestOverviewRendersIndependentlyOfThePlanCard(t *testing.T) {
 	}
 }
 
+// TestOverviewDoesNotInventZeroTotals pins the other half of the same case: when the plan
+// and limits calls fail, the official totals were never fetched, so the card must say so
+// instead of printing "0 token" as if the account had no usage. Only an account that
+// answered may show a number.
+func TestOverviewDoesNotInventZeroTotals(t *testing.T) {
+	body := jsFunctionBody(t, string(indexHTML(nil)), "renderCards")
+	if !strings.Contains(body, "available!==false") {
+		t.Error("renderCards must gate the totals on the credential being available")
+	}
+	if !strings.Contains(body, `value:"—",unit:"token"`) {
+		t.Error("an unavailable credential must render an unknown total, not a zero")
+	}
+}
+
 func TestRouteManagementDispatch(t *testing.T) {
 	loadTestConfig(defaultConfigBytes())
 	cases := []struct {

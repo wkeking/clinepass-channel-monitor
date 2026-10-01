@@ -936,10 +936,59 @@ func clineCredentialsFromHostAuth(cfg config.Config) []planCredential {
 	return out
 }
 
+// configFileProvider is one openai-compatibility entry of CPA's own configuration, in every
+// layout it has used: the keys live under api-key-entries[].api-key (classic) or under
+// keys[].api-key (the v8 schema), and the entry list itself moved under api-keys.
+type configFileProvider struct {
+	Name          string   `yaml:"name"`
+	BaseURL       string   `yaml:"base-url"`
+	Disabled      bool     `yaml:"disabled"`
+	APIKeys       []string `yaml:"api-keys"`
+	APIKeyEntries []struct {
+		APIKey string `yaml:"api-key"`
+	} `yaml:"api-key-entries"`
+	Keys []struct {
+		APIKey string `yaml:"api-key"`
+	} `yaml:"keys"`
+}
+
+// credentials returns every key the entry carries, whatever the layout calls the field.
+func (p configFileProvider) credentials() []string {
+	out := make([]string, 0, len(p.APIKeys)+len(p.APIKeyEntries)+len(p.Keys))
+	out = append(out, p.APIKeys...)
+	for _, entry := range p.APIKeyEntries {
+		out = append(out, entry.APIKey)
+	}
+	for _, entry := range p.Keys {
+		out = append(out, entry.APIKey)
+	}
+	return out
+}
+
+// openAICompatibilityProviders decodes the providers CPA persists. The list used to sit at
+// the top level of config.yaml; the v8 configuration schema (config-version: 8) nests it
+// under api-keys.openai-compatibility and renames the key list to keys. Both are read, so a
+// CPA upgrade that rewrites the file does not take the credentials away.
+func openAICompatibilityProviders(raw []byte) ([]configFileProvider, error) {
+	var file struct {
+		OpenAICompatibility []configFileProvider `yaml:"openai-compatibility"`
+		APIKeys             struct {
+			OpenAICompatibility []configFileProvider `yaml:"openai-compatibility"`
+		} `yaml:"api-keys"`
+	}
+	if errUnmarshal := yaml.Unmarshal(raw, &file); errUnmarshal != nil {
+		return nil, errUnmarshal
+	}
+	out := make([]configFileProvider, 0, len(file.OpenAICompatibility)+len(file.APIKeys.OpenAICompatibility))
+	out = append(out, file.OpenAICompatibility...)
+	out = append(out, file.APIKeys.OpenAICompatibility...)
+	return out, nil
+}
+
 // clineCredentialsFromConfigFile reads CPA's configuration and collects the keys of every
 // openai-compatibility entry that points at Cline: matched by base_url host, or by the entry
 // name being "Cline" when the host does not match. CPA persists the keys it was configured
-// with under api-key-entries, so this is normally the source that needs no user input.
+// with in that file, so this is normally the source that needs no user input.
 func clineCredentialsFromConfigFile(cfg config.Config) []planCredential {
 	out := make([]planCredential, 0, 2)
 	paths := planConfigPaths
@@ -952,23 +1001,13 @@ func clineCredentialsFromConfigFile(cfg config.Config) []planCredential {
 			hostapi.LogAsync("info", buildinfo.ID+": config attempt: "+path+": "+errRead.Error(), nil)
 			continue
 		}
-		var file struct {
-			OpenAICompatibility []struct {
-				Name          string   `yaml:"name"`
-				BaseURL       string   `yaml:"base-url"`
-				Disabled      bool     `yaml:"disabled"`
-				APIKeys       []string `yaml:"api-keys"`
-				APIKeyEntries []struct {
-					APIKey string `yaml:"api-key"`
-				} `yaml:"api-key-entries"`
-			} `yaml:"openai-compatibility"`
-		}
-		if errUnmarshal := yaml.Unmarshal(raw, &file); errUnmarshal != nil {
+		providers, errDecode := openAICompatibilityProviders(raw)
+		if errDecode != nil {
 			hostapi.LogAsync("info", buildinfo.ID+": config attempt: "+path+": decode failed", nil)
 			continue
 		}
 		found := 0
-		for _, entry := range file.OpenAICompatibility {
+		for _, entry := range providers {
 			if entry.Disabled {
 				continue
 			}
@@ -987,13 +1026,8 @@ func clineCredentialsFromConfigFile(cfg config.Config) []planCredential {
 			if name == "" {
 				name = host
 			}
-			keys := make([]string, 0, len(entry.APIKeys)+len(entry.APIKeyEntries))
-			keys = append(keys, entry.APIKeys...)
-			for _, keyEntry := range entry.APIKeyEntries {
-				keys = append(keys, keyEntry.APIKey)
-			}
 			index := 0
-			for _, key := range keys {
+			for _, key := range entry.credentials() {
 				trimmed := strings.TrimSpace(key)
 				if trimmed == "" {
 					continue

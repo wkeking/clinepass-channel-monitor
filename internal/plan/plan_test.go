@@ -47,6 +47,84 @@ func TestClineAPIKeyFromConfigFileReadsAPIKeyEntries(t *testing.T) {
 	}
 }
 
+// TestClineAPIKeyFromConfigFileReadsV8Schema guards the other layout CPA writes: since the
+// v8 configuration schema the providers live under api-keys.openai-compatibility and the
+// keys under keys[].api-key. A CPA that migrated config.yaml must not lose the credentials.
+func TestClineAPIKeyFromConfigFileReadsV8Schema(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	content := "config-version: 8\n" +
+		"api-keys:\n" +
+		"  codex: []\n" +
+		"  claude: []\n" +
+		"  openai-compatibility:\n" +
+		"    - name: DeepSeek\n" +
+		"      base-url: https://api.deepseek.com\n" +
+		"      keys:\n" +
+		"        - api-key: other-key\n" +
+		"    - name: Cline1\n" +
+		"      base-url: https://api.cline.bot/api/v1\n" +
+		"      keys:\n" +
+		"        - api-key: key-one-from-keys\n" +
+		"        - api-key: key-two-from-keys\n" +
+		"    - name: Cline2\n" +
+		"      base-url: https://api.cline.bot/api/v1\n" +
+		"      keys:\n" +
+		"        - api-key: key-three-from-keys\n" +
+		"    - name: Disabled Cline\n" +
+		"      base-url: https://api.cline.bot/api/v1\n" +
+		"      disabled: true\n" +
+		"      keys:\n" +
+		"        - api-key: disabled-key\n"
+	if errWrite := os.WriteFile(path, []byte(content), 0o600); errWrite != nil {
+		t.Fatalf("write fixture: %v", errWrite)
+	}
+	cfg := config.Default()
+	cfg.PlanConfigPath = path
+
+	creds := clineCredentialsFromConfigFile(cfg)
+	if len(creds) != 3 {
+		t.Fatalf("creds = %+v，期望 v8 布局下的 3 个 key（禁用条目与非 Cline 条目不算）", creds)
+	}
+	if creds[0].Key != "key-one-from-keys" || creds[1].Key != "key-two-from-keys" || creds[2].Key != "key-three-from-keys" {
+		t.Errorf("keys = %q/%q/%q", creds[0].Key, creds[1].Key, creds[2].Key)
+	}
+	if creds[0].Label != "Cline1 #1 · key…keys" {
+		t.Errorf("label = %q，期望「条目名 #序号 · 掩码key」", creds[0].Label)
+	}
+	if creds[0].Source != "config-file" {
+		t.Errorf("source = %q，期望 config-file", creds[0].Source)
+	}
+}
+
+// TestClineAPIKeyFromConfigFileReadsBothLayouts keeps a half-migrated file loadable: the new
+// api-keys section and a leftover top-level list are both read.
+func TestClineAPIKeyFromConfigFileReadsBothLayouts(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	content := "openai-compatibility:\n" +
+		"  - name: Cline\n" +
+		"    base-url: https://api.cline.bot/api/v1\n" +
+		"    api-key-entries:\n" +
+		"      - api-key: legacy-key\n" +
+		"api-keys:\n" +
+		"  openai-compatibility:\n" +
+		"    - name: Cline1\n" +
+		"      base-url: https://api.cline.bot/api/v1\n" +
+		"      keys:\n" +
+		"        - api-key: new-key\n"
+	if errWrite := os.WriteFile(path, []byte(content), 0o600); errWrite != nil {
+		t.Fatalf("write fixture: %v", errWrite)
+	}
+	cfg := config.Default()
+	cfg.PlanConfigPath = path
+
+	creds := clineCredentialsFromConfigFile(cfg)
+	if len(creds) != 2 || creds[0].Key != "legacy-key" || creds[1].Key != "new-key" {
+		t.Fatalf("creds = %+v，期望新旧两种布局的 key 都被读到", creds)
+	}
+}
+
 // fakeClineAPI serves the Cline dashboard endpoints the plan poller uses.
 func fakeClineAPI(t *testing.T, now time.Time) *httptest.Server {
 	t.Helper()

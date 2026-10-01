@@ -16,4 +16,4 @@ const (
 // Version is stamped at build time:
 //
 //	-ldflags "-X github.com/wkeking/clinepass-channel-monitor/internal/buildinfo.Version=..."
-var Version = "0.2.0"
+var Version = "0.2.1"

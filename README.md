@@ -155,7 +155,9 @@ v0.1.x 的统计专用键（`require_routing_marker`、`unmatched_host_samples`�
 - 被上游拒绝的凭据（401/403，例如误把下游客户端 key 当成 Cline key）不进账号下拉，只在 `/health` 的 `plan_accounts` 里保留（带 `rejected: true`）；
 - 上游调用量按账号叠加：账号之间串行并间隔 0.5s，每个账号有自己的 26 小时保留窗口、分页预算与退避。
 
-**凭据发现顺序**：插件配置里的 `plan_api_key`（`source: plugin-config`，通常留空）→ CPA `config.yaml` 里的 `openai-compatibility[].api-keys` / `api-key-entries`（`source: config-file`）→ CPA 凭据接口（`host.auth.list` / `host.auth.get`，`source: host-auth`）。多数部署走到第二步就够了：CPA 会把你在供应商配置里填的 key 持久化到 `openai-compatibility[].api-key-entries[].api-key`，不需要手填任何 key（少一份密钥副本）；只有把配置文件放到容器外读不到时才需要手工写 `plan_api_key`。key 只留在内存，不落盘、不打日志、不返回给页面。
+**凭据发现顺序**：插件配置里的 `plan_api_key`（`source: plugin-config`，通常留空）→ CPA `config.yaml` 里的 Cline 供应商条目（`source: config-file`）→ CPA 凭据接口（`host.auth.list` / `host.auth.get`，`source: host-auth`）。多数部署走到第二步就够了：CPA 会把你在供应商配置里填的 key 持久化到自己的配置文件里，不需要手填任何 key（少一份密钥副本）；只有把配置文件放到容器外读不到时才需要手工写 `plan_api_key`。key 只留在内存，不落盘、不打日志、不返回给页面。
+
+**两种配置文件布局都支持**：CPA ≤ v7 把供应商放在顶层 `openai-compatibility:`、key 放在 `api-key-entries[].api-key`；v8 的配置 schema（`config-version: 8`）把它们挪到 `api-keys.openai-compatibility:` 下、key 改名成 `keys[].api-key`。插件从 **0.2.1** 起两种都会读（0.2.0 只认旧布局，CPA 改写配置文件后会读不到凭据），平铺的 `api-keys: ["sk_…"]` 字符串写法也一并支持。
 
 **上游调用量与限流**：逐条明细接口不能按时间过滤，窗口内有多少条记录就要翻多少页（实测近 24 小时约 3500 条 ≈ 17 页）。因此插件在内存里保留最近 **26 小时**的记录，稳态下每次只翻到已见过的记录为止（通常 1 页）；首次回填或覆盖不足时按 300ms/页 节流，最多 60 页，遇到 429 等错误会指数退避（上限 30 分钟），所以覆盖范围会在几个刷新周期内长满，而不是一次打满。
 
@@ -251,6 +253,7 @@ v0.1.x 的 `/stats`、`/events`、`/export` 三条路由已移除，请求它们
 | 插件在 `plugins` 列表里但页面 404 | 检查 CPA 版本是否满足；改一次配置触发重扫；确认资源路由路径为 `/v0/resource/plugins/clinepass-channel-monitor/index.html` |
 | 页面能开但一直空 | 页面里的管理密钥没填或填错（管理接口会返回 401/403）；或 `plan_accounts` 为空（凭据没被发现） |
 | 套餐卡片提示「插件拿不到 Cline API Key」 | 插件读的是 CPA 自己的 Cline 凭据：确认 CPA 里有指向 `api.cline.bot` 的 `openai-compatibility` 条目（或条目名恰为 `Cline`），且 `plan_config_path` 指向容器内可读的 `config.yaml`；`/health` 的 `plan_accounts` 会列出每个凭据的来源、可用性与错误 |
+| 同上，但 CPA 是 v8 且配置文件里有 `config-version: 8` | 插件 0.2.0 只认顶层 `openai-compatibility:`，而 v8 把它挪进了 `api-keys.openai-compatibility:`，于是读不到 key。升级到 **0.2.1+** 即可；升级前可临时在插件配置里写 `plan_api_key` 顶上 |
 | `plan_accounts[].rejected: true` | 该 key 被上游拒绝（401/403）。检查条目里的 key 是否真的是 Cline key（形如 `sk_…`、长度 ≥ 32），不要填下游客户端 key |
 | 官方逐条用量的 `items` 一直不涨 | 看 `plan_usage.error` / `retry_at`：429 会指数退避（上限 30 分钟）；`plan_usage_enabled: false` 时不会采集 |
 | 你还在请求 `/stats`、`/events`、`/export` | v0.2.0 已移除，返回 404 属预期。要看历史逐请求数据，用 v0.1.x 写入的 JSONL 文件，或回滚到 v0.1.1 |

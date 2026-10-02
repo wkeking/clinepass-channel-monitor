@@ -10,6 +10,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 
 	"github.com/wkeking/clinepass-channel-monitor/internal/observation"
+	"github.com/wkeking/clinepass-channel-monitor/internal/plan"
 	"github.com/wkeking/clinepass-channel-monitor/internal/state"
 )
 
@@ -30,6 +31,37 @@ type channelView struct {
 	Records      []observation.Record `json:"records"`
 	RecordsTotal int                  `json:"records_total"`
 	Health       observation.Health   `json:"health"`
+	// OfficialChannels is the official-source dimension beside the CPA-credential channel
+	// above: which upstream inference channel Cline reported for each record, crossed with
+	// the model that actually ran. It is always a list, never null, and it is keyed by the
+	// collector's retention window rather than the requested one (the caption beside the
+	// table states the coverage).
+	//
+	// It counts successful, billable requests only: a failed request never reaches Cline's
+	// usage endpoint, so a failure can only be attributed to a CPA credential and never to
+	// an upstream channel.
+	OfficialChannels []plan.OfficialChannelRow `json:"official_channels"`
+	// OfficialUsage is the collector's own state (enabled, retained items, oldest retained
+	// timestamp, last fetch, last error). The page uses it to say how far back the official
+	// records reach instead of presenting a partial window as a total.
+	OfficialUsage plan.UsageState `json:"official_usage"`
+}
+
+// officialChannelView reads the official-usage dimension out of the plan poller. Both halves
+// stay empty until a collector has fetched something: a deployment with the plan poller
+// switched off, or one that has not reached Cline yet, still gets the key as an empty list
+// plus the metadata that explains it, never a null the page would have to special-case.
+func officialChannelView() ([]plan.OfficialChannelRow, plan.UsageState) {
+	rows := []plan.OfficialChannelRow{}
+	poller := state.Plan()
+	if poller == nil {
+		return rows, plan.UsageState{}
+	}
+	snapshot := poller.Snapshot()
+	if len(snapshot.OfficialChannels) > 0 {
+		rows = snapshot.OfficialChannels
+	}
+	return rows, snapshot.Usage
 }
 
 // buildChannelView answers one window of channel observation.
@@ -38,13 +70,16 @@ func buildChannelView(req *pluginapi.ManagementRequest) pluginapi.ManagementResp
 	if !ok {
 		return errorResponse(http.StatusBadRequest, "invalid_window", "window must be 1h, 24h or 7d")
 	}
+	officialChannels, officialUsage := officialChannelView()
 	recorder := state.Observation()
 	if recorder == nil {
 		cfg := state.Config()
 		return jsonResponse(channelView{
-			Enabled: false,
-			Summary: observation.Summary{Window: string(window)},
-			Health:  observation.Health{Directory: cfg.ChannelStoreDir},
+			Enabled:          false,
+			Summary:          observation.Summary{Window: string(window)},
+			Health:           observation.Health{Directory: cfg.ChannelStoreDir},
+			OfficialChannels: officialChannels,
+			OfficialUsage:    officialUsage,
 		})
 	}
 	summary := recorder.Summary(window)
@@ -57,11 +92,13 @@ func buildChannelView(req *pluginapi.ManagementRequest) pluginapi.ManagementResp
 		records = []observation.Record{}
 	}
 	return jsonResponse(channelView{
-		Enabled:      true,
-		Summary:      summary,
-		Records:      records,
-		RecordsTotal: total,
-		Health:       summary.Health,
+		Enabled:          true,
+		Summary:          summary,
+		Records:          records,
+		RecordsTotal:     total,
+		Health:           summary.Health,
+		OfficialChannels: officialChannels,
+		OfficialUsage:    officialUsage,
 	})
 }
 

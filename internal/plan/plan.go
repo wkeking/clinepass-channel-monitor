@@ -121,8 +121,13 @@ type AccountSnapshot struct {
 	TokensError     string                 `json:"tokens_error,omitempty"`
 	Windows         map[string]UsageWindow `json:"windows,omitempty"`
 	Usage           UsageState             `json:"usage"`
-	FetchedAt       string                 `json:"fetched_at,omitempty"`
-	Error           string                 `json:"error,omitempty"`
+	// OfficialChannels crosses the upstream inference channel Cline reported for each record
+	// with the model that actually ran, over the whole window the collector retains (the
+	// records behind it are the successful, billable ones; a failed request has no record and
+	// therefore no channel). It is never null: no records yet means an empty list.
+	OfficialChannels []OfficialChannelRow `json:"official_channels"`
+	FetchedAt        string               `json:"fetched_at,omitempty"`
+	Error            string               `json:"error,omitempty"`
 }
 
 // Quota is the cached view served to the page.
@@ -149,6 +154,9 @@ type Quota struct {
 	TokensError string `json:"tokens_error,omitempty"`
 	// Windows carries the official per-request aggregates for the page windows (1h/24h/7d).
 	Windows map[string]UsageWindow `json:"windows,omitempty"`
+	// OfficialChannels mirrors the primary account's upstream-channel aggregate, the second
+	// dimension beside the CPA-credential channel view. Always a list, never null.
+	OfficialChannels []OfficialChannelRow `json:"official_channels"`
 	// Usage describes the official record collector behind Windows.
 	Usage     UsageState `json:"usage"`
 	FetchedAt string     `json:"fetched_at,omitempty"`
@@ -516,7 +524,7 @@ func (p *Poller) refresh() {
 			})
 			p.loggedEmpty = true
 		}
-		p.store(Quota{Source: "cline-api", Error: "no Cline api key available yet"})
+		p.store(Quota{Source: "cline-api", Error: "no Cline api key available yet", OfficialChannels: []OfficialChannelRow{}})
 		return
 	}
 	p.loggedEmpty = false
@@ -531,8 +539,9 @@ func (p *Poller) refresh() {
 		if covered, ok := byUserID[account.userID]; ok && account.userID != "" {
 			account.snapshot = AccountSnapshot{
 				ID: account.id, Label: account.label, Source: account.source,
-				Account: shortAccountID(account.userID),
-				Error:   "与 " + covered + " 是同一个 Cline 账号，已合并（未重复拉取）",
+				Account:          shortAccountID(account.userID),
+				OfficialChannels: []OfficialChannelRow{},
+				Error:            "与 " + covered + " 是同一个 Cline 账号，已合并（未重复拉取）",
 			}
 			continue
 		}
@@ -551,6 +560,9 @@ func (p *Poller) refreshAccount(cfg config.Config, account *planAccount) {
 	snapshot := AccountSnapshot{
 		ID: account.id, Label: account.label, Source: account.source,
 		Tokens: account.tokens, TokensError: account.tokensErr,
+		// Replaced by the collector's rows in attachUsage while usage collection is on; the
+		// empty list keeps the field a list on the paths that return early.
+		OfficialChannels: []OfficialChannelRow{},
 	}
 
 	user, errMe := client.me()
@@ -661,11 +673,12 @@ func (p *Poller) attachUsage(cfg config.Config, account *planAccount, snapshot *
 		snapshot.Windows["7d"] = *account.window7
 	}
 	snapshot.Usage = account.usage.state(true)
+	snapshot.OfficialChannels = account.usage.officialChannelRows()
 }
 
 // publish exposes the per-account snapshots plus the primary one under the legacy fields.
 func (p *Poller) publish() {
-	quota := Quota{Source: "cline-api"}
+	quota := Quota{Source: "cline-api", OfficialChannels: []OfficialChannelRow{}}
 	for _, account := range p.accounts {
 		quota.Accounts = append(quota.Accounts, account.snapshot)
 	}
@@ -689,10 +702,21 @@ func (p *Poller) publish() {
 		quota.TokensError = snapshot.TokensError
 		quota.Windows = snapshot.Windows
 		quota.Usage = snapshot.Usage
+		quota.OfficialChannels = officialChannelRowsOrEmpty(snapshot.OfficialChannels)
 		quota.FetchedAt = snapshot.FetchedAt
 		quota.Error = snapshot.Error
 	}
 	p.store(quota)
+}
+
+// officialChannelRowsOrEmpty keeps the upstream-channel list a list in every payload: a
+// deployment whose collector has nothing yet must see [], not null, because the page
+// iterates it and "no records yet" is a different statement from "no value".
+func officialChannelRowsOrEmpty(rows []OfficialChannelRow) []OfficialChannelRow {
+	if rows == nil {
+		return []OfficialChannelRow{}
+	}
+	return rows
 }
 
 // primaryAccount is the account the page shows by default: the first one that answered,

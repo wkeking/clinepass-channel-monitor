@@ -439,3 +439,111 @@ func TestOfficialDailyWindowGroupsByNaturalDay(t *testing.T) {
 		t.Errorf("不知道账号创建时间时不应声称已覆盖")
 	}
 }
+
+// TestOfficialChannelRowsAggregateByProviderAndModel checks the official-source dimension the
+// page shows beside the CPA-credential channel distribution: the upstream inference channel is
+// read off the record, one row per (channel, raw model) pair, and a record the upstream sent
+// without the field lands in the explicit unknown channel instead of an empty one.
+func TestOfficialChannelRowsAggregateByProviderAndModel(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	items := []officialUsageRawItem{
+		usageItem("usg-1", now.Add(-10*time.Minute), 1000, 100, 800, 1_000_000),
+		usageItem("usg-2", now.Add(-20*time.Minute), 500, 50, 200, 500_000),
+		usageItem("usg-3", now.Add(-30*time.Minute), 300, 30, 100, 250_000),
+		usageItem("usg-4", now.Add(-40*time.Minute), 200, 20, 50, 100_000),
+	}
+	items[0].AIInferenceProviderName = "vercel"
+	items[1].AIInferenceProviderName = "vercel"
+	items[2].AIInferenceProviderName = "bedrock"
+	// usg-4 keeps no provider at all (payload from before the field existed) and switches to
+	// another model, so the unknown channel is a row of its own.
+	items[3].Metadata.RawModel = "z-ai/glm-5.3"
+	server, _ := fakeUsageAPI(t, &items)
+	collector := newTestCollector()
+	collector.fetch(usageClient(t, server), "usr-test", planDefaultUsageRefresh, now)
+
+	rows := collector.officialChannelRows()
+	if len(rows) != 3 {
+		t.Fatalf("上游渠道行数 = %d，期望 3（两个渠道 + 一条没有 provider 的记录）: %+v", len(rows), rows)
+	}
+	first := rows[0]
+	if first.InferenceProvider != "vercel" || first.Model != "deepseek/deepseek-v4.1-flash" {
+		t.Fatalf("首行 = %+v，期望 vercel 上的 deepseek（请求数最多）", first)
+	}
+	if first.Requests != 2 || first.InputTokens != 1500 || first.OutputTokens != 150 || first.CachedTokens != 1000 {
+		t.Errorf("vercel/deepseek 行 = %+v，期望 requests=2 input=1500 output=150 cached=1000", first)
+	}
+	if math.Abs(first.CostUSD-1.5) > 1e-9 {
+		t.Errorf("vercel/deepseek 成本 = %v，期望 1.5 USD（上游以微美元计价）", first.CostUSD)
+	}
+	// 请求数相同时按模型名升序；同一个模型被不同渠道服务是两行，行上的渠道列才能唯一。
+	second := rows[1]
+	if second.InferenceProvider != "bedrock" || second.Model != "deepseek/deepseek-v4.1-flash" || second.Requests != 1 {
+		t.Errorf("第二行 = %+v，期望 bedrock 上的 deepseek", second)
+	}
+	third := rows[2]
+	if third.InferenceProvider != unknownProviderLabel || third.Model != "z-ai/glm-5.3" || third.Requests != 1 {
+		t.Errorf("第三行 = %+v，期望缺 provider 的记录落在 %q 行，而不是空渠道", third, unknownProviderLabel)
+	}
+	if third.InputTokens != 200 || math.Abs(third.CostUSD-0.1) > 1e-9 {
+		t.Errorf("未知渠道行 = %+v，期望 input=200 cost=0.1", third)
+	}
+	var requests, input, output, cached int64
+	var cost float64
+	for _, row := range rows {
+		requests += row.Requests
+		input += row.InputTokens
+		output += row.OutputTokens
+		cached += row.CachedTokens
+		cost += row.CostUSD
+	}
+	if requests != 4 || input != 2000 || output != 200 || cached != 1150 || math.Abs(cost-1.85) > 1e-9 {
+		t.Errorf("行合计 = %d 条 / 输入 %d / 输出 %d / 缓存 %d / %v USD，期望 4 / 2000 / 200 / 1150 / 1.85",
+			requests, input, output, cached, cost)
+	}
+
+	// The same records feed the per-model table, which now carries the channel on every row:
+	// the row a model was split into must name one channel, not a mixture.
+	day := collector.aggregate(now, now.AddDate(0, 0, -30))["24h"]
+	if len(day.Models) != 3 {
+		t.Fatalf("按模型行数 = %d，期望 3（同一模型的两个渠道拆成两行）: %+v", len(day.Models), day.Models)
+	}
+	byChannel := map[string]UsageModelRow{}
+	for _, row := range day.Models {
+		byChannel[row.InferenceProvider+"/"+row.Model] = row
+	}
+	if got := byChannel["vercel/deepseek/deepseek-v4.1-flash"]; got.Requests != 2 || got.TotalTokens != 1650 {
+		t.Errorf("vercel 上的 deepseek 行 = %+v，期望 requests=2 total=1650", got)
+	}
+	if got := byChannel["bedrock/deepseek/deepseek-v4.1-flash"]; got.Requests != 1 {
+		t.Errorf("bedrock 上的 deepseek 行 = %+v，期望单独一行", got)
+	}
+	if got, ok := byChannel["/z-ai/glm-5.3"]; !ok || got.InferenceProvider != "" {
+		t.Errorf("缺 provider 的模型行 = %+v（存在 %v），期望渠道列留空而不是编造一个渠道", got, ok)
+	}
+}
+
+// TestOfficialChannelRowsAreAnEmptyListWithoutRecords pins the empty state: a collector that
+// has fetched nothing — and the nil collector of a deployment with the collector off — must
+// answer an empty list rather than null, because the page iterates the value.
+func TestOfficialChannelRowsAreAnEmptyListWithoutRecords(t *testing.T) {
+	collector := newTestCollector()
+	rows := collector.officialChannelRows()
+	if rows == nil {
+		t.Fatal("没有记录时 officialChannelRows 应返回空列表，而不是 nil")
+	}
+	if len(rows) != 0 {
+		t.Errorf("没有记录时行数 = %d，期望 0", len(rows))
+	}
+	var off *officialUsageCollector
+	if rows := off.officialChannelRows(); rows == nil || len(rows) != 0 {
+		t.Errorf("采集器未运行时 = %+v，期望空列表", rows)
+	}
+	encoded, errMarshal := json.Marshal(Quota{Source: "cline-api", OfficialChannels: officialChannelRowsOrEmpty(rows)})
+	if errMarshal != nil {
+		t.Fatalf("快照必须能序列化: %v", errMarshal)
+	}
+	if !strings.Contains(string(encoded), `"official_channels":[]`) {
+		t.Errorf("空采集器的载荷应带 official_channels:[]，实际 %s", encoded)
+	}
+}

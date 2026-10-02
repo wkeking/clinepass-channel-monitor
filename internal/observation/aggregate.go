@@ -47,10 +47,13 @@ func (w Window) Duration() time.Duration {
 
 // ProviderStat is one upstream channel inside the window.
 type ProviderStat struct {
-	Provider     string  `json:"provider"`
-	Requests     int64   `json:"requests"`
-	Ratio        float64 `json:"ratio"`
-	OffBaseline  int64   `json:"off_baseline"`
+	Provider    string  `json:"provider"`
+	Requests    int64   `json:"requests"`
+	Ratio       float64 `json:"ratio"`
+	OffBaseline int64   `json:"off_baseline"`
+	// Failed counts the requests the host reported as failed on this channel: the number
+	// that separates "this channel is slow" from "this channel is broken".
+	Failed       int64   `json:"failed"`
 	TTFTP50Ms    float64 `json:"ttft_p50_ms"`
 	TTFTP90Ms    float64 `json:"ttft_p90_ms"`
 	DecodeP50    float64 `json:"decode_p50_tps"`
@@ -76,6 +79,7 @@ type HourPoint struct {
 	Hour        time.Time `json:"hour"`
 	Requests    int64     `json:"requests"`
 	OffBaseline int64     `json:"off_baseline"`
+	Failed      int64     `json:"failed"`
 	Fallbacks   int64     `json:"fallbacks"`
 	TTFTP50Ms   float64   `json:"ttft_p50_ms"`
 	DecodeP50   float64   `json:"decode_p50_tps"`
@@ -96,8 +100,11 @@ type Summary struct {
 	Resolved    int64   `json:"resolved_requests"`
 	OffBaseline int64   `json:"off_baseline_requests"`
 	OffRatio    float64 `json:"off_baseline_ratio"`
-	Fallbacks   int64   `json:"fallback_requests"`
-	Channels    int     `json:"channels"`
+	// FailedRequests counts the records the host reported as failed; a window's failure rate
+	// is FailedRequests / Resolved.
+	FailedRequests int64 `json:"failed_requests"`
+	Fallbacks      int64 `json:"fallback_requests"`
+	Channels       int   `json:"channels"`
 
 	TTFTP50Ms    float64 `json:"ttft_p50_ms"`
 	TTFTP90Ms    float64 `json:"ttft_p90_ms"`
@@ -158,6 +165,7 @@ func (r *Recorder) Summary(window Window) Summary {
 		}
 		point.Requests += bucket.requests
 		point.OffBaseline += bucket.off
+		point.Failed += bucket.failed
 		point.Fallbacks += bucket.fallback
 		point.CostUSD += bucket.cost
 		point.TTFTP50Ms = median(bucket.ttft, 0.5)
@@ -165,6 +173,7 @@ func (r *Recorder) Summary(window Window) Summary {
 
 		summary.Resolved += bucket.requests
 		summary.OffBaseline += bucket.off
+		summary.FailedRequests += bucket.failed
 		summary.Fallbacks += bucket.fallback
 		summary.InputTokens += bucket.input
 		summary.OutputTokens += bucket.output
@@ -181,6 +190,7 @@ func (r *Recorder) Summary(window Window) Summary {
 			}
 			target.Requests += entry.requests
 			target.OffBaseline += entry.off
+			target.Failed += entry.failed
 			target.InputTokens += entry.input
 			target.OutputTokens += entry.output
 			target.CachedTokens += entry.cached
@@ -270,6 +280,7 @@ type bucket struct {
 	hour     time.Time
 	requests int64
 	off      int64
+	failed   int64
 	fallback int64
 	input    int64
 	output   int64
@@ -285,6 +296,7 @@ type bucket struct {
 type providerAgg struct {
 	requests int64
 	off      int64
+	failed   int64
 	input    int64
 	output   int64
 	cached   int64
@@ -334,6 +346,8 @@ func (a *aggregate) add(record Record, baseline string) {
 
 	provider := record.FinalProvider
 	if provider == "" {
+		// A v1 line can carry only the resolved side; a v2 record sets both from the
+		// credential the host reported.
 		provider = record.ResolvedProvider
 	}
 	off := int64(0)
@@ -341,8 +355,16 @@ func (a *aggregate) add(record Record, baseline string) {
 		off = 1
 	}
 
+	failed := int64(0)
+	if record.Failed {
+		failed = 1
+	}
+
 	current.requests++
 	current.off += off
+	current.failed += failed
+	// The fallback counters came from the gateway routing block, which the usage payload does
+	// not carry: they stay zero instead of being guessed at.
 	if record.Attempts > 1 || record.ModelAttempts > 1 {
 		current.fallback++
 	}
@@ -361,6 +383,7 @@ func (a *aggregate) add(record Record, baseline string) {
 		}
 		entry.requests++
 		entry.off += off
+		entry.failed += failed
 		entry.input += record.InputTokens
 		entry.output += record.OutputTokens
 		entry.cached += record.CachedTokens

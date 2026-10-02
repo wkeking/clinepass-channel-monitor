@@ -55,14 +55,20 @@ func fakeClineAPI(t *testing.T, now time.Time) *httptest.Server {
 				{"type": "weekly", "percentUsed": 59, "resetsAt": now.Add(80 * time.Hour).Format(time.RFC3339Nano)},
 			}})
 		case "/users/usr-fixture0001/usages":
+			// Both records carry the upstream inference channel the real endpoint reports
+			// (aiInferenceProviderName) and each one a different channel, so the official
+			// dimension the page shows beside the CPA-credential channel has two rows to
+			// cross with the two models.
 			write(map[string]any{"items": []map[string]any{
 				{"id": "usg-fixture0001", "createdAt": now.Add(-10 * time.Minute).Format(time.RFC3339Nano),
 					"costUsd": 1000000, "creditsUsed": 0, "operation": "chat_completion",
-					"promptTokens": 1000, "completionTokens": 100, "totalTokens": 1100, "cachedTokens": 800,
+					"aiInferenceProviderName": "vercel",
+					"promptTokens":            1000, "completionTokens": 100, "totalTokens": 1100, "cachedTokens": 800,
 					"metadata": map[string]any{"raw_model": "deepseek/deepseek-v4.1-flash", "is_stream": true, "is_byok": false}},
 				{"id": "usg-fixture0002", "createdAt": now.Add(-90 * time.Minute).Format(time.RFC3339Nano),
 					"costUsd": 500000, "creditsUsed": 0, "operation": "chat_completion",
-					"promptTokens": 2000, "completionTokens": 200, "totalTokens": 2200, "cachedTokens": 900,
+					"aiInferenceProviderName": "bedrock",
+					"promptTokens":            2000, "completionTokens": 200, "totalTokens": 2200, "cachedTokens": 900,
 					"metadata": map[string]any{"raw_model": "z-ai/glm-5.3", "is_stream": true, "is_byok": false}},
 			}, "nextToken": "", "total": 2})
 		case "/users/usr-fixture0001/usages/daily":

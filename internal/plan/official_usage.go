@@ -47,6 +47,13 @@ const (
 	officialUsageMaxBackoff  = 30 * time.Minute
 )
 
+// Empty labels keep a record whose payload lacks a field visible in the tables instead of
+// dropping it or showing a blank cell: "unknown" is a fact the page can state.
+const (
+	unknownModelLabel    = "未知模型"
+	unknownProviderLabel = "未知上游渠道"
+)
+
 // officialUsageItem is one billable Cline request, trimmed to the fields the page needs.
 type officialUsageItem struct {
 	ID         string
@@ -59,6 +66,12 @@ type officialUsageItem struct {
 	// deepseek-v4.1-flash"), which is more precise than the routed name the record carries
 	// in aiModelName ("cline-pass/deepseek-v4.1-flash").
 	Model string
+	// Provider is the upstream inference channel the request was served from
+	// (aiInferenceProviderName, observed value so far: "vercel"). Only a successful,
+	// billable request reaches this endpoint at all, so a failed request (the host is
+	// currently seeing HTTP 502s) has no record here and can never be attributed to a
+	// provider: failures stay a CPA-credential count.
+	Provider string
 	// Credits is what the request deducted from the credit balance. A flat subscription
 	// (ClinePass) reports 0 for every record.
 	Credits int64
@@ -68,19 +81,23 @@ type officialUsageItem struct {
 
 // officialUsageRawItem mirrors the upstream JSON.
 type officialUsageRawItem struct {
-	ID               string `json:"id"`
-	CreatedAt        string `json:"createdAt"`
-	CostUnits        int64  `json:"costUsd"`
-	CreditsUsed      int64  `json:"creditsUsed"`
-	Operation        string `json:"operation"`
-	AIModelTypeName  string `json:"aiModelTypeName"`
-	AIModelName      string `json:"aiModelName"`
-	PromptTokens     int64  `json:"promptTokens"`
-	CompletionTokens int64  `json:"completionTokens"`
-	TotalTokens      int64  `json:"totalTokens"`
-	CachedTokens     int64  `json:"cachedTokens"`
-	// Metadata carries the routing detail of the request. It has no final-provider field:
-	// the channel actually used is only visible on the response body of the live request.
+	ID              string `json:"id"`
+	CreatedAt       string `json:"createdAt"`
+	CostUnits       int64  `json:"costUsd"`
+	CreditsUsed     int64  `json:"creditsUsed"`
+	Operation       string `json:"operation"`
+	AIModelTypeName string `json:"aiModelTypeName"`
+	AIModelName     string `json:"aiModelName"`
+	// AIInferenceProviderName is the upstream inference channel that served the request.
+	// It is a top-level field of the record, not a metadata one.
+	AIInferenceProviderName string `json:"aiInferenceProviderName"`
+	PromptTokens            int64  `json:"promptTokens"`
+	CompletionTokens        int64  `json:"completionTokens"`
+	TotalTokens             int64  `json:"totalTokens"`
+	CachedTokens            int64  `json:"cachedTokens"`
+	// Metadata carries the routing detail of the request: which model actually ran, and
+	// through which routing entry. The upstream channel is next to it, in
+	// aiInferenceProviderName.
 	Metadata struct {
 		IsBYOK   bool   `json:"is_byok"`
 		IsStream bool   `json:"is_stream"`
@@ -99,15 +116,37 @@ type officialUsageSeries struct {
 // already holds (or from the daily rows it already fetched), so the breakdown needs no
 // extra upstream call.
 type UsageModelRow struct {
-	Model        string  `json:"model"`
-	Requests     int64   `json:"requests"`
-	InputTokens  int64   `json:"input_tokens"`
-	OutputTokens int64   `json:"output_tokens"`
-	TotalTokens  int64   `json:"total_tokens"`
-	CachedTokens int64   `json:"cached_tokens"`
-	CacheRatio   float64 `json:"cache_ratio"`
-	CostUSD      float64 `json:"cost_usd"`
-	CreditsUsed  int64   `json:"credits_used,omitempty"`
+	Model string `json:"model"`
+	// InferenceProvider is the upstream inference channel the record reported
+	// (aiInferenceProviderName). It is empty for the rows built from the daily totals,
+	// which carry no provider, and for records written before Cline added the field.
+	InferenceProvider string  `json:"inference_provider,omitempty"`
+	Requests          int64   `json:"requests"`
+	InputTokens       int64   `json:"input_tokens"`
+	OutputTokens      int64   `json:"output_tokens"`
+	TotalTokens       int64   `json:"total_tokens"`
+	CachedTokens      int64   `json:"cached_tokens"`
+	CacheRatio        float64 `json:"cache_ratio"`
+	CostUSD           float64 `json:"cost_usd"`
+	CreditsUsed       int64   `json:"credits_used,omitempty"`
+}
+
+// OfficialChannelRow is one upstream inference channel crossed with the model that actually
+// ran, over the whole window the collector retains. It is the second dimension beside the
+// CPA-credential channel view: the CPA-side channel answers "which CPA credential served the
+// request", this answers "which upstream channel Cline sent it to".
+//
+// The records behind it are the successful, billable ones only, so a failed request has no
+// row here at all: failures can only be counted per CPA credential, never per upstream
+// channel. CostUSD follows the same micro-USD convention as the rest of the official data.
+type OfficialChannelRow struct {
+	InferenceProvider string  `json:"inference_provider"`
+	Model             string  `json:"model"`
+	Requests          int64   `json:"requests"`
+	InputTokens       int64   `json:"input_tokens"`
+	OutputTokens      int64   `json:"output_tokens"`
+	CachedTokens      int64   `json:"cached_tokens"`
+	CostUSD           float64 `json:"cost_usd"`
 }
 
 // UsageWindow is the official aggregate for one page window.
@@ -245,22 +284,29 @@ func parseOfficialItem(raw officialUsageRawItem) (officialUsageItem, bool) {
 		Cached:     raw.CachedTokens,
 		CostMicro:  raw.CostUnits,
 		Model:      model,
+		Provider:   strings.TrimSpace(raw.AIInferenceProviderName),
 		Credits:    raw.CreditsUsed,
 		BYOK:       raw.Metadata.IsBYOK,
 		Stream:     raw.Metadata.IsStream,
 	}, true
 }
 
-// addModelRow folds one record into the per-model rows of a window. counted is false for
-// rows built from the daily totals, which have neither a request count nor cache columns.
-func addModelRow(rows map[string]*UsageModelRow, model string, prompt, completion, cached, costMicro, credits int64, counted bool) {
-	if strings.TrimSpace(model) == "" {
-		model = "未知模型"
+// addModelRow folds one record into the per-model rows of a window, split by the upstream
+// inference channel the record reported: two records of the same model served by different
+// channels are two rows, because the row is what the page labels with its channel. counted
+// is false for rows built from the daily totals, which have neither a request count nor
+// cache columns.
+func addModelRow(rows map[string]*UsageModelRow, provider, model string, prompt, completion, cached, costMicro, credits int64, counted bool) {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		model = unknownModelLabel
 	}
-	row, ok := rows[model]
+	provider = strings.TrimSpace(provider)
+	key := provider + "\x00" + model
+	row, ok := rows[key]
 	if !ok {
-		row = &UsageModelRow{Model: model}
-		rows[model] = row
+		row = &UsageModelRow{Model: model, InferenceProvider: provider}
+		rows[key] = row
 	}
 	if counted {
 		row.Requests++
@@ -274,7 +320,8 @@ func addModelRow(rows map[string]*UsageModelRow, model string, prompt, completio
 }
 
 // modelRows finishes the per-model view: cache ratio per row, largest first. Rows with the
-// same size fall back to the model name so the order is stable between refreshes.
+// same size fall back to the model name and then to the channel, so the order is stable
+// between refreshes.
 func modelRows(rows map[string]*UsageModelRow) []UsageModelRow {
 	if len(rows) == 0 {
 		return nil
@@ -290,7 +337,69 @@ func modelRows(rows map[string]*UsageModelRow) []UsageModelRow {
 		if out[i].TotalTokens != out[j].TotalTokens {
 			return out[i].TotalTokens > out[j].TotalTokens
 		}
-		return out[i].Model < out[j].Model
+		if out[i].Model != out[j].Model {
+			return out[i].Model < out[j].Model
+		}
+		return out[i].InferenceProvider < out[j].InferenceProvider
+	})
+	return out
+}
+
+// officialChannelRows aggregates the records the collector retains by (upstream inference
+// channel, model that actually ran). The window is the retention window, not one of the page
+// windows: the point of the table is which upstream channels served the traffic, and the
+// coverage line beside it says how far back the records reach.
+//
+// The result is never nil: an empty collector is an empty list, not a missing value. A record
+// whose payload carries no provider (older cached data, or a field the upstream stopped
+// sending) lands in the explicit unknown channel row instead of an empty one, so the row
+// still says where those requests went unattributed.
+func (c *officialUsageCollector) officialChannelRows() []OfficialChannelRow {
+	rows := make([]OfficialChannelRow, 0)
+	if c == nil {
+		return rows
+	}
+	c.mu.Lock()
+	items := make([]officialUsageItem, len(c.items))
+	copy(items, c.items)
+	c.mu.Unlock()
+
+	byKey := make(map[string]*OfficialChannelRow, 8)
+	for _, item := range items {
+		provider := strings.TrimSpace(item.Provider)
+		if provider == "" {
+			provider = unknownProviderLabel
+		}
+		model := strings.TrimSpace(item.Model)
+		if model == "" {
+			model = unknownModelLabel
+		}
+		key := provider + "\x00" + model
+		row, ok := byKey[key]
+		if !ok {
+			row = &OfficialChannelRow{InferenceProvider: provider, Model: model}
+			byKey[key] = row
+		}
+		row.Requests++
+		row.InputTokens += item.Prompt
+		row.OutputTokens += item.Completion
+		row.CachedTokens += item.Cached
+		row.CostUSD += float64(item.CostMicro) / microUSD
+	}
+	out := make([]OfficialChannelRow, 0, len(byKey))
+	for _, row := range byKey {
+		out = append(out, *row)
+	}
+	// Most requests first, then the model name, then the channel: the page shows the busiest
+	// channel/model pairs on top and the order never depends on map iteration.
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Requests != out[j].Requests {
+			return out[i].Requests > out[j].Requests
+		}
+		if out[i].Model != out[j].Model {
+			return out[i].Model < out[j].Model
+		}
+		return out[i].InferenceProvider < out[j].InferenceProvider
 	})
 	return out
 }
@@ -535,7 +644,7 @@ func (c *officialUsageCollector) aggregate(now time.Time, accountCreated time.Ti
 			if item.Stream {
 				window.StreamRequests++
 			}
-			addModelRow(rows, item.Model, item.Prompt, item.Completion, item.Cached, item.CostMicro, item.Credits, true)
+			addModelRow(rows, item.Provider, item.Model, item.Prompt, item.Completion, item.Cached, item.CostMicro, item.Credits, true)
 			bucket := int(item.At.Sub(from) / width)
 			if bucket < 0 {
 				bucket = 0
@@ -621,9 +730,9 @@ func officialDailyWindow(rows []dailyUsageItem, now time.Time, accountCreated ti
 		window.TotalTokens += row.PromptTokens + row.CompletionTokens
 		window.CostUSD += float64(row.CostUnits) / microUSD
 		window.Series.Tokens[index] += row.PromptTokens + row.CompletionTokens
-		// The daily rows carry the routed model name, not the raw one, and no cache or
-		// credit columns: the per-model table says so instead of showing zeros.
-		addModelRow(models, rowModelName(row), row.PromptTokens, row.CompletionTokens, 0, row.CostUnits, 0, false)
+		// The daily rows carry the routed model name, not the raw one, and no cache, credit
+		// or upstream-channel columns: the per-model table says so instead of showing zeros.
+		addModelRow(models, "", rowModelName(row), row.PromptTokens, row.CompletionTokens, 0, row.CostUnits, 0, false)
 	}
 	window.Models = modelRows(models)
 	return window

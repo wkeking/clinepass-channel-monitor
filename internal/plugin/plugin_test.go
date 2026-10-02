@@ -1,6 +1,34 @@
 package plugin
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+
+	"github.com/wkeking/clinepass-channel-monitor/internal/state"
+)
+
+// capabilitiesWithObservation renders the declared capabilities the way the host receives
+// them, with channel observation forced on or off. The JSON is what the host reads, so
+// asserting on it is also what catches a capability that is declared by accident: a field
+// that does not exist in the struct cannot appear in the object at all.
+func capabilitiesWithObservation(t *testing.T, enabled bool) map[string]bool {
+	t.Helper()
+	previous := state.Config()
+	defer state.SetConfig(previous)
+	cfg := previous
+	cfg.ChannelObserveEnabled = enabled
+	state.SetConfig(cfg)
+
+	raw, errMarshal := json.Marshal(buildRegistration().Capabilities)
+	if errMarshal != nil {
+		t.Fatalf("marshal capabilities: %v", errMarshal)
+	}
+	declared := map[string]bool{}
+	if errUnmarshal := json.Unmarshal(raw, &declared); errUnmarshal != nil {
+		t.Fatalf("capabilities are not a JSON object: %v (%s)", errUnmarshal, raw)
+	}
+	return declared
+}
 
 // TestPanelHidesFixedDefaults pins the configuration panel contract: only the knobs a
 // deployment genuinely has to move are offered there, while the fixed defaults stay out.
@@ -35,29 +63,50 @@ func TestPanelHidesFixedDefaults(t *testing.T) {
 	}
 }
 
-// TestDeclaresManagementOnly is the regression guard for the reason this release exists:
-// every request-path capability makes CPA clone both request bodies and hand them across
-// the plugin ABI for each streamed frame. Declaring none of them keeps the plugin off the
-// request path entirely.
-func TestDeclaresManagementOnly(t *testing.T) {
-	caps := buildRegistration().Capabilities
-	if !caps.ManagementAPI {
+// TestDeclaresManagementAndUsageOnly is the regression guard for the reason this release
+// exists: every request-path capability makes CPA clone request bodies and hand them across
+// the plugin ABI, and the old response_stream_interceptor only ever saw OpenAI chat traffic.
+// The usage hook is the one capability this plugin declares, and only while the collector
+// runs; nothing may come back that puts the plugin on the request path.
+func TestDeclaresManagementAndUsageOnly(t *testing.T) {
+	declared := capabilitiesWithObservation(t, true)
+	if !declared["management_api"] {
 		t.Error("the plugin must keep its Management API capability")
 	}
-	for name, declared := range map[string]bool{
-		"request_interceptor":        caps.RequestInterceptor,
-		"response_before_translator": caps.ResponseBeforeTranslator,
-		"usage_plugin":               caps.UsagePlugin,
-		"request_normalizer":         caps.RequestNormalizer,
-		"response_translator":        caps.ResponseTranslator,
-		"response_after_translator":  caps.ResponseAfterTranslator,
-		"request_translator":         caps.RequestTranslator,
-		"thinking_applier":           caps.ThinkingApplier,
-		"executor":                   caps.Executor,
+	if !declared["usage_plugin"] {
+		t.Error("usage_plugin must be declared while channel observation is on")
+	}
+	for _, name := range []string{
+		"request_interceptor",
+		"request_translator",
+		"request_normalizer",
+		"response_translator",
+		"response_before_translator",
+		"response_after_translator",
+		"response_stream_interceptor",
+		"thinking_applier",
+		"executor",
+		"model_registrar",
+		"model_provider",
+		"auth_provider",
+		"frontend_auth_provider",
+		"command_line_plugin",
 	} {
-		if declared {
+		if declared[name] {
 			t.Errorf("%s must not be declared: it would put the plugin back on the request path", name)
 		}
+	}
+}
+
+// TestUsageCapabilityFollowsObservation pins the switch: with observation off the host must
+// not call usage.handle at all, which is what keeps the disabled state free of any per-request
+// work.
+func TestUsageCapabilityFollowsObservation(t *testing.T) {
+	if declared := capabilitiesWithObservation(t, false); declared["usage_plugin"] {
+		t.Error("usage_plugin must not be declared while channel observation is off")
+	}
+	if declared := capabilitiesWithObservation(t, true); !declared["usage_plugin"] || !declared["management_api"] {
+		t.Error("turning observation back on must declare usage_plugin and keep the Management API capability")
 	}
 }
 

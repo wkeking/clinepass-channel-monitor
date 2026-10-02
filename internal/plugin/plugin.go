@@ -2,10 +2,12 @@
 // over, publishes the runtime state, and dispatches every ABI method CPA calls.
 //
 // The plugin declares ManagementAPI, and — only while channel observation is switched on —
-// the stream chunk interceptor that reports which upstream channel each response came from.
-// It declares no request-side capability and no response translator: the host strips the
-// request bodies and the recent-chunk history from the payload chunks of a schema v6
-// plugin, so what crosses the ABI per frame is the frame itself.
+// the usage plugin hook, which the host calls once per request with the credential the
+// request was routed to. That hook is protocol independent: it fires for /v1/responses
+// traffic, which is where the retired stream chunk interceptor saw nothing at all.
+//
+// It declares no request-side capability and no response translator: nothing on the request
+// path needs cloning or handing across the ABI.
 package plugin
 
 import (
@@ -43,13 +45,12 @@ type registrationCapability struct {
 	ResponseBeforeTranslator bool `json:"response_before_translator"`
 	ResponseAfterTranslator  bool `json:"response_after_translator"`
 	ThinkingApplier          bool `json:"thinking_applier"`
-	UsagePlugin              bool `json:"usage_plugin"`
-	CommandLinePlugin        bool `json:"command_line_plugin"`
-	ManagementAPI            bool `json:"management_api"`
-	// StreamChunkInterceptor is the only hook on the response path this plugin ever
-	// declares, and only while channel observation is on. With it switched off the host
-	// reports no stream interceptor at all, which is what keeps the per-frame cost at zero.
-	StreamChunkInterceptor bool `json:"response_stream_interceptor"`
+	// UsagePlugin is the only hook this plugin ever declares, and only while channel
+	// observation is on: the host calls it once per request, for every wire protocol, with
+	// the credential the request was routed to.
+	UsagePlugin       bool `json:"usage_plugin"`
+	CommandLinePlugin bool `json:"command_line_plugin"`
+	ManagementAPI     bool `json:"management_api"`
 }
 
 type registration struct {
@@ -160,8 +161,8 @@ func HandleMethod(method string, request []byte) ([]byte, error) {
 		return abi.OK(buildManagementRegistration())
 	case pluginabi.MethodManagementHandle:
 		return management.Handle(request)
-	case pluginabi.MethodResponseInterceptStreamChunk:
-		return observation.Handle(request)
+	case pluginabi.MethodUsageHandle:
+		return observation.HandleUsage(request)
 	default:
 		return abi.Failure("unknown_method", "unknown method: "+method), nil
 	}
@@ -199,7 +200,7 @@ func buildRegistration() registration {
 				{Name: "timezone", Type: pluginapi.ConfigFieldTypeString, Description: "展示时区。官方接口返回的是绝对时间，页面按浏览器本地时区渲染，所以本版本没有代码读取它；保留是为了兼容既有配置块。"},
 				{Name: "plan_config_path", Type: pluginapi.ConfigFieldTypeString, Description: "容器内 CPA config.yaml 的路径，用于读取 Cline 凭据；留空时按 /CLIProxyAPI/config.yaml → /app/config.yaml 自动探测。"},
 				{Name: "plan_refresh", Type: pluginapi.ConfigFieldTypeString, Description: "官方套餐、限额与官方用量的轮询周期（例如 5m）。留空即用默认 5m，最小 1 分钟。"},
-				{Name: "channel_observe_enabled", Type: pluginapi.ConfigFieldTypeBoolean, Description: "逐请求渠道观测开关（默认 true）。开启时插件声明 response_stream_interceptor，对每个流式分片做一次字节扫描，把上游渠道记进 JSONL 并聚合成「渠道」视图；关闭时不声明该能力，请求路径上零开销，但页面不再有新数据。"},
+				{Name: "channel_observe_enabled", Type: pluginapi.ConfigFieldTypeBoolean, Description: "逐请求渠道观测开关（默认 true）。开启时插件声明 usage_plugin 能力，宿主每完成一个请求回调一次并带上所落渠道（无论客户端说哪种协议），记录写入 JSONL 并聚合成「渠道」视图；关闭时不声明该能力，请求路径上零开销，但页面不再有新数据。"},
 				{Name: "channel_store_dir", Type: pluginapi.ConfigFieldTypeString, Description: "渠道记录的存放目录（默认 /CLIProxyAPI/logs/channel-observation），按天一个 channel-<date>.jsonl。"},
 				{Name: "channel_retention_days", Type: pluginapi.ConfigFieldTypeNumber, Description: "渠道记录保留天数（默认 3，上限 30）。"},
 				{Name: "channel_max_size_mb", Type: pluginapi.ConfigFieldTypeNumber, Description: "渠道记录目录的总大小上限，单位 MB（默认 512，下限 16）；超出后从最旧的文件开始删。"},
@@ -209,8 +210,8 @@ func buildRegistration() registration {
 		Capabilities: registrationCapability{
 			ManagementAPI: true,
 			// Only declared while the collector runs: an undeclared capability costs
-			// nothing, a declared one costs one ABI call per streamed frame.
-			StreamChunkInterceptor: cfg.ChannelObserveEnabled,
+			// nothing, a declared one costs one ABI call per request.
+			UsagePlugin: cfg.ChannelObserveEnabled,
 		},
 	}
 }

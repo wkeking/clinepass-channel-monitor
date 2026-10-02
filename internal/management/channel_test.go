@@ -14,32 +14,42 @@ import (
 )
 
 // The 「渠道」 view is three things that have to agree: the page's static skeleton, the JSON
-// behind it (/channel) and the export beside it (/channel.csv). One streamed request is fed
-// through a real recorder so the payload is answered from the same path a deployment uses,
-// and the fixture lands on the baseline channel, which is what makes the off_baseline column
-// checkable.
+// behind it (/channel) and the export beside it (/channel.csv). One completed request is fed
+// through a real recorder over the same usage.handle path a deployment uses, and the fixture
+// lands on the baseline channel, which is what makes the off_baseline column checkable.
 
 const (
 	// channelFixtureBaseline is the provider the recorder is configured to treat as the
 	// official channel. The fixture reports it, so the fed request is on baseline.
 	channelFixtureBaseline = "deepseek"
-	// channelFixtureRequestID identifies the one streamed request every test here feeds.
+	// channelFixtureRequestID identifies the one request every test here feeds.
 	channelFixtureRequestID = "req-channel-fixture-1"
 	// channelFixtureModel is the model the client asked for.
 	channelFixtureModel = "deepseek-flash-1"
 )
 
-// channelRoutingFrame is the terminating frame of one Cline stream: the routing block inside
-// choices[0].delta.provider_metadata, plus the usage object that rides the same frame. Both
-// providers are the baseline channel, so the record it produces is on baseline and its
-// off_baseline marker has to stay empty.
-const channelRoutingFrame = `data: {"id":"chatcmpl-channel-fixture","object":"chat.completion.chunk","model":"deepseek-flash-1","choices":[{"index":0,"delta":{"provider_metadata":{"gateway":{"routing":{"finalProvider":"deepseek","resolvedProvider":"deepseek","canonicalSlug":"deepseek/deepseek-v4.1-flash","clientSessionId":"sess-channel-fixture","generationId":"gen-channel-fixture","modelAttemptCount":1,"totalProviderAttemptCount":1,"affinity":{"outcome":"confirmed","pinnedProvider":"deepseek"},"fallbacksAvailable":[],"modelAttempts":[{"modelId":"deepseek/deepseek-v4.1-flash","providerAttempts":[{"provider":"deepseek","providerRequestId":"prov-channel-fixture","statusCode":200,"success":true}]}]}}}}}],"usage":{"prompt_tokens":800,"completion_tokens":200,"total_tokens":1000,"cost":0.0012,"is_byok":false,"prompt_tokens_details":{"cached_tokens":512},"completion_tokens_details":{"reasoning_tokens":200}}}` + "\n\n"
+// channelUsagePayload renders the usage.handle payload of one completed request. Provider is
+// the credential the request was routed to — the channel the view answers with — and
+// RequestedAt is stamped at call time so the record falls inside the window the handlers
+// query. Both timings are zero on purpose: such a record carries no measured decode speed,
+// which is what makes the "no tokens_per_second key" assertion below meaningful.
+func channelUsagePayload() []byte {
+	return []byte(`{"Provider":"` + channelFixtureBaseline + `","BaseURL":"https://api.cline.bot",` +
+		`"ExecutorType":"OpenAICompatExecutor","Model":"` + channelFixtureModel + `","Alias":"deepseek-flash-2",` +
+		`"APIKey":"sk_channel_fixture","RequestID":"` + channelFixtureRequestID + `","TraceID":"` + channelFixtureRequestID + `",` +
+		`"SessionID":"sess-channel-fixture","ParentSessionID":"","AuthID":"openai-compatibility:cline1:fixture",` +
+		`"AuthIndex":"fixture-index","AuthType":"apikey","Source":"sk_channel_fixture","ReasoningEffort":"high",` +
+		`"ServiceTier":"auto","ResponseServiceTier":"","ResponseModel":"deepseek/deepseek-v4.1-flash",` +
+		`"Generate":true,"Stream":true,"Failed":false,"Failure":{"StatusCode":0,"Body":""},` +
+		`"Detail":{"InputTokens":800,"OutputTokens":200,"ReasoningTokens":200,"CachedTokens":512,` +
+		`"CacheReadTokens":0,"CacheCreationTokens":0,"TotalTokens":1000},` +
+		`"RequestedAt":"` + time.Now().UTC().Format(time.RFC3339) + `","Latency":0,"TTFT":0}`)
+}
 
 // startChannelRecorder publishes a started collector and points both entry points at it:
-// the handlers read state.Observation(), the interceptor entry point reads
-// observation.Active(). The directory is returned because /health and the view both report
-// it. Both are package state, so the cleanup unsets them: a leak here would decide the next
-// test's answer.
+// the handlers read state.Observation(), the usage entry point reads observation.Active().
+// The directory is returned because /health and the view both report it. Both are package
+// state, so the cleanup unsets them: a leak here would decide the next test's answer.
 func startChannelRecorder(t *testing.T) (*observation.Recorder, string) {
 	t.Helper()
 	loadTestConfig(defaultConfigBytes())
@@ -62,25 +72,14 @@ func startChannelRecorder(t *testing.T) (*observation.Recorder, string) {
 	return recorder, directory
 }
 
-// feedChannelRequest replays one streamed request the way the host does: the header-init
-// call, then the single frame that carries the channel report. Flush is mandatory, not
-// cosmetic: the writer is asynchronous and the view reads its records back from the store.
+// feedChannelRequest replays one completed request the way the host does: a single
+// usage.handle call. Flush is mandatory, not cosmetic: the writer is asynchronous and the
+// view reads its records back from the store.
 func feedChannelRequest(t *testing.T, recorder *observation.Recorder) {
 	t.Helper()
-	recorder.Observe(&observation.InterceptRequest{
-		RequestID:       channelFixtureRequestID,
-		Model:           channelFixtureModel,
-		RequestedModel:  channelFixtureModel,
-		SourceFormat:    "openai",
-		RequestHeaders:  map[string][]string{"User-Agent": {"cline-cli/1.0"}},
-		ResponseHeaders: map[string][]string{"X-Upstream-Status": {"200"}},
-		ChunkIndex:      observation.ChunkHeaderInitIndex,
-	})
-	recorder.Observe(&observation.InterceptRequest{
-		RequestID:  channelFixtureRequestID,
-		ChunkIndex: 1,
-		Body:       []byte(channelRoutingFrame),
-	})
+	if _, errHandle := observation.HandleUsage(channelUsagePayload()); errHandle != nil {
+		t.Fatalf("HandleUsage: %v", errHandle)
+	}
 	recorder.Flush()
 }
 
@@ -156,7 +155,7 @@ func TestChannelViewIsPresent(t *testing.T) {
 	}
 }
 
-// TestChannelViewPayload drives a real recorder through the interceptor entry point and
+// TestChannelViewPayload drives a real recorder through the usage entry point and
 // reads the answer back through the /channel handler: the enabled flag, the window summary,
 // the raw record behind it and the collector's health.
 func TestChannelViewPayload(t *testing.T) {
@@ -231,19 +230,20 @@ func TestChannelViewPayload(t *testing.T) {
 			channelFixtureBaseline, channelFixtureBaseline)
 	}
 	if record.TTFTMs != 0 {
-		t.Errorf("ttft_ms = %d, want 0: the fixture stream carries no text frame", record.TTFTMs)
+		t.Errorf("ttft_ms = %d, want 0: the fixture payload reports no TTFT", record.TTFTMs)
 	}
 	if !payload.Health.Enabled || payload.Health.Directory != directory {
 		t.Errorf("health = enabled %v in %q, want enabled true in %q", payload.Health.Enabled, payload.Health.Directory, directory)
 	}
-	// tokens_per_second is the one channel field a live record cannot be made to carry here:
-	// Record.TPS is `omitempty` (internal/observation/observation.go:154) and is computed
-	// from measured decode time (internal/observation/observation.go:608-610), while the
-	// recorder's clock is unexported (Recorder.nowFn, internal/observation/observation.go:257),
-	// so no test in this package can give the fed request a non-zero speed without sleeping
-	// on wall time. The contract is pinned in both halves instead: the key exists on the
-	// record type the view marshals verbatim (channel.go:30-32), and a zero-speed record
-	// leaves it out, which is the case the page renders as "—".
+	if payload.Health.Events != 1 {
+		t.Errorf("health events = %d, want the one fed request", payload.Health.Events)
+	}
+	// tokens_per_second is the one channel field this fixture cannot carry: Record.TPS is
+	// `omitempty` on the record and is computed only from a decode window at or above
+	// observation.minDecodeWindowMs, while the fixture reports zero timings. The contract is
+	// pinned in both halves instead: a zero-speed record leaves the key out, which is the case
+	// the page renders as "—", and a record that does carry a speed marshals it under the same
+	// key the view reads (checked below).
 	if _, present := recordKeys["tokens_per_second"]; present {
 		t.Errorf("records[0] carries tokens_per_second = %s for a record with no measured decode time, want the key omitted",
 			recordKeys["tokens_per_second"])

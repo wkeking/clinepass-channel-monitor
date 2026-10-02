@@ -1,10 +1,12 @@
 # clinepass-channel-monitor
 
-CLIProxyAPI (CPA) 插件：在管理中心展示 **Cline 订阅的套餐、限额与官方用量**，并自动从 CPA 自己的 Cline 凭据里发现 API Key；v0.3.0 起另有**渠道观测**——回答「过去 24 小时里 clinepass 的请求有多少比例没有落在官方 deepseek 渠道，以及这些请求的 TTFT / 解码速度是多少」。
+CLIProxyAPI (CPA) 插件：在管理中心展示 **Cline 订阅的套餐、限额与官方用量**，并自动从 CPA 自己的 Cline 凭据里发现 API Key；v0.3.0 起另有**渠道观测**——回答「过去 24 小时里 clinepass 的请求有多少比例没有落在基准渠道，以及这些请求的 TTFT / 解码速度是多少」。渠道取自宿主在每个请求结束后的 usage 回调（CPA 为这条请求选中的凭据），**与客户端协议无关**，`POST /v1/responses` 同样覆盖。
 
-> **v0.2.0 是一次职责收窄；v0.3.0 把「逐请求渠道观测」以不回到请求路径上的方式加了回来**：v0.1.x 的「逐请求渠道/用量/成本统计」（JSONL 落盘、渠道分布、明细表、CSV 导出、`/stats`、`/events`、`/export`）已在 v0.2.0 **整体移除**，原因见下一节。v0.3.0 只重新声明一个响应侧分片拦截能力，且**只在观测开启时声明**：关闭时该能力为 nil，请求路径上没有任何插件代码在跑。记录写在**新目录** `<channel_store_dir>/channel-<YYYY-MM-DD>.jsonl`（默认 `/CLIProxyAPI/logs/channel-observation`），与 v0.1.x 的历史 JSONL 不同名、不同目录；旧文件本版本不读也不写。
+> **v0.2.0 是一次职责收窄；v0.3.0 把「逐请求渠道观测」以不回到请求路径上的方式加了回来**：v0.1.x 的「逐请求渠道/用量/成本统计」（JSONL 落盘、渠道分布、明细表、CSV 导出、`/stats`、`/events`、`/export`）已在 v0.2.0 **整体移除**，原因见下一节。v0.3.0 只在插件注册里多声明一个 **usage 能力**（能力 JSON 键 `usage_plugin`，ABI 方法 `usage.handle`），且**只在观测开启时声明**：关闭时该能力为 nil，宿主不注册 usage 适配层，每个完成的请求都不会发起插件 ABI 调用。记录写在**新目录** `<channel_store_dir>/channel-<YYYY-MM-DD>.jsonl`（默认 `/CLIProxyAPI/logs/channel-observation`），与 v0.1.x 的历史 JSONL 不同名、不同目录；旧文件本版本不读也不写。
+>
+> v0.3.0 的**初版**不是这样：它声明 CPA 的 `response_stream_interceptor` 能力，从 SSE 分片里抠 `provider_metadata.gateway.routing`。该字段只存在于 `/v1/chat/completions` 的响应里，而生产主机 24 小时内 5,843 条真实请求中约 **99%** 是 `POST /v1/responses`——也就是说旧设计只能记到验收探针，几乎记不到真实流量（实测一个 `/v1/responses` 流 34 帧里 0 帧带 `provider_metadata`）。现在改用 usage 钩子：每请求一次、全协议覆盖、请求结束后才被调用。判定过程见 [docs/channel-observation.md](docs/channel-observation.md) §2。
 
-## 为什么去掉逐请求统计
+## 为什么去掉逐请求统计，以及 v0.3.0 用什么方式加回观测
 
 v0.1.x 注册了 `response_before_translator` 钩子。CPA 在每个流式帧都会调用它，而调用前宿主会把**整个客户端请求体**和**整个上游请求体**各 clone 一份、JSON 化后跨插件 ABI 传给插件。实测（同一 prompt，ctx≈56.7k token，输出约 1200 token）：
 
@@ -15,9 +17,11 @@ v0.1.x 注册了 `response_before_translator` 钩子。CPA 在每个流式帧都
 
 插件自己在该钩子里只做一次 `bytes.Contains` + 一次 sha256（基准实测 sha256 只占 910,671 ns/op 里的 35,561 ns），**主要成本是宿主侧的载荷搬运**。CPA 是第三方开源项目，不能改它的源码让宿主只在首帧传完整请求体，所以唯一的解法是把插件从请求路径上完全摘掉：v0.2.0 只声明 `ManagementAPI`，不再声明任何请求/响应/用量能力。
 
-v0.3.0 只把其中一个口子重新打开：CPA 的 `response_stream_interceptor` 能力（能力 JSON 字段名 `response_stream_interceptor`，Go 字段 `StreamChunkInterceptor`，ABI 方法 `response.intercept_stream_chunk`），而且**只在观测开启时声明**。关闭时能力为 nil，CPA 侧 `HasStreamInterceptors()` 返回 false，请求路径上既不 clone 分片也不走插件 ABI——在宿主看来「观测关闭」等价于「没装插件」。开启时每个流式分片只多一次 `bytes.Contains` 探测（在分片里找 `provider_metadata` 或 `"usage"`），探针命中才解 JSON（一次流通常 1–3 帧命中），并从帧时间戳取 TTFT 与解码窗口。实测数字见下文「[性能](#性能)」。
+v0.3.0 重新打开的口子不是那个逐帧钩子，而是 CPA 的 **usage 钩子**：插件在注册里声明 `usage_plugin`（Go 字段 `UsagePlugin`，ABI 方法 `usage.handle`），宿主在**每个请求结束后**调用一次，载荷是 `UsageRecord`——里面有 CPA 为这条请求选中的凭据（`Provider` / `AuthID` / `AuthIndex` / `AuthType`）、上游模型（`ResponseModel`）、宿主自己的 token 账（`Detail`）与 `TTFT` / `Latency`。它每请求只调用一次、与客户端协议无关（`/v1/chat/completions`、`/v1/responses` 都覆盖），并且**只在观测开启时声明**：关闭时能力为 nil，宿主不注册 usage 适配层，请求路径上没有任何插件代码在跑——在宿主看来「观测关闭」等价于「没装插件」。插件对每次回调只回一个「不改变」信封 `{"ok":true,"result":{}}`，只负责记录。成本模型与旧设计的历史数字见下文「[性能](#性能)」（新设计的量化测量待做）。
 
-代价只有一条：凭据发现的第 4 顺位（"最近一次被拦截请求上的 bearer"）没有了。前三个顺位（`plan_api_key` → `plan_config_path` 指向的 CPA `config.yaml` → 宿主 auth 回调）保持原样，实测部署走第 2 顺位即可，且第 4 顺位本来就基本无效——下游客户端给 CPA 的是 20 字符的 `sk-…`，会被 `looksLikeClineKey` 过滤掉。
+代价有两条。一条是凭据发现的第 4 顺位（"最近一次被拦截请求上的 bearer"）没有了：v0.1.x 的逐帧钩子顺带能看到客户端 bearer，现在插件不声明任何请求侧能力，自然看不到。前三个顺位（`plan_api_key` → `plan_config_path` 指向的 CPA `config.yaml` → 宿主 auth 回调）保持原样，实测部署走第 2 顺位即可，且第 4 顺位本来就基本无效——下游客户端给 CPA 的是 20 字符的 `sk-…`，会被 `looksLikeClineKey` 过滤掉。
+
+另一条更要紧：**Cline 网关级的最终上游渠道看不到了**。旧设计能读到的 `provider_metadata.gateway.routing.finalProvider`（例如这条 cline-pass 请求有没有回退到 `alibaba` / `particle` 而不是 `deepseek`）在 usage 载荷里没有对应字段。现在能拿到的最接近的信号是 **CPA 侧的凭据**（`Provider`、`AuthID`、`AuthIndex`、`AuthType`）和**上游模型 slug**（`upstream_model`，例如 `deepseek/deepseek-v4.1-flash`）。也就是说页面上的「渠道」是「CPA 把这条请求交给了哪个凭据」，不是「Cline 网关最后选了哪个上游」；这两者在网关发生回退时会不一致，而回退现在看不到。
 
 ## 能力一览
 
@@ -27,10 +31,10 @@ v0.3.0 只把其中一个口子重新打开：CPA 的 `response_stream_intercept
 - 多凭据分别轮询：一个 CPA 里配置多个 Cline 条目或多把 key 时，每把 key 一个账号卡，页面顶部出现账号下拉（≥2 个凭据时）；
 - 凭据自动发现：读 CPA 自己的 `config.yaml`，通常不需要手填任何 key；key 只留在内存，不落盘、不打日志、不返回给页面；
 - 自诊断：`/health` 暴露 `plan`（完整套餐快照）、`plan_usage`（官方逐条用量的采集状态）、`plan_accounts`（每个凭据的来源、账号、可用性与错误）；
-- **渠道观测（v0.3.0 新增）**：过去 1 小时 / 近 24 小时 / 近 7 天窗口里，已识别渠道的 clinepass 请求有多少条、多少比例没有落在基准渠道（默认 `deepseek`，即被认为「官渠」的那个渠道名），并给出这些请求的 TTFT 与解码速度；页面有「渠道」区，可导出 CSV；
-- **请求路径零成本开关**：除 `ManagementAPI` 外只声明 `response_stream_interceptor`，且**只在 `channel_observe_enabled: true` 时声明**；关闭时能力为 nil，宿主不挂载分片拦截适配层，请求路径上没有任何插件代码在跑（不 clone 分片、不走 ABI）；
-- **不改写、不阻塞任何请求**：不声明任何 translator / normalizer / 请求侧拦截能力，不 clone、不改写请求或响应，不干预上游路由与固定；分片按原样转发（恒等响应）；
-- **fail-open**：配置解析失败时回落到默认值，插件照常加载并照常提供套餐视图；观测层自身的错误（解析失败、队列满、目录不可写）也只在插件内部消化，分片照原样转发。
+- **渠道观测（v0.3.0 新增）**：过去 1 小时 / 近 24 小时 / 近 7 天窗口里，clinepass 请求有多少条、多大比例没有落在基准渠道（默认 `deepseek`），并给出这些请求的 TTFT 与解码速度；「渠道」是 **CPA 为这条请求选中的凭据**（`Provider` + `AuthID` / `AuthIndex` / `AuthType`），由宿主每请求一次 usage 回调给出，因此对**所有客户端协议**都成立（含 `POST /v1/responses`）；页面有「渠道」区，可导出 CSV。注意当前生产上渠道名是 `openai-compatible-cline*`、基准仍是 `deepseek`，于是每条都算偏离——基准语义**未决**，见下文「渠道观测 → 两个口径」；
+- **请求路径零成本开关**：除 `ManagementAPI` 外只声明 `usage_plugin`，且**只在 `channel_observe_enabled: true` 时声明**；关闭时能力为 nil，宿主不注册 usage 适配层，请求路径上没有任何插件代码在跑（不拦分片、不走 ABI、不做探针）；
+- **不改写、不阻塞任何请求**：不声明任何 translator / normalizer / 请求侧或响应侧拦截能力，不 clone、不改写请求或响应，不干预上游路由与固定；对每次 usage 回调只回一个「不改变」信封 `{"ok":true,"result":{}}`，回调发生在请求**结束之后**，与请求处理无关；
+- **fail-open**：配置解析失败时回落到默认值，插件照常加载并照常提供套餐视图；观测层自身的错误（载荷解不开、队列满、目录不可写）也只在插件内部消化，宿主请求流程完全不受影响。
 
 ## 环境要求
 
@@ -42,7 +46,7 @@ v0.3.0 只把其中一个口子重新打开：CPA 的 `response_stream_intercept
 | 平台 | `linux/amd64`、`linux/arm64` |
 | 外网 | 需要能访问 Cline 的 API（默认 `https://api.cline.bot/api/v1`）。插件只读套餐与用量，不代理任何流量 |
 
-> 版本兼容声明：本插件按 CPA v7.3.8 的 SDK 契约开发，已在 v7.3.10 上核对 `sdk/pluginapi`、`sdk/pluginabi`、`sdk/translator` 与插件宿主适配层均无差异；v0.2.0 的加载与热重载另在 **v8.0.4** 宿主上实测通过，v0.3.0 的渠道观测（`response_stream_interceptor`）另在 **v8.0.8** 宿主上实测通过。CPA 大版本升级后请回到本文「排障」一节按表自查。
+> 版本兼容声明：本插件按 CPA v7.3.8 的 SDK 契约开发（`go.mod` 依赖 `CLIProxyAPI/v7 v7.3.8`），宿主侧源码（`internal/pluginhost`、`sdk/*`）的核对用的是本仓库 `.reference/CLIProxyAPI` 的 **v8.0.8** 检出；v0.2.0 的加载与热重载另在 **v8.0.4** 宿主上实测通过；v0.3.0 的渠道观测（usage 钩子，能力键 `usage_plugin`）在**生产宿主**上完成验收（插件构建 `0.3.0-dev.173`，2026-10-02，验收结果见 [docs/channel-observation.md](docs/channel-observation.md) §6；本轮证据里没有记录该生产宿主的 CPA 版本号）。CPA 大版本升级后请回到本文「排障」一节按表自查。
 
 ## 安装
 
@@ -91,11 +95,11 @@ plugins:
       plan_config_path: "/CLIProxyAPI/config.yaml"   # 容器内 CPA config.yaml 路径，用于读 Cline 凭据（留空则自动探测）
       plan_refresh: 5m                 # 套餐与限额刷新间隔
       # ---- 逐请求渠道观测（v0.3.0）----
-      channel_observe_enabled: true    # 观测总开关；false 时不声明 response_stream_interceptor，请求路径零开销
+      channel_observe_enabled: true    # 观测总开关；false 时不声明 usage 钩子，请求路径零开销
       channel_store_dir: "/CLIProxyAPI/logs/channel-observation"   # JSONL 目录，按 UTC 日一天一个文件
       channel_retention_days: 3        # 保留天数（上限 30）
       channel_max_size_mb: 512         # 目录总大小上限（下限 16），超出先从最旧的文件删
-      channel_baseline_provider: "deepseek"   # 基准渠道名：最终渠道不等于它的请求算「未落在官渠」
+      channel_baseline_provider: "deepseek"   # 基准渠道名：渠道不等于它的请求算「未落在基准渠道」
 ```
 
 改动配置后 CPA 会自动重扫并热加载插件（`reconfigure`）。
@@ -110,11 +114,11 @@ plugins:
 | `timezone` | `Asia/Shanghai` | 展示时区。v0.2.0 起页面按**浏览器本地时区**渲染官方接口返回的绝对时间，所以这个键被保留但**没有代码读取它**（原来的消费方是已移除的本地逐请求统计）；留着是为了兼容既有配置块 |
 | `plan_config_path` | 空（自动探测） | 容器内 CPA 配置文件路径，用于读 Cline 凭据。留空时按 `/CLIProxyAPI/config.yaml`（容器内挂载点）→ `/app/config.yaml` 依次尝试。Cline 的 key 通常以 `openai-compatibility[].api-key-entries[].api-key` 存在这里 |
 | `plan_refresh` | `5m` | 套餐、限额与官方用量的轮询周期（最小 1 分钟） |
-| `channel_observe_enabled` | `true` | 渠道观测总开关。关闭时插件**不声明** `response_stream_interceptor` 能力，CPA 侧 `HasStreamInterceptors()` 为 false，请求路径上没有任何插件开销，页面「渠道」区显示「渠道观测未开启」 |
+| `channel_observe_enabled` | `true` | 渠道观测总开关。关闭时插件**不声明** `usage_plugin` 能力，宿主不注册 usage 适配层，请求路径上没有任何插件开销，页面「渠道」区显示「渠道观测未开启」 |
 | `channel_store_dir` | `/CLIProxyAPI/logs/channel-observation` | 渠道记录的 JSONL 目录，按 UTC 日一个文件 `channel-<YYYY-MM-DD>.jsonl` |
 | `channel_retention_days` | `3` | 保留天数，上限 30（写更大也会被夹到 30） |
 | `channel_max_size_mb` | `512` | 该目录的总大小上限（MB），下限 16。目录同时受天数与体积约束：**先按天数删旧文件，再按体积从最旧删到限额** |
-| `channel_baseline_provider` | `deepseek` | 基准渠道名（被认为「官渠」的那个渠道）。记录的 `final_provider`（缺失时退回 `resolved_provider`）与它**不区分大小写**地不等即算「未落在官渠」 |
+| `channel_baseline_provider` | `deepseek` | 基准渠道名。记录的 `final_provider`（与 `resolved_provider` 同值）与它**不区分大小写**地不等即算「未落在基准渠道」，判定发生在**读时**。注意生产上渠道名现在是 `openai-compatible-cline1/2/3`，与默认基准 `deepseek` 不一致，于是窗口内每一条都算偏离；基准该怎么定还没决定，见「渠道观测 → 两个口径」 |
 
 ### 固定值（不在插件配置面板里显示）
 
@@ -158,7 +162,7 @@ v0.1.x 的统计专用键（`require_routing_marker`、`unmatched_host_samples`�
 
 **按模型明细**：同一个窗口可以按模型拆开。近 1 小时 / 近 24 小时取记录里的 `metadata.raw_model`（**真正跑的模型**，例如 `deepseek/deepseek-v4.1-flash`），并给出请求数、缓存命中率、参考成本与扣减的 credits；近 7 天窗口来自官方逐日汇总，官方只给**路由名**（例如 `cline-pass/deepseek-v4.1-flash`），也拿不到请求数与缓存列，所以那两列显示 `—`。这份拆分同样是从已经拉到的记录里算出来的，不产生额外上游调用。
 
-**官方记录里没有的东西**：最终上游渠道（`finalProvider`）、平均延时、TTFT、生成速度、失败状态码。渠道只出现在响应体的 `provider_metadata.gateway.routing` 里，官方接口不会回报它——这正是 v0.2.0 为性能移除、又在 v0.3.0 用响应侧分片拦截单独补回来的部分（见下文「渠道观测」）。这一节的数字仍然只来自官方接口，渠道与 TTFT / 解码速度在「渠道」区单独给。
+**官方记录里有什么、没有什么**：每条记录带 `aiInferenceProviderName`（**上游推理渠道**，生产实测恒为 `vercel`）与 `metadata.raw_model`（真正跑的模型，如 `deepseek/deepseek-v4.1-flash`），但不带延时、TTFT、生成速度与失败状态码。v0.3.0 用宿主的 usage 回调补回来的是 **CPA 侧凭据**（`Provider` / `AuthID` / `AuthIndex` / `AuthType`）与宿主自己测的 TTFT / 总耗时，**不是** Cline 网关级的 `finalProvider`（网关内部最终选了哪个上游，例如 `deepseek` 之外的回退目标）——后者只在 `/v1/chat/completions` 响应体的 `provider_metadata.gateway.routing` 里，旧设计能读到、现已退役（见下文「渠道观测」）。于是页面上有**两个并列的渠道维度**：CPA 凭据（来自插件记录）与上游推理渠道（来自官方记录）。
 
 **多个 Cline 条目 / 多把 key**：官方套餐与限额是**按账号**算的，所以插件把每把 key 当成一个账号分别轮询：
 
@@ -180,32 +184,53 @@ v0.1.x 的统计专用键（`require_routing_marker`、`unmatched_host_samples`�
 
 ## 渠道观测（逐请求渠道分布）
 
-这一块回答一个问题：**过去 24 小时里，clinepass 的请求有多少条、多大比例没有落在基准渠道（默认 `deepseek`，即「官渠」那个渠道名）**，以及这些请求的 TTFT 与解码速度是多少。数据是**全量采集**，不是抽样估计：每条带渠道信息的 clinepass 请求都会进 JSONL，比例是精确值。
+这一块回答一个问题：**过去 24 小时里，clinepass 的请求有多少条、多大比例没有落在基准渠道**，以及这些请求的 TTFT 与解码速度是多少。数据是**全量采集**：宿主每完成一个请求回调插件一次，一条记录进 JSONL，比例是精确值、不是抽样估计。
 
 ### 数据从哪来
 
-Cline 网关只在**响应体**里回报请求最后落在哪个渠道：`choices[0].delta.provider_metadata.gateway.routing`（`finalProvider`、`resolvedProvider`、`pinnedProvider`、`canonicalSlug`、`originalModelId`、`generationId`、`clientSessionId`、`affinity.outcome`、`fallbacksAvailable[]`、`modelAttemptCount`、`totalProviderAttemptCount`、`modelAttempts[].providerAttempts[].{providerRequestId,statusCode}`），同一帧里还有 `usage`（`prompt_tokens`、`completion_tokens`、`total_tokens`、`cost`、`is_byok`、`prompt_tokens_details.cached_tokens`、`completion_tokens_details.reasoning_tokens`、`cache_creation_input_tokens`）。
+渠道来自**宿主的 usage 钩子**，不是响应体。插件在注册里声明能力 JSON 键 `usage_plugin`（Go 字段 `UsagePlugin`；SDK 常量 `pluginabi.MethodUsageHandle`，方法名 `usage.handle`），宿主在**每个请求结束后**调用一次，载荷是 SDK 的 `UsageRecord`：
 
-渠道只存在于响应帧里，所以插件声明 CPA 的 `response_stream_interceptor` 能力（Go 字段 `StreamChunkInterceptor`，ABI 方法 `response.intercept_stream_chunk`）：
+- **只在 `channel_observe_enabled: true` 时声明**。关闭时能力为 nil，宿主不注册 usage 适配层，每个完成的请求都不会发起插件 ABI 调用——这是「观测关闭」等价于「没装插件」的原因；
+- **与客户端协议无关**：`/v1/chat/completions`、`/v1/responses` 以及其它 wire protocol 都走同一次回调，所以 `POST /v1/responses` 的流量现在能记账，而旧设计在这类流量上一无所获；
+- 载荷字段（SDK 结构体没有 json tag，**JSON 键就是 Go 字段名**）：`Provider`、`BaseURL`、`ExecutorType`、`Model`、`Alias`、`APIKey`、`RequestID`、`TraceID`、`SessionID`、`ParentSessionID`、`AuthID`、`AuthIndex`、`AuthType`、`Source`、`ReasoningEffort`、`ServiceTier`、`ResponseServiceTier`、`ResponseModel`、`Generate`、`Stream`、`Failed`、`Failure{StatusCode,Body}`、`Detail{InputTokens,OutputTokens,ReasoningTokens,CachedTokens,CacheReadTokens,CacheCreationTokens,TotalTokens}`、`RequestedAt`（RFC3339）、`Latency`（整数纳秒）、`TTFT`（整数纳秒）；
+- 插件**不落盘**载荷里的 `APIKey` / `Source`（都是凭据哈希）与 `BaseURL`；
+- 回调是**只读**的：插件每次只回答「不改变」信封 `{"ok":true,"result":{}}`，不在请求或响应上写任何东西，也不参与请求处理。
 
-- **只在 `channel_observe_enabled: true` 时声明**。关闭时能力为 nil，宿主侧 `HasStreamInterceptors()` 返回 false，请求路径上不会为这个插件 clone 分片、也不会发起 ABI 调用；
-- 每个流式分片只做一次 `bytes.Contains` 探测（找 `provider_metadata` 或 `"usage"`），探针命中才解 JSON（一次流通常 1–3 帧命中）。携带 routing 的收尾帧同时也是流的最后一帧，所以它一到就直接定稿；
-- TTFT 取第一个文本帧的时间戳，解码窗口与解码速度由帧时间戳算出。两个测量口径要知道：**TTFT 是代理侧口径**（起点是 CPA 开始转发上游响应的那一刻，不含客户端→CPA 排队与连上游那段，实测比客户端测到的少约 0.9 s，横向比较有效、但不是客户端体验的绝对延迟）；**解码窗口短于 50 ms 时不记速度**（宿主会把短回答一次性投递，实测出现过「14 token / 4 ms」＝ 2800 t/s，那是批量投递的产物；这种记录 `tokens_per_second` 为 0，且不进百分位）；
-- 不 clone 请求体（schema ≥3 的载荷里已剥掉 `OriginalRequest` / `RequestBody`）、不改写请求或响应、不阻塞请求、不干预上游路由与固定；插件返回恒为「分片原样转发」。
+**边界（必须一起理解）**：页面上的「渠道」是 **CPA 侧凭据**——`Provider` 给出的渠道/凭据名（例如 `openai-compatible-cline2`）加上 `AuthID` / `AuthIndex` / `AuthType` 指向的那份凭据。**Cline 网关级的最终上游渠道看不到**：`provider_metadata.gateway.routing.finalProvider`（用来判断一条 cline-pass 请求是否回退到 `alibaba` / `particle` 而不是 `deepseek`）不在 usage 载荷里，旧设计能读到、现已退役。能替代它的最接近信号是凭据本身与上游模型 slug（`upstream_model`）。
 
 ### 数据存在哪、留多久
 
-- 目录 `channel_store_dir`（默认 `/CLIProxyAPI/logs/channel-observation`），按 **UTC 日**一天一个文件 `channel-<YYYY-MM-DD>.jsonl`，一行一条记录，`v` 是 schema 版本（当前 `1`）；不是本插件命名的文件**绝不删除**；
-- 记录字段：`v, time, request_id, session_id, generation_id, model, upstream_model, canonical_slug, original_model_id, final_provider, resolved_provider, pinned_provider, affinity, upstream_request_id, fallbacks_available, model_attempt_count, total_provider_attempt_count, protocol, stream, status_code, ttft_ms, duration_ms, decode_ms, tokens_per_second, frames, input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens, cost_usd, is_byok, user_agent, claude_code_version, client_app, source_format`；
-- 写入是异步的（内存队列 → 批量 flush），队列满只丢弃并计数，**绝不阻塞转发**；
+- 目录 `channel_store_dir`（默认 `/CLIProxyAPI/logs/channel-observation`），按 **UTC 日**一天一个文件 `channel-<YYYY-MM-DD>.jsonl`，一行一条记录，`v` 是 schema 版本（当前 `2`）；不是本插件命名的文件**绝不删除**；
+- v2 写入的键：`v, time, request_id, session_id, model, alias, upstream_model, canonical_slug, final_provider, resolved_provider, auth_id, auth_index, auth_type, executor_type, reasoning_effort, service_tier, stream, failed, status_code, ttft_ms, duration_ms, decode_ms, tokens_per_second, input_tokens, output_tokens, reasoning_tokens, cached_tokens, cache_read_tokens, cache_creation_tokens, total_tokens`；
+- 载荷 → 记录的关键映射（其余键同名直取）：
+
+  | 记录键 | 来源 |
+  |---|---|
+  | `time` | `RequestedAt`（解析失败时用插件自己的时钟） |
+  | `request_id` | `RequestID`，空时退回 `TraceID` |
+  | `final_provider` / `resolved_provider` | 同值，都取 `Provider`（服务这条请求的渠道） |
+  | `model` | `Model`，例如 `cline-pass/deepseek-v4.1-flash`（路由名） |
+  | `upstream_model` / `canonical_slug` | 同值，都取 `ResponseModel`，例如 `deepseek/deepseek-v4.1-flash`（上游真实模型） |
+  | `ttft_ms` | `TTFT` ÷ 1e6 |
+  | `duration_ms` | `Latency` ÷ 1e6 |
+  | `decode_ms` | `duration_ms − ttft_ms`，负数夹到 0（宿主两个计时独立测量） |
+  | `tokens_per_second` | `output_tokens ÷ (decode_ms/1000)`，只在 `decode_ms ≥ 50` 且 `output_tokens > 0` 时有值 |
+  | `status_code` | 宿主报失败时取 `Failure.StatusCode`，否则 `200` |
+
+- **旧版本（v1）的行**：目录里可能还有旧设计（流式分片探针）写下的行，reader 仍然读，但 v2 从不写这些键——usage 载荷里没有对应字段：`generation_id, original_model_id, pinned_provider, affinity, upstream_request_id, fallbacks_available, model_attempt_count, total_provider_attempt_count, protocol, frames, cost_usd, is_byok, user_agent, claude_code_version, client_app, source_format`。这些行的 `v` 是 `1`，v2 新增的列在其上为空；
+- 写入是异步的（内存队列 → 批量 flush），队列满只丢弃并计数，**绝不阻塞宿主**；
 - 保留：先按 `channel_retention_days`（默认 3，上限 30）删旧文件，再按 `channel_max_size_mb`（默认 512）从最旧的文件删到限额；
 - 聚合在内存里按小时分桶、覆盖**滚动的 7 天**，所以插件重启后近 24 小时的渠道视图仍在：启动时会回填最近 24 小时的 JSONL（超过 96 MB 就截断，`/health` 的 `warmup.truncated` 会标出来）；
-- 目录不可写不致命：插件照常转发、照常在内存里聚合，失败暴露在 `/health` 的 `channel_observation.last_error` 与 `write_failures` 里。
+- 目录不可写不致命：插件照常回包、照常在内存里聚合，失败暴露在 `/health` 的 `channel_observation.last_error` 与 `write_failures` 里。
 
 ### 两个口径
 
-- **未识别（unresolved）**：流里有响应、但没有任何 `provider_metadata` 渠道帧的请求（即不是 clinepass 的流量，或上游没回报）。这些**不落盘、也不计入比例分母**，只计入 `/health` 的 `channel_observation.unresolved`。**分母只包含插件能归因到渠道的请求**，所以比例不会被别的上游流量稀释；
-- **未落在官渠（off baseline）**：记录的 `final_provider`（缺失时退回 `resolved_provider`）与 `channel_baseline_provider` 不区分大小写地不等。页面上的基线名取自接口返回的 `baseline_provider`，页面里不硬编码渠道名；
+- **偏离基准渠道（off baseline）**：记录的 `final_provider` 与 `channel_baseline_provider` 不区分大小写地不等。判定发生在**读时**：记录里不落盘 `off_baseline`，所以改基准会立刻重算历史窗口的比例。页面上的基线名取自接口返回的 `baseline_provider`，页面里不硬编码渠道名；
+- **分母就是窗口内的记录数**：每条完成的请求一条记录，没有「未识别」这一类，也没有 `unresolved` 计数器（那是旧设计的）；
+- **失败（`failed`）**：宿主在 usage 载荷里判定的失败请求数，落在 `summary.failed_requests`，并按渠道（`providers[].failed`）与小时（`hours[].failed`）拆开。它是**窗口口径**，与 `/health` 里会随插件重启归零的 `failed_events` 不是一回事（页面的「失败 N 条（x%）」取窗口口径）。生产实测这些失败全部是上游 502，来自上游限流；官方用量接口**只记成功计费请求**，所以失败无法归因到上游推理渠道，只能按 CPA 凭据计数；
+- **上游推理渠道（官方口径）**：`official_channels[]` 由官方 per-request usage 聚合而成，键是 `inference_provider`（`aiInferenceProviderName`）与 `model`（`metadata.raw_model`），带请求数、输入/输出/缓存 token 与成本。它按采集器的**保留窗口**统计，不随页面 1h/24h/7d 切换；官方接口本身也会限流（实测 `plan.usage.failures=1`、`error="upstream status 429"`），因此覆盖范围可能不足，页面在表下注明覆盖到哪一刻；
+- **当前生产上的口径冲突（未决）**：配置的基准仍是 `deepseek`，而 CPA 侧的渠道名是 `openai-compatible-cline1/2/3`，两者不可能相等，于是窗口内每一条都算偏离——验收时 1 小时窗口 6 条记录全部 `off_baseline=yes`。这是配置语义问题，不是采集故障：基准该改成渠道名、还是换判定方式（例如按 `upstream_model` 重新定义「官渠」），**尚未决定**；在决定之前，页面上的偏离比例必然接近 100%；
+- **TTFT 与解码速度**都取自宿主字段（`TTFT` / `Latency`，整数纳秒），不再由插件按帧时间戳推算。两者由宿主独立测量，所以 `decode_ms` 可能为负、记录里夹到 0；解码窗口短于 **50 ms** 时不记速度（`tokens_per_second` 为 0，也不进百分位），短窗口测到的是宿主批量投递而不是生成速度。宿主这两个计时的起点（是否含「客户端 → CPA 排队 → 连上游」）**本轮没有单独取证**；
 - 窗口是**滚动窗口**：`24h` 指「此刻往前 24 小时」，起点落在小时中间，所以小时分布表会有 **25 个整点刻度**（首尾各覆盖部分小时；空小时显示 0，不插值）。
 
 ### 接口
@@ -214,10 +239,18 @@ Cline 网关只在**响应体**里回报请求最后落在哪个渠道：`choice
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/v0/management/plugins/clinepass-channel-monitor/channel?window=1h\|24h\|7d` | 渠道视图 JSON：`enabled` 开关、`summary`（窗口 `from`/`to`、`baseline_provider`、已识别请求数 `resolved_requests`、偏离数 `off_baseline_requests` 与比例 `off_baseline_ratio`、换过渠道的请求数 `fallback_requests`、渠道数、TTFT p50/p90、解码 p50 tps、token 与成本合计、按渠道与按模型的拆分、小时分布），最新 20 条原始记录（`records`，另有 `records_total`）以及 `health`。`window` 非法返回 **400 + `invalid_window`** |
-| GET | `/v0/management/plugins/clinepass-channel-monitor/channel.csv?window=1h\|24h\|7d` | 同一窗口的 CSV 导出：一行一条记录，含 `off_baseline` 列（以及 `final_provider` / `resolved_provider` / `pinned_provider` / `canonical_slug` 等渠道列），以附件形式下载（`Content-Disposition: attachment`），响应头 `X-Record-Count` 报行数，表头行恒在 |
+| GET | `/v0/management/plugins/clinepass-channel-monitor/channel?window=1h\|24h\|7d` | 渠道视图 JSON：`enabled` 开关、`summary`（窗口 `from`/`to`、`baseline_provider`、窗口内请求数 `resolved_requests`、偏离数 `off_baseline_requests` 与比例 `off_baseline_ratio`、渠道数、TTFT p50/p90、解码 p50 tps、token 合计、按渠道 / 按模型 / 按小时的拆分 `providers` / `models` / `hours`），最新 20 条原始记录（`records`，另有 `records_total`）以及 `health`。`window` 非法返回 **400 + `invalid_window`** |
+| GET | `/v0/management/plugins/clinepass-channel-monitor/channel.csv?window=1h\|24h\|7d` | 同一窗口的 CSV 导出：一行一条记录，列序固定（见下），以附件形式下载（`Content-Disposition: attachment`），响应头 `X-Record-Count` 报行数，表头行恒在 |
 
-> 面板页面在「渠道」区把这些数字画出来：窗口选择 1h / 24h / 7d、偏离官渠的条数与比例、（按渠道 / 按模型 / 按小时）三张表和原始记录表，右上角是「导出 CSV」按钮。
+CSV 表头（v2 记录填不满的列留空）：
+
+```
+time_utc,request_id,session_id,generation_id,model,alias,upstream_model,canonical_slug,original_model_id,final_provider,resolved_provider,pinned_provider,auth_id,auth_index,auth_type,executor_type,reasoning_effort,service_tier,upstream_request_id,off_baseline,status_code,failed,protocol,ttft_ms,duration_ms,decode_ms,tokens_per_second,input_tokens,output_tokens,reasoning_tokens,cached_tokens,cache_read_tokens,cache_creation_tokens,total_tokens
+```
+
+其中 `generation_id`、`original_model_id`、`pinned_provider`、`upstream_request_id`、`protocol` 是 v1 列的存留；`off_baseline` 取值是 `yes` 或空，按**读时**的当前基准算。
+
+> 面板页面把这些数字画在**最后一个**区块「渠道」里：区块顺序固定为 `Cline 套餐用量（官方接口）` → `概览` → `官方用量明细` → `渠道`。渠道区内部依次是概览卡片、`渠道分布` 表（CPA 凭据，含 失败 列）、`上游推理渠道（官方 usage）` 表、`按模型` 表、时间线（卡片 + 小时表；小时表行序是**新 → 旧**，表头写着「时间（新 → 旧）」，含 失败 列）、`原始记录` 表。成本列与成本卡片已随之移除；原始记录表显示 时间 / 模型 / 渠道 / 凭据（认证 ID + 索引）/ 失败 / TTFT / 解码 t/s / 输入-输出-缓存读 / 状态 / 会话。右上角是「导出 CSV」按钮。
 
 ## 适配你自己的 Cline 条目
 
@@ -278,10 +311,10 @@ curl -s -H "Authorization: Bearer $CPA_MANAGEMENT_KEY" \
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/v0/management/plugins/clinepass-channel-monitor/health` | 完整套餐快照 `plan`（账号、限额、31 天汇总、官方窗口），`plan_usage`（官方逐条用量的采集状态），`plan_accounts`（每个 Cline 凭据的标签、账号、可用性与错误），以及 `channel_observation`（渠道采集的健康度与计数） |
-| GET | `/v0/management/plugins/clinepass-channel-monitor/channel?window=1h\|24h\|7d` | 渠道视图（v0.3.0）：偏离官渠的条数与比例、按渠道 / 按模型 / 按小时的拆分、最新 20 条原始记录。`window` 非法返回 400 + `invalid_window` |
+| GET | `/v0/management/plugins/clinepass-channel-monitor/channel?window=1h\|24h\|7d` | 渠道视图（v0.3.0）：偏离基准渠道的条数与比例、按渠道 / 按模型 / 按小时的拆分、最新 20 条原始记录。`window` 非法返回 400 + `invalid_window` |
 | GET | `/v0/management/plugins/clinepass-channel-monitor/channel.csv?window=1h\|24h\|7d` | 同一窗口的 CSV 导出（v0.3.0）：一行一条记录、含 `off_baseline` 列，附件下载，`X-Record-Count` 报行数 |
 
-页面里除了套餐区还有「渠道」区（窗口 1h / 24h / 7d、偏离官渠的头条数字与比例、按渠道 / 按模型 / 按小时的表格、原始记录表和「导出 CSV」按钮）。
+页面里除了套餐区还有「渠道」区，且**排在最后**（顺序：`Cline 套餐用量（官方接口）` → `概览` → `官方用量明细` → `渠道`）；渠道区内部依次是概览卡片、`渠道分布` 表（CPA 凭据，含失败列）、`上游推理渠道（官方 usage）` 表、`按模型` 表、时间线（卡片 + 小时表，小时表新 → 旧，含失败列）、`原始记录` 表和「导出 CSV」按钮。
 
 v0.1.x 的 `/stats`、`/events`、`/export` 三条路由已移除，请求它们返回 404（属预期）。注意**插件只声明 `/health`、`/channel`、`/channel.csv`**：CPA 只转发已声明的路径，所以一个旧版本生成的页面 / 接口清单里不会有后两条，请求它们就是 404（见「排障」）。
 
@@ -294,14 +327,15 @@ v0.1.x 的 `/stats`、`/events`、`/export` 三条路由已移除，请求它们
 | `plan_enabled` | 官方套餐轮询是否开启 |
 | `plan_usage` | 官方逐条用量的采集状态：`enabled`、`items`、`oldest`、`fetched_at`、`truncated`、`failures`、`retry_at`、`error` |
 | `plan_accounts` | 每个 Cline 凭据一行：`id`、`label`（掩码后的 key）、`source`（`plugin-config` / `config-file` / `host-auth`）、`available`、`rejected`、`account`、`items`、`oldest`、`truncated`、`failures`、`error` |
-| `request_header_names` / `request_bearer_len` | 上一次请求路径上看到的 header 名与 bearer 长度。v0.2.0 起不声明任何**请求侧**能力（v0.3.0 只新增响应分片拦截），所以**恒为空**；保留是因为它们从来只含 header 名与长度，不含凭据值 |
-| `channel_observation` | v0.3.0 新增的渠道采集健康度：`enabled`（观测总开关）、`directory`（JSONL 目录）、`resolved`（已归因到渠道的请求数）、`unresolved`（有响应但没有渠道帧、因而**未落盘也未计入比例分母**的请求数）、`parse_failures`、`needle_misses`、`dropped`（队列满丢弃）、`written`、`queued`、`write_failures`、`pending_streams`、`last_record_at`、`last_routing_at`、`last_write_at`、`last_error` / `last_error_at`、`last_parse_error` / `last_parse_error_at`、`files`、`bytes`、`warmup{records,truncated}`（启动回填近 24 小时 JSONL 的结果，回填超过 96 MB 时 `truncated: true`） |
-| `channel_observation.parse_failures` vs `needle_misses` | `parse_failures`：上游**确实回报了**渠道、但插件没解开（异常信号，应为 0）。`needle_misses`：分片里出现了 `provider_metadata` 这个词，但整帧递归找不到渠道对象——真实流量里模型正文也会写出这个词，所以**它在涨是健康的**，只说明探针命中了正文 |
+| `request_header_names` / `request_bearer_len` | 上一次请求路径上看到的 header 名与 bearer 长度。v0.2.0 起不声明任何**请求侧**能力（v0.3.0 只新增 usage 钩子与管理接口），所以**恒为空**；保留是因为它们从来只含 header 名与长度，不含凭据值 |
+| `channel_observation` | v0.3.0 新增的渠道采集健康度，字段**恰好**是这些：`enabled`（观测总开关）、`directory`（JSONL 目录）、`events`（接受并处理的 usage 记录数）、`failed_events`（其中宿主标为失败的请求数）、`decode_failures`（载荷根本解不开的次数）、`dropped`（队列满丢弃）、`written`、`queued`、`write_failures`、`last_record_at`、`last_write_at`、`last_error` / `last_error_at`、`last_decode_error` / `last_decode_error_at`、`files`、`bytes`、`warmup{records,truncated}`（启动回填近 24 小时 JSONL 的结果，回填超过 96 MB 时 `truncated: true`） |
+| `channel_observation.events` / `failed_events` / `decode_failures` | `events` 是采集到多少条请求（每个完成的请求一次回调，与协议无关，应当跟着真实流量涨）；`failed_events` 是其中宿主报失败的条数（正常会随上游报错起伏）；`decode_failures` 是**载荷解不开**的次数（异常信号，应为 0，解不开时看 `last_decode_error`）。旧设计的 `resolved` / `unresolved` / `parse_failures` / `last_parse_error` / `needle_misses` / `pending_streams` 已随分片探针一起移除 |
 
 ## 隐私
 
-- 插件**只写渠道观测的 JSONL**（v0.3.0 起，默认 `/CLIProxyAPI/logs/channel-observation/channel-<YYYY-MM-DD>.jsonl`）；关掉 `channel_observe_enabled` 后不声明分片能力，就完全不写了。v0.1.x 写的 `/opt/cpa/logs/channel-monitor/*.jsonl` 本版本不读也不写；
+- 插件**只写渠道观测的 JSONL**（v0.3.0 起，默认 `/CLIProxyAPI/logs/channel-observation/channel-<YYYY-MM-DD>.jsonl`）；关掉 `channel_observe_enabled` 后不声明 usage 能力，就完全不写了。v0.1.x 写的 `/opt/cpa/logs/channel-monitor/*.jsonl` 本版本不读也不写；
 - 不读、不写任何其他文件，不改写请求或响应，不克隆请求体；
+- 渠道记录里不含凭据：usage 载荷里的 `APIKey` / `Source`（凭据哈希）和 `BaseURL` 一律不落盘；`AuthID` / `AuthIndex` 是宿主给出的凭据标识（形如 `openai-compatibility:cline2:bcaef0dbf8d3`），不是密钥本身；
 - 不记录 prompt、响应正文、下游 key；
 - 插件**不会**打印或返回 CPA 管理密钥、上游 API key 或 auth 文件内容；发现的 Cline key 只留在内存，页面与 `/health` 里只出现掩码（`sk_…尾4位`）与 key 派生的稳定 id；
 - 数据只出现在两个地方：鉴权过的管理接口（`/health`、`/channel`、`/channel.csv`）和上一条说的本地 JSONL 目录。资源页面路由是静态壳，**不含任何数据**；
@@ -315,10 +349,16 @@ v0.1.x 的 `/stats`、`/events`、`/export` 三条路由已移除，请求它们
 | 加载失败、日志提示 ABI 不符 | 需要 CPA ≥ v7.3.8 的**带插件支持**构建（`X-Cpa-Support-Plugin: 1`）；插件声明 `abi_version = 1`、`schema_version = 6` |
 | 插件在 `plugins` 列表里但页面 404 | 检查 CPA 版本是否满足；改一次配置触发重扫；确认资源路由路径为 `/v0/resource/plugins/clinepass-channel-monitor/index.html` |
 | `/channel` 或 `/channel.csv` 返回 404 | 两种情况：① 装的是**没声明这两条路由的旧构建**（v0.2.0 及更早只有 `/health`）——换成 v0.3.0 的 `.so`；② 插件被禁用（`enabled: false`）。插件只声明 `/health`、`/channel`、`/channel.csv`，CPA 只转发已声明的路径，旧版本的页面 / 接口清单里不会有后两条 |
-| 「渠道」区显示「渠道观测未开启」 | 采集器在配置里被关掉了（`channel_observe_enabled: false`）。这是开关状态，不是故障；要数据就把它设回 `true` 并热重载插件（注意：改这个键必须真的改变值才触发重载） |
-| 「渠道」区有数字但记录表一直是空的 / 比例的分母一直是 0 | 只有**带 `provider_metadata` 渠道帧的 clinepass 流量**才会被记录：别的上游流量只计入 `unresolved`，既不落盘也不进分母。先看 `/health` 里 `channel_observation.unresolved` 是否在涨——在涨说明有流量但没渠道信息（不是 clinepass 或上游没回报），不在涨说明请求压根没走到这个插件（对 `/health` 以外的路径看不到它，或 `hosts` 没命中你的条目） |
-| 目录不可写 / 记录数不涨 | 看 `/health` 的 `channel_observation.last_error` 与 `write_failures`：目录权限、挂载或磁盘满都会记在这里。这时插件照常转发、照常在内存里聚合，只是不落盘；修好目录后（或换 `channel_store_dir`）新记录会继续写，但内存聚合在插件重启后会丢失 |
-| `POST /v1/responses` 的请求从不出现（`unresolved` 在涨） | 能力边界：Responses 协议的流式响应里**没有** `provider_metadata` 渠道帧（实测 34 帧里 0 帧带渠道），只有 `response.completed` 带 usage。这类请求永远只能计 `unresolved`，不会进比例的分母。要逐请求渠道，请让客户端走 chat/completions |
+| 「渠道」区显示「渠道观测未开启」 | 采集器在配置里被关掉了（`channel_observe_enabled: false`），插件因此不声明 usage 钩子。这是开关状态，不是故障；要数据就把它设回 `true` 并热重载插件（注意：改这个键必须真的改变值才触发重载） |
+| 「渠道」区一条记录都没有 / 比例的分母是 0 | 新口径下每条**完成的请求**都会记一条，所以先看 `/health` 的 `channel_observation.events`：① `events` 在涨而 `written` 不涨 → 写盘失败，看 `write_failures` / `last_error`；② `events` 完全不动 → 宿主没在调用插件，查 `plugins` 列表里本插件的 `registered` / `effective_enabled`，或观测被关掉了；③ `events` 在涨但当前窗口是空的 → 核对窗口起点，以及记录目录 `channel_store_dir` 是否被换过 |
+| 目录不可写 / 记录数不涨 | 看 `/health` 的 `channel_observation.last_error` 与 `write_failures`：目录权限、挂载或磁盘满都会记在这里。这时插件照常回包、照常在内存里聚合，只是不落盘；修好目录后（或换 `channel_store_dir`）新记录会继续写，但内存聚合在插件重启后会丢失 |
+| 窗口内**所有**请求都算偏离（页面偏离比例接近 100%） | 基准名与渠道名对不上：`channel_baseline_provider` 默认 `deepseek`，而 CPA 侧的渠道名是 `openai-compatible-cline1/2/3`，不区分大小写也不可能相等（验收时 1 小时窗口 6 条记录全部 `off_baseline=yes`）。这是配置语义问题、不是采集故障；基准该怎么定（改基准名、还是按 `upstream_model` 重新定义「官渠」）**尚未决定** |
+| 记录里 `tokens_per_second` 为 0 | 解码窗口短于 50 ms 时不记速度（宿主对短回答批量投递，量出来的是投递不是生成）；这类记录不进解码速度百分位。`ttft_ms` 为 0 表示宿主这次没有报首 token 时间（例如非流式请求或请求失败） |
+| 「上游推理渠道（官方 usage）」表为空 | 官方 per-request usage 还没取到：采集器每次刷新才填这张表，插件刚重启或官方接口回 429 时会是空的（页面写「官方用量记录还没有到」，不是 0）。看 `/health` 的 `plan.usage.failures` / `plan.usage.error`；接口限流会退避重试 |
+| 官方表的覆盖范围比窗口短 | 表按采集器**保留窗口**（26 小时）统计，且官方接口有限流：实测 `items=800`、`oldest=04:59Z` 时 `truncated=true`。这是上游限额，不是插件故障；历史更长的区间要等采集器补齐或改用官方逐日汇总 |
+| 上游返回 502，能否看出是哪个上游渠道 | **不能**。官方用量接口只记成功计费请求（实测 200 条里 0 条零 completion），失败不会出现在里面；CPA 的 usage 载荷里 `Failure.Body` 只有一句 `upstream stream returned an error payload`，不含上游渠道字样。上游错误原文（例如 `failed to generate stream from Vercel: … status 429 … Rate limit exceeded`）只在 CPA 自己的 `main.log` 里。渠道区只能按 CPA 凭据给出失败分布 |
+| `POST /v1/responses` 的请求能看到吗 | 能。渠道取自宿主每个请求结束后的 usage 回调，与客户端协议无关；旧的流式分片设计在这里才是盲区，已退役 |
+| 记录 / CSV 里有些列一直为空（`generation_id`、`pinned_provider`、`protocol`、`cost_usd` …） | 目录里仍有**旧版本（`v: 1`）写下的行**，CSV 也保留了这些 v1 列。usage 载荷里没有对应字段，所以 v2 不再写这些键；`v: 2` 的行这些列本来就是空的 |
 | 页面能开但一直空 | 页面里的管理密钥没填或填错（管理接口会返回 401/403）；或 `plan_accounts` 为空（凭据没被发现） |
 | 套餐卡片提示「插件拿不到 Cline API Key」 | 插件读的是 CPA 自己的 Cline 凭据：确认 CPA 里有指向 `api.cline.bot` 的 `openai-compatibility` 条目（或条目名恰为 `Cline`），且 `plan_config_path` 指向容器内可读的 `config.yaml`；`/health` 的 `plan_accounts` 会列出每个凭据的来源、可用性与错误 |
 | 同上，但 CPA 是 v8 且配置文件里有 `config-version: 8` | 插件 0.2.0 只认顶层 `openai-compatibility:`，而 v8 把它挪进了 `api-keys.openai-compatibility:`，于是读不到 key。升级到 **0.3.0** 即可；升级前可临时在插件配置里写 `plan_api_key` 顶上 |
@@ -352,11 +392,16 @@ make install INSTALL_DIR=/opt/cpa/plugins/<goos>/<goarch>
 4. 确认：`GET /v0/management/plugins` 里本插件 `registered: true`、`effective_enabled: true`、版本是 `0.3.0`；
 5. **最后**才删掉上一版本的 `.so`。文件名带版本号时（形如 `clinepass-channel-monitor-v<版本>.so`）新旧会同时被扫描到，但**不要在装新版本之前删掉正在运行的那个 `.so`**：实测先 `rm` 掉活动版本、再装新版本并 `PATCH enabled`，宿主会停在
    `registered:false, enabled:true, effective_enabled:false`（页面与 `/health` 一起 404，`main.log` 里连 `pluginhost:` 行都没有），连续 7 次 `enabled:true` 都救不回来，只有 `sudo docker restart cpa` 才恢复。
-   正常流程下宿主自己会退休旧版本，`main.log` 会打印 `plugin hot reloaded … retired_version=<旧版本> retired_path=<旧文件>`，看到这行再删旧文件最稳。
+   正常流程下宿主自己会退休旧版本，`main.log` 会打印 `plugin hot reloaded … active_version=<新版本> retired_version=<旧版本> retired_path=<旧文件>`，看到这行再删旧文件最稳（2026-10-02 的部署实测就是这样：新 `.so` 装上、旧版本继续跑、热重载成功后 `active_version=0.3.0-dev.173 retired_version=0.3.0-dev.171`，旧文件在确认退休之后才删）。
 
 **`{"status":"ok"}` 不代表加载成功**（实测踩过两次）：两次连续的 `enabled` PATCH 撞上配置重载时，第二次可能被内存态回写覆盖，插件停在 `registered:false`，页面与 `/health` 直接 404，而 `main.log` 里只有 200 的 PATCH 记录、**没有** `pluginhost: plugin loaded`。所以别信 PATCH 的回执，回读列表，是 `false` 就再发一次 `enabled:true`；热重载成功时 `main.log` 会打印 `pluginhost: plugin loaded / registered / hot reloaded … version=<新版本>`（进程启动时的那次加载不写这些行，判据一律以回读列表为准）。
 
 **卡住了就重启容器**：上面那些 `registered:false` 的场景里，重复 PATCH 无效时用 `sudo docker restart cpa`（约 3 s 端口恢复）。重启后不需要再 PATCH，`plugins.configs.<id>.enabled: true` 会让宿主在启动时按目录重新扫描并加载。
+
+**2026-10-02 第二轮部署教到的两条（都已复现）**：
+
+1. **先确认同步的产物真的包含本次改动**：这一轮我复用了上一轮留下的同步包，构建出的 `.so` 不含新字段（回读 `/channel` 时缺 `failed_requests`），白跑了一轮部署。判据是编译输入哈希（`find internal cmd -type f \( -name '*.go' -o -name '*.html' \) | LC_ALL=C sort | xargs sha256sum | sha256sum`，`sort` 必须钉 `LC_ALL=C`）必须与本地一致；哈希没变就是没同步。
+2. **回读要看两处，光看列表会骗人**：`GET /v0/management/plugins` 的 `path` 读的是磁盘上的文件，可能已经是新文件，而**已加载的实例仍是旧的**——这时 `/health` 里的 `version` 还是旧版本号（实测列表 `path` 指到 `0.3.0-dev.177`、`/health` 仍回 `0.3.0-dev.176`，且 `main.log` 没有对应的 `plugin hot reloaded` 行）。判据是 `plugins[].path` 的文件名版本 **与** `/health` 的 `version` 一致，两者不一致就 `sudo docker restart cpa`。
 
 **怎么确认部署的 `.so` 就是当前源码构建的**：两边跑同一条命令再比哈希，注意 `sort` 必须钉住 locale，否则 BSD `sort`（macOS）与 glibc `sort`（服务器）的排序不同，会得到假的不一致：
 
@@ -370,17 +415,17 @@ export CPA_MANAGEMENT_KEY='<your-management-key>'
 curl -s -H "Authorization: Bearer $CPA_MANAGEMENT_KEY" http://127.0.0.1:8317/v0/management/plugins
 ```
 
-升级本身不动数据：v0.2.x → v0.3.0 只是多声明一个能力、多一个 JSONL 目录，配置块可以原样保留；v0.3.0 新增的 5 个键不写就用默认值。
+升级本身不动数据：v0.2.x → v0.3.0 只是多声明一个能力、多一个 JSONL 目录，配置块可以原样保留；v0.3.0 新增的 5 个键不写就用默认值。目录里由更早的流式分片设计写下的 `v: 1` 行不会被删，reader 仍然读它们（缺 v2 的字段，页面按空值显示）。
 
 ### 回滚
 
 三种粒度，按需要选最轻的一种：
 
-- **只是不想承担分片开销**：把 `channel_observe_enabled` 设为 `false` 并热重载。插件不再声明 `response_stream_interceptor` 能力，**请求路径上的逐帧成本彻底消失**（宿主侧 `HasStreamInterceptors()` 为 false，不 clone 分片、不走 ABI）；套餐、限额、官方用量视图完全不受影响，历史数据留在磁盘上；
+- **只是不想承担采集开销**：把 `channel_observe_enabled` 设为 `false` 并热重载。插件不再声明 `usage_plugin` 能力，宿主不注册 usage 适配层，**每个完成的请求不再有这一次 ABI 调用**；套餐、限额、官方用量视图完全不受影响，历史数据留在磁盘上，页面「渠道」区显示「渠道观测未开启」；
 - **想回到 v0.2.x**：把上一版的 `.so` 装回去（删掉 v0.3.0 的 `.so`），按上面的方式重载插件并确认 `registered: true`、版本变回 `0.2.x`。回滚后渠道接口自然 404（旧构建没声明那条路由），磁盘上的 JSONL 不会被读也不会被删；
 - **想整块停掉**：把插件配置里 `enabled` 设为 `false`。路由不再注册，页面与接口都不可用。
 
-数据侧：渠道记录就是 `channel_store_dir` 下的 `channel-<YYYY-MM-DD>.jsonl`，**那整个目录可以直接删**（只删插件自己命名的文件；插件启动时会重建目录）。内存聚合不落盘，插件重启后会从 JSONL 回填最近 24 小时。
+数据侧：渠道记录就是 `channel_store_dir` 下的 `channel-<YYYY-MM-DD>.jsonl`，**那整个目录可以直接删**（只删插件自己命名的文件；插件启动时会重建目录）。内存聚合不落盘，插件重启后会从 JSONL 回填最近 24 小时；旧设计的 `v: 1` 行夹在其中也照常回填，只是没有 v2 的字段。
 
 历史版本相关的几条：
 
@@ -394,12 +439,13 @@ curl -s -H "Authorization: Bearer $CPA_MANAGEMENT_KEY" http://127.0.0.1:8317/v0/
 ```
 cmd/clinepass-channel-monitor/   入口：C ABI 的四个 //export 符号、信封编解码、panic 兜底
   cdecl.h                        C 侧类型声明（cgo 前置用）
+cmd/channel-probe/               诊断探针（非发布产物）：把宿主交给插件的原始载荷落盘，用来确认渠道 / 凭据对插件是否可见
 internal/abi/                    插件 ABI 信封
 internal/buildinfo/              插件 id / 名称 / 作者 / 版本（版本由 -ldflags 注入）
 internal/hostapi/                宿主回调桥：日志与 host.* 数据接口
 internal/config/                 配置解析与归一化（plugins.configs.<id> 契约）
 internal/plan/                   Cline 官方用量：套餐、限额、31 天汇总、逐条记录采集、凭据发现
-internal/observation/            渠道观测（v0.3.0）：分片探针与解析、JSONL 存储与保留策略、内存小时桶聚合
+internal/observation/            渠道观测（v0.3.0）：usage 载荷解析与记录映射、JSONL 存储与保留策略、内存小时桶聚合与 CSV 导出
 internal/state/                  运行时状态（配置 / 用量轮询器 / 渠道存储）的发布与读取
 internal/management/             管理接口与内嵌页面 index.html
 internal/plugin/                 注册、生命周期与方法分发（把上面这些接起来）
@@ -409,13 +455,22 @@ internal/plugin/                 注册、生命周期与方法分发（把上�
 
 ## 性能
 
-渠道观测是 v0.1.x 那个「逐帧 clone」问题的低配版解法，所以它的开销必须能被量出来、也必须能被关掉。下面三态用同一个脚本、同一台宿主机、同一段时间测：
+渠道观测的开销必须能被量出来、也必须能被关掉。**本节的两张三态表是为已被退役的流式分片设计（`response_stream_interceptor`）测的**，保留它们是为了留住当时的判定依据与测量方法；它们不代表现在这版实现的成本，不要拿这些数字当现版本的性能证据。
+
+新设计的成本模型（定性，量化测量**还没做**）：
+
+- 每个**完成的请求**一次 ABI 调用，插件侧一次 JSON 解码 + 一条记录构建；没有逐帧工作、不读响应字节、不克隆请求体、不做探针；
+- 调用发生在请求**结束之后**，不在请求处理路径上，因此不参与任何请求的时延与吞吐；
+- 观测关闭时不声明 `usage_plugin`，宿主不注册 usage 适配层，这次调用根本不存在——「关闭」仍然等价于「没装插件」；
+- 要量新开销需要一套按**请求**计的基准；`scripts/bench_channel.py` 目前测的是流式请求的帧间隔 / 解码窗口 / CPA CPU（旧设计口径），不能直接用来量这次改动。新数字待测。
+
+以下表格标注为**历史（旧设计）**：
 
 - **基线**：不装插件；
-- **装了插件 + 观测关闭**：`channel_observe_enabled: false`（不声明分片能力）；
-- **装了插件 + 观测开启**：`channel_observe_enabled: true`。
+- **装了插件 + 观测关闭**：`channel_observe_enabled: false`（旧设计下不声明分片能力）；
+- **装了插件 + 观测开启**：`channel_observe_enabled: true`（旧设计下每帧一次 `bytes.Contains`）。
 
-### 测量方法
+### 测量方法（旧设计口径，保留）
 
 ```bash
 python3 scripts/bench_channel.py --label <name> --ctx-chars N --max-tokens M --runs R
@@ -434,21 +489,23 @@ python3 scripts/bench_channel.py --label <name> --ctx-chars N --max-tokens M --r
 
 短提示那组另有：每次运行 2 个静默帧（无内容的 SSE 帧），**0** 个畸形帧。
 
-### 三态对比
+### 三态对比（旧设计的历史数字）
 
-顺序相位（先关后开各一轮）先给出 short 段 −6.9% 的吞吐差，但同一台机器的空闲 CPU 中位数会从 3.7% 漂到 46%，顺序相位把「机器变忙变闲」记到了被测变量头上，因此改用**交替 A/B**：每轮先关后开，共 5 轮，每臂长提示（227000 字符 / 1600 补齐 / 1 run）。第 5 轮的开启臂撞上上游 Vercel 429（CPA 返回 502 `stream_initialization_failed`，与该请求无关，它本来也只会算 unresolved），故配对样本 n=4。
+> 下面全部是**旧设计**（逐帧探针）时期的实测，用来说明测量方法与当时的判定，不是现版本的性能证据。
+
+顺序相位（先关后开各一轮）先给出 short 段 −6.9% 的吞吐差，但同一台机器的空闲 CPU 中位数会从 3.7% 漂到 46%，顺序相位把「机器变忙变闲」记到了被测变量头上，因此改用**交替 A/B**：每轮先关后开，共 5 轮，每臂长提示（227000 字符 / 1600 补齐 / 1 run）。第 5 轮的开启臂撞上上游 Vercel 429（CPA 返回 502 `stream_initialization_failed`，与本插件无关），故配对样本 n=4。
 
 | 状态 | 解码速度（中位） | TTFT | 相对关闭 | 结论 |
 |---|---|---|---|---|
 | 基线（未装插件） | 151.47 t/s（2 run） | 1.878 s | — | 与下面两行分属不同时段，只当数量级看 |
-| 装了插件 + 观测关闭 | **165.15 t/s**（5 run：161.30 / 162.35 / 165.15 / 166.50 / 167.23） | 配对基准 | — | `channel_observe_enabled: false`，不声明分片能力，请求路径零开销 |
-| 装了插件 + 观测开启 | **161.69 t/s**（4 run：157.64 / 160.13 / 163.24 / 164.74） | — | 吞吐中位 **−1.88%**（均值 −1.56%，区间 −3.04%…+0.55%）；TTFT 中位 **+1.98%**（均值 −0.04%，区间 −7.68%…+3.58%）；端到端 +1.31% | `channel_observe_enabled: true`，每帧一次 `bytes.Contains`，命中才解 JSON |
+| 装了插件 + 观测关闭 | **165.15 t/s**（5 run：161.30 / 162.35 / 165.15 / 166.50 / 167.23） | 配对基准 | — | 旧设计：`channel_observe_enabled: false`，不声明分片能力，请求路径零开销 |
+| 装了插件 + 观测开启 | **161.69 t/s**（4 run：157.64 / 160.13 / 163.24 / 164.74） | — | 吞吐中位 **−1.88%**（均值 −1.56%，区间 −3.04%…+0.55%）；TTFT 中位 **+1.98%**（均值 −0.04%，区间 −7.68%…+3.58%）；端到端 +1.31% | 旧设计：`channel_observe_enabled: true`，每帧一次 `bytes.Contains`，命中才解 JSON |
 
-> **判定：通过，观测可以留在生产开启。** 观测开启相对关闭的吞吐中位差 −1.88%（比值 0.979），TTFT 中位差 +1.98%，都落在同一状态内 run 间 ±12% 的离散度之内，也都在验收阈值（吞吐 ≥ 95%、TTFT ≤ 110%）之内。
+> **旧设计的判定：通过，观测当时可以留在生产开启。** 观测开启相对关闭的吞吐中位差 −1.88%（比值 0.979），TTFT 中位差 +1.98%，都落在同一状态内 run 间 ±12% 的离散度之内，也都在验收阈值（吞吐 ≥ 95%、TTFT ≤ 110%）之内。该判定随流式分片设计一起退役，现版本的成本模型见本节开头。
 >
 > 读这份表必须一起看三件事：①同一状态内 run 间离散度就有 ±12%（关闭相位长提示单 run 曾见 147.22 t/s，而中位是 165.15），只能按「同样运行次数比中位数 + 配对差值」判读；②**本机的 CPU 增量测不出来**（容器共用，配对差从 −61 到 +34.6 个百分点），要 CPU 数字必须换独占环境重测；③每次 PATCH 重载都会让 `written` 等计数器归零，`warmup` 会从磁盘回填，这不是数据丢失。
 >
-> 真实流量下的两类边界（Responses API 永远不带 `provider_metadata`、模型正文里出现 `provider_metadata` 一词）与相应修正见 [docs/channel-observation.md](docs/channel-observation.md) §4.3。
+> 旧设计被退役的过程与它暴露的两类边界（`/v1/responses` 永远不带 `provider_metadata`、模型正文里出现 `provider_metadata` 一词造成探针假阳性）见 [docs/channel-observation.md](docs/channel-observation.md) §2.3 与 §4.3。
 
 ## 构建与开发
 

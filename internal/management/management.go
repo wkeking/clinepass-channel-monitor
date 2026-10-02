@@ -198,5 +198,11 @@ func buildHealthResponse() healthResponse {
 			})
 		}
 	}
+	// The upstream-channel list is part of the payload the page reads, so it is a list on
+	// every path: without a poller there is nothing to report, which is an empty list, not a
+	// null the page would have to special-case.
+	if resp.Plan.OfficialChannels == nil {
+		resp.Plan.OfficialChannels = []plan.OfficialChannelRow{}
+	}
 	return resp
 }

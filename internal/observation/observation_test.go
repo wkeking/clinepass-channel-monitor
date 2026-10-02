@@ -11,47 +11,31 @@ import (
 	"time"
 )
 
-// The fixtures below mirror what the Cline gateway actually sends on this host: an OpenAI
-// chat stream whose terminating frame carries the channel report, taken from a real
-// deepseek-flash-1 capture. provider_metadata sits inside choices[0].delta, and the usage
-// object rides the same frame.
+// The fixtures below mirror the payload the production host actually hands to usage.handle,
+// captured on the live host by a throwaway probe plugin. The field names are the SDK's Go
+// field names, and Latency/TTFT are integer nanoseconds because the SDK sends time.Duration
+// values; the payload is protocol independent, which is why the collector no longer reads the
+// response stream at all.
 
 const (
-	frameRoleOnly = `data: {"id":"chatcmpl-fixture","object":"chat.completion.chunk","model":"deepseek-flash-1","choices":[{"index":0,"delta":{"role":"assistant"}}]}` + "\n\n"
-
-	frameReasoning = `data: {"id":"chatcmpl-fixture","object":"chat.completion.chunk","model":"deepseek-flash-1","choices":[{"index":0,"delta":{"reasoning":"先看目录结构"}}]}` + "\n\n"
-
-	// frameRouting is the normal case: the channel report of a request that landed where it
-	// was planned to land.
-	frameRouting = `data: {"id":"chatcmpl-fixture","object":"chat.completion.chunk","model":"deepseek-flash-1","choices":[{"index":0,"delta":{"provider_metadata":{"gateway":{"routing":{"finalProvider":"deepseek","resolvedProvider":"deepseek","canonicalSlug":"deepseek/deepseek-v4.1-flash","originalModelId":"deepseek/deepseek-v4.1-flash","clientSessionId":"sess-fixture-1","generationId":"gen-fixture-1","modelAttemptCount":1,"totalProviderAttemptCount":1,"affinity":{"outcome":"confirmed","pinnedProvider":"deepseek"},"fallbacksAvailable":[],"planningReasoning":"Provider set restricted to: deepseek.","modelAttempts":[{"modelId":"deepseek/deepseek-v4.1-flash","providerAttempts":[{"provider":"deepseek","providerRequestId":"prov-fixture-1","statusCode":200,"success":true}]}]}}}}}],"usage":{"prompt_tokens":800,"completion_tokens":200,"total_tokens":1000,"cost":0.0012,"is_byok":false,"prompt_tokens_details":{"cached_tokens":512},"completion_tokens_details":{"reasoning_tokens":200}}}` + "\n\n"
-
-	// frameRoutingFallback is the sample the requirement asks for: the gateway reports a
-	// final provider that differs from the resolved one, which is how a fallback onto a
-	// non-official channel looks. canonicalSlug stays deepseek/... — recording the slug
-	// alone would have hidden this request, which is why the channel is observed at all.
-	frameRoutingFallback = `data: {"id":"chatcmpl-fallback","object":"chat.completion.chunk","model":"deepseek-flash-1","choices":[{"index":0,"delta":{"provider_metadata":{"gateway":{"routing":{"finalProvider":"alibaba","resolvedProvider":"deepseek","canonicalSlug":"deepseek/deepseek-v4.1-flash","originalModelId":"deepseek/deepseek-v4.1-flash","clientSessionId":"sess-fixture-2","generationId":"gen-fixture-2","modelAttemptCount":1,"totalProviderAttemptCount":3,"affinity":{"outcome":"fallback","pinnedProvider":"deepseek"},"fallbacksAvailable":["particle"],"modelAttempts":[{"modelId":"deepseek/deepseek-v4.1-flash","providerAttempts":[{"provider":"deepseek","providerRequestId":"prov-fixture-2","statusCode":429},{"provider":"particle","providerRequestId":"prov-fixture-3","statusCode":503},{"provider":"alibaba","providerRequestId":"prov-fixture-4","statusCode":200}]}]}}}}}],"usage":{"prompt_tokens":1200,"completion_tokens":300,"total_tokens":1500,"cost":0.0031,"prompt_tokens_details":{"cached_tokens":0},"completion_tokens_details":{"reasoning_tokens":300}}}` + "\n\n"
-
-	// frameUsageOnly has token counters but no channel report: the shape of a response the
-	// gateway finished without saying where it came from.
-	frameUsageOnly = `data: {"id":"chatcmpl-noroute","object":"chat.completion.chunk","model":"deepseek-flash-1","choices":[{"index":0,"delta":{}}],"usage":{"prompt_tokens":40,"completion_tokens":7,"total_tokens":47}}` + "\n\n"
-
-	framePlainText = `data: {"id":"chatcmpl-noroute","object":"chat.completion.chunk","model":"deepseek-flash-1","choices":[{"index":0,"delta":{"content":"/tmp"}}]}` + "\n\n"
-
-	frameDone = "data: [DONE]\n\n"
-
-	// frameTextMentioningRouting carries the needle word in the model's own output. The shape
-	// is real: an agent discussing this very plugin writes "provider_metadata" in its answer,
-	// and such a chunk must never be read as a channel report cut across two boundaries.
-	frameTextMentioningRouting = `data: {"id":"chatcmpl-mention","object":"chat.completion.chunk","model":"deepseek-flash-1","choices":[{"index":0,"delta":{"reasoning":"I will read provider_metadata.gateway.routing from the frame"}}]}` + "\n\n"
-
-	// frameResponsesText and frameResponsesCompleted replay the Responses API, which is what
-	// the codex client speaks through CPA. Its stream carries no provider_metadata at all, so
-	// the channel of such a request cannot be observed: it only ever counts as unresolved.
-	frameResponsesText      = `data: {"type":"response.output_text.delta","delta":"reading the routing table"}` + "\n\n"
-	frameResponsesCompleted = `data: {"type":"response.completed","response":{"id":"resp-fixture","usage":{"input_tokens":900,"output_tokens":120,"total_tokens":1020,"input_tokens_details":{"cached_tokens":128},"output_tokens_details":{"reasoning_tokens":40}}}}` + "\n\n"
+	// providerFixture is the CPA credential the fixture request landed on, i.e. the channel.
+	providerFixture = "openai-compatible-cline1"
+	// providerBaseline is the channel the recorder is configured to treat as the official one.
+	providerBaseline = "deepseek"
+	// providerOther is the channel of a request that left the baseline.
+	providerOther = "alibaba"
 )
 
-// testClock makes ttft, duration and the hourly buckets deterministic.
+// fixtureNow is the recorder clock every fixture timestamp is placed after. It is fixed so
+// the assertions are numbers instead of a race with the wall clock.
+var fixtureNow = time.Date(2026, 10, 2, 16, 0, 0, 0, time.UTC)
+
+// liveUsagePayload is the payload shape captured on the host, verbatim apart from the
+// credential hashes. It pins the wire contract: a renamed field in usageWire would show up
+// here as a missing value rather than silently collecting nothing on the next release.
+const liveUsagePayload = `{"Provider":"openai-compatible-cline1","BaseURL":"https://api.cline.bot","ExecutorType":"OpenAICompatExecutor","Model":"cline-pass/deepseek-v4.1-flash","Alias":"deepseek-flash-2","APIKey":"sk_credential-fixture","RequestID":"01a0fb77-fixture","TraceID":"01a0fb77-fixture","SessionID":"codex:sess-fixture-1","ParentSessionID":"","AuthID":"openai-compatibility:cline1:7cb99c3ced51","AuthIndex":"b6c17a2d5d0c3862","AuthType":"apikey","Source":"sk_credential-fixture","ReasoningEffort":"high","ServiceTier":"auto","ResponseServiceTier":"","ResponseModel":"deepseek/deepseek-v4.1-flash","Generate":true,"Stream":true,"Failed":false,"Failure":{"StatusCode":0,"Body":""},"Detail":{"InputTokens":37,"OutputTokens":16,"ReasoningTokens":14,"CachedTokens":0,"CacheReadTokens":0,"CacheCreationTokens":0,"TotalTokens":53},"RequestedAt":"2026-10-02T15:14:23Z","Latency":1097125788,"TTFT":643260112}`
+
+// testClock makes the window bounds and the timestamp fallback deterministic.
 type testClock struct {
 	mu sync.Mutex
 	at time.Time
@@ -71,13 +55,18 @@ func (c *testClock) advance(d time.Duration) {
 
 func newRecorder(t *testing.T) (*Recorder, *testClock) {
 	t.Helper()
-	clock := &testClock{at: time.Now().UTC().Truncate(time.Second)}
+	return newRecorderWithBaseline(t, providerBaseline)
+}
+
+func newRecorderWithBaseline(t *testing.T, baseline string) (*Recorder, *testClock) {
+	t.Helper()
+	clock := &testClock{at: fixtureNow}
 	recorder := New(Options{
 		Enabled:       true,
 		Directory:     t.TempDir(),
 		RetentionDays: 3,
 		MaxSizeMB:     16,
-		Baseline:      "deepseek",
+		Baseline:      baseline,
 	})
 	recorder.nowFn = clock.now
 	recorder.Start()
@@ -85,60 +74,99 @@ func newRecorder(t *testing.T) (*Recorder, *testClock) {
 	return recorder, clock
 }
 
-// feedStream replays one streamed request the way the host does: a header-init call, then
-// one call per payload chunk. The timing is deliberate — the first text frame arrives 1.2 s
-// after the response started, the channel report 2.2 s after it — so ttft and decode speed
-// are checkable numbers instead of zeroes.
-func feedStream(t *testing.T, recorder *Recorder, clock *testClock, requestID, model string, frames ...string) {
-	t.Helper()
-	recorder.Observe(&InterceptRequest{
-		RequestID:       requestID,
-		Model:           model,
-		RequestedModel:  model,
-		SourceFormat:    "openai",
-		RequestHeaders:  map[string][]string{"User-Agent": {"claude-cli/2.1.0"}, "X-App": {"cline-cli"}},
-		ResponseHeaders: map[string][]string{"X-Upstream-Status": {"200"}},
-		ChunkIndex:      ChunkHeaderInitIndex,
-	})
-	for index, body := range frames {
-		switch index {
-		case 1:
-			clock.advance(1200 * time.Millisecond)
-		case 2:
-			clock.advance(100 * time.Millisecond)
-		default:
-			if index > 0 {
-				clock.advance(900 * time.Millisecond)
-			}
-		}
-		recorder.Observe(&InterceptRequest{RequestID: requestID, ChunkIndex: index, Body: []byte(body)})
+// usageFixture is one payload in the shape the host sends, with every field these tests read
+// filled in. Provider and RequestedAt are the two a test always decides for itself.
+func usageFixture(provider string, requestedAt time.Time) usageWire {
+	stamp := requestedAt.UTC().Format(time.RFC3339)
+	return usageWire{
+		Provider:        provider,
+		BaseURL:         "https://api.cline.bot",
+		ExecutorType:    "OpenAICompatExecutor",
+		Model:           "cline-pass/deepseek-v4.1-flash",
+		Alias:           "deepseek-flash-2",
+		APIKey:          "sk_credential-fixture",
+		RequestID:       "req-fixture-1",
+		TraceID:         "req-fixture-1",
+		SessionID:       "codex:sess-fixture-1",
+		AuthID:          "openai-compatibility:cline1:7cb99c3ced51",
+		AuthIndex:       "b6c17a2d5d0c3862",
+		AuthType:        "apikey",
+		Source:          "sk_credential-fixture",
+		ReasoningEffort: "high",
+		ServiceTier:     "auto",
+		ResponseModel:   "deepseek/deepseek-v4.1-flash",
+		Generate:        true,
+		Stream:          true,
+		Detail:          usageDetail{InputTokens: 37, OutputTokens: 16, ReasoningTokens: 14, TotalTokens: 53},
+		RequestedAt:     stamp,
+		Latency:         1097125788,
+		TTFT:            643260112,
 	}
+}
+
+// feedUsage hands one record to the collector the way the host does, then waits for it to
+// reach the file: the writer is asynchronous and the page reads the same file this reads.
+func feedUsage(t *testing.T, recorder *Recorder, wire usageWire) {
+	t.Helper()
+	recorder.ObserveUsage(&wire)
+	recorder.Flush()
 }
 
 func recordsOf(t *testing.T, recorder *Recorder) []Record {
 	t.Helper()
-	// The writer is asynchronous, so the records a test just fed are only on disk after a
-	// flush: the page reads the same file this reads.
 	recorder.Flush()
-	window, ok := ParseWindow("24h")
-	if !ok {
-		t.Fatalf("ParseWindow(24h) failed")
-	}
-	records, errLoad := recorder.RecordsSince(window)
+	records, errLoad := recorder.RecordsSince(mustWindow(t, "24h"))
 	if errLoad != nil {
 		t.Fatalf("RecordsSince: %v", errLoad)
 	}
 	return records
 }
 
-func TestObserveRecordsChannelFromRoutingFrame(t *testing.T) {
-	recorder, clock := newRecorder(t)
-	feedStream(t, recorder, clock, "req-normal", "deepseek-flash-1",
-		frameRoleOnly, frameReasoning, framePlainText, framePlainText, frameRouting, frameDone)
+// useRecorder installs a recorder as the usage entry point's target.
+func useRecorder(t *testing.T, recorder *Recorder) {
+	t.Helper()
+	SetActive(recorder)
+	t.Cleanup(func() { SetActive(nil) })
+}
+
+// decodeKeepAnswer asserts the answer is the "no change" envelope the host expects.
+func decodeKeepAnswer(t *testing.T, answer []byte, context string) {
+	t.Helper()
+	var envelope struct {
+		OK     bool            `json:"ok"`
+		Result json.RawMessage `json:"result"`
+	}
+	if errUnmarshal := json.Unmarshal(answer, &envelope); errUnmarshal != nil {
+		t.Fatalf("%s: answer is not the envelope the host expects: %v (%s)", context, errUnmarshal, answer)
+	}
+	if !envelope.OK {
+		t.Fatalf("%s: answer ok=false: %s", context, answer)
+	}
+	var result map[string]any
+	if errUnmarshal := json.Unmarshal(envelope.Result, &result); errUnmarshal != nil {
+		t.Fatalf("%s: result is not an object: %v (%s)", context, errUnmarshal, envelope.Result)
+	}
+	if len(result) != 0 {
+		t.Fatalf("%s: the plugin answered with a change: %s", context, envelope.Result)
+	}
+}
+
+// TestHandleUsageStoresTheMappedRecord drives the captured payload through the ABI entry
+// point and checks the stored record field by field: this is the whole point of the release,
+// because a field that stopped being mapped is exactly how the feature went blind before.
+func TestHandleUsageStoresTheMappedRecord(t *testing.T) {
+	recorder, _ := newRecorder(t)
+	useRecorder(t, recorder)
+
+	answer, errHandle := HandleUsage([]byte(liveUsagePayload))
+	if errHandle != nil {
+		t.Fatalf("HandleUsage returned an error: %v", errHandle)
+	}
+	decodeKeepAnswer(t, answer, "HandleUsage")
 
 	records := recordsOf(t, recorder)
 	if len(records) != 1 {
-		t.Fatalf("want exactly 1 record, got %d: %+v", len(records), records)
+		t.Fatalf("want exactly 1 stored record, got %d: %+v", len(records), records)
 	}
 	record := records[0]
 	for _, check := range []struct {
@@ -147,237 +175,219 @@ func TestObserveRecordsChannelFromRoutingFrame(t *testing.T) {
 		want any
 	}{
 		{"v", record.Schema, schemaVersion},
-		{"request_id", record.RequestID, "req-normal"},
-		{"session_id", record.SessionID, "sess-fixture-1"},
-		{"generation_id", record.GenerationID, "gen-fixture-1"},
-		{"model", record.Model, "deepseek-flash-1"},
+		{"time", record.Time.UTC().Format(time.RFC3339), "2026-10-02T15:14:23Z"},
+		{"request_id", record.RequestID, "01a0fb77-fixture"},
+		{"session_id", record.SessionID, "codex:sess-fixture-1"},
+		{"model", record.Model, "cline-pass/deepseek-v4.1-flash"},
+		{"alias", record.Alias, "deepseek-flash-2"},
+		{"upstream_model", record.UpstreamModel, "deepseek/deepseek-v4.1-flash"},
 		{"canonical_slug", record.CanonicalSlug, "deepseek/deepseek-v4.1-flash"},
-		{"original_model_id", record.OriginalModel, "deepseek/deepseek-v4.1-flash"},
-		{"final_provider", record.FinalProvider, "deepseek"},
-		{"resolved_provider", record.ResolvedProvider, "deepseek"},
-		{"pinned_provider", record.PinnedProvider, "deepseek"},
-		{"affinity", record.AffinityOutcome, "confirmed"},
-		{"upstream_request_id", record.UpstreamRequestID, "prov-fixture-1"},
-		{"model_attempt_count", record.ModelAttempts, 1},
-		{"total_provider_attempt_count", record.Attempts, 1},
-		{"protocol", record.Protocol, "openai"},
+		{"final_provider", record.FinalProvider, providerFixture},
+		{"resolved_provider", record.ResolvedProvider, providerFixture},
+		{"auth_id", record.AuthID, "openai-compatibility:cline1:7cb99c3ced51"},
+		{"auth_index", record.AuthIndex, "b6c17a2d5d0c3862"},
+		{"auth_type", record.AuthType, "apikey"},
+		{"executor_type", record.ExecutorType, "OpenAICompatExecutor"},
+		{"reasoning_effort", record.ReasoningEffort, "high"},
+		{"service_tier", record.ServiceTier, "auto"},
 		{"stream", record.Stream, true},
+		{"failed", record.Failed, false},
 		{"status_code", record.StatusCode, 200},
-		{"ttft_ms", record.TTFTMs, int64(1200)},
-		{"duration_ms", record.DurationMs, int64(3100)},
-		{"decode_ms", record.DecodeMs, int64(1900)},
-		{"frames", record.Frames, 5},
-		{"input_tokens", record.InputTokens, int64(800)},
-		{"output_tokens", record.OutputTokens, int64(200)},
-		{"reasoning_tokens", record.ReasoningTokens, int64(200)},
-		{"cached_tokens", record.CachedTokens, int64(512)},
-		{"total_tokens", record.TotalTokens, int64(1000)},
-		{"cost_usd", record.CostUSD, 0.0012},
-		{"user_agent", record.UserAgent, "claude-cli/2.1.0"},
-		{"client_app", record.ClientApp, "cline-cli"},
+		{"ttft_ms", record.TTFTMs, int64(643)},
+		{"duration_ms", record.DurationMs, int64(1097)},
+		{"decode_ms", record.DecodeMs, int64(454)},
+		{"input_tokens", record.InputTokens, int64(37)},
+		{"output_tokens", record.OutputTokens, int64(16)},
+		{"reasoning_tokens", record.ReasoningTokens, int64(14)},
+		{"cached_tokens", record.CachedTokens, int64(0)},
+		{"cache_read_tokens", record.CacheReadTokens, int64(0)},
+		{"cache_creation_tokens", record.CacheCreationTokens, int64(0)},
+		{"total_tokens", record.TotalTokens, int64(53)},
 	} {
 		if check.got != check.want {
 			t.Errorf("%s = %v, want %v", check.name, check.got, check.want)
 		}
 	}
-	if want := 200.0 / 1.9; record.TPS < want-0.01 || record.TPS > want+0.01 {
+	if want := 16.0 / 0.454; record.TPS < want-0.01 || record.TPS > want+0.01 {
 		t.Errorf("tokens_per_second = %v, want %v", record.TPS, want)
 	}
-	if len(record.Fallbacks) != 0 {
-		t.Errorf("fallbacks_available = %v, want empty", record.Fallbacks)
+
+	// The keys the usage payload cannot fill must be absent, not zero-filled: a v2 record
+	// that carried "frames":0 would make an old reader believe a stream had no chunk.
+	raw := storedLine(t, recorder, record.RequestID)
+	for _, gone := range []string{"frames", "cost_usd", "is_byok", "protocol", "source_format", "user_agent", "claude_code_version", "client_app", "generation_id", "affinity", "fallbacks_available", "model_attempt_count", "total_provider_attempt_count", "upstream_request_id"} {
+		if strings.Contains(raw, `"`+gone+`"`) {
+			t.Errorf("a v2 record carries the retired key %q: %s", gone, raw)
+		}
+	}
+	// The payload carries credential hashes (APIKey, Source); the record must never persist
+	// credential material.
+	if strings.Contains(raw, "sk_credential-fixture") {
+		t.Errorf("the stored record carries credential material: %s", raw)
 	}
 
 	health := recorder.Health()
-	if health.Resolved != 1 || health.Written != 1 || health.Unresolved != 0 || health.ParseFailures != 0 {
-		t.Errorf("health = %+v, want resolved 1, written 1, unresolved 0, parse_failures 0", health)
-	}
-	if health.PendingStreams != 0 {
-		t.Errorf("pending_streams = %d, want 0 after the routing frame", health.PendingStreams)
+	if health.Events != 1 || health.FailedEvents != 0 || health.DecodeFailures != 0 || health.Written != 1 || health.Dropped != 0 {
+		t.Errorf("health = %+v, want 1 event, 0 failed, 0 decode failures, 1 written, 0 dropped", health)
 	}
 	if health.LastRecordAt == nil || health.LastWriteAt == nil {
 		t.Errorf("health timestamps not set: %+v", health)
 	}
 }
 
-func TestObserveWithoutProviderMetadataIsUnresolvedAndNotStored(t *testing.T) {
-	recorder, clock := newRecorder(t)
-	// No terminator: this is a stream that just stops, which is why the janitor has to be
-	// able to forget it.
-	feedStream(t, recorder, clock, "req-noroute", "deepseek-flash-1",
-		framePlainText, frameUsageOnly)
+// TestHandleUsageStoresAFailedRecord pins the failure path: the host's own status and
+// verdict are kept, and the failure counter moves.
+func TestHandleUsageStoresAFailedRecord(t *testing.T) {
+	recorder, _ := newRecorder(t)
+	useRecorder(t, recorder)
 
-	// The stream ended without a channel report. The request stays pending until the janitor
-	// forgets it, and is counted as unresolved rather than guessed at.
-	health := recorder.Health()
-	if health.PendingStreams != 1 {
-		t.Fatalf("pending_streams = %d, want 1", health.PendingStreams)
+	wire := usageFixture(providerOther, fixtureNow.Add(-time.Minute))
+	wire.Failed = true
+	wire.Failure = usageFailure{StatusCode: 503, Body: "upstream unavailable"}
+	wire.Detail.OutputTokens = 0
+	raw, errMarshal := json.Marshal(wire)
+	if errMarshal != nil {
+		t.Fatalf("marshal payload: %v", errMarshal)
 	}
-	clock.advance(pendingTTL + time.Minute)
-	if swept := recorder.sweepPending(); swept != 1 {
-		t.Fatalf("sweepPending = %d, want 1", swept)
+	if _, errHandle := HandleUsage(raw); errHandle != nil {
+		t.Fatalf("HandleUsage returned an error: %v", errHandle)
 	}
-
-	health = recorder.Health()
-	if health.Unresolved != 1 {
-		t.Errorf("unresolved = %d, want 1", health.Unresolved)
-	}
-	if health.Resolved != 0 || health.Written != 0 || health.Dropped != 0 {
-		t.Errorf("health = %+v, want nothing resolved, written or dropped", health)
-	}
-	// A frame with no channel report is normal traffic, not a parse failure: the host calls
-	// this interceptor for every upstream, not only for Cline.
-	if health.ParseFailures != 0 {
-		t.Errorf("parse_failures = %d, want 0", health.ParseFailures)
-	}
-	if records := recordsOf(t, recorder); len(records) != 0 {
-		t.Errorf("stored %d records for a request with no channel report", len(records))
-	}
-}
-
-func TestObserveTerminatorCountsUnresolvedWithoutWaiting(t *testing.T) {
-	recorder, clock := newRecorder(t)
-	feedStream(t, recorder, clock, "req-terminated", "deepseek-flash-1",
-		framePlainText, frameUsageOnly, frameDone)
-
-	// The terminator is what says the response is over, so the request is counted as
-	// unresolved right away instead of waiting pendingTTL for the janitor: a count that only
-	// moves fifteen minutes after the facts cannot be watched.
-	health := recorder.Health()
-	if health.PendingStreams != 0 {
-		t.Errorf("pending_streams = %d, want 0 once the terminator arrived", health.PendingStreams)
-	}
-	if health.Unresolved != 1 {
-		t.Errorf("unresolved = %d, want 1", health.Unresolved)
-	}
-	if health.Resolved != 0 || health.Written != 0 || health.Dropped != 0 {
-		t.Errorf("health = %+v, want nothing resolved, written or dropped", health)
-	}
-	if records := recordsOf(t, recorder); len(records) != 0 {
-		t.Errorf("stored %d records for a request with no channel report", len(records))
-	}
-}
-
-func TestObserveResponsesStreamIsUnresolved(t *testing.T) {
-	recorder, clock := newRecorder(t)
-	// The Responses API never reports the channel: its frames carry no provider_metadata at
-	// all, which /tmp/responses_dump.py confirmed against real codex traffic. Such a request
-	// can only be counted as unresolved, and the counter has to make that visible.
-	feedStream(t, recorder, clock, "req-responses", "deepseek-flash-2",
-		frameResponsesText, frameResponsesText, frameResponsesCompleted)
-
-	health := recorder.Health()
-	if health.Unresolved != 1 || health.PendingStreams != 0 {
-		t.Errorf("health = %+v, want 1 unresolved and no pending stream", health)
-	}
-	if health.Written != 0 {
-		t.Errorf("written = %d, want 0: a request without a channel is not a record", health.Written)
-	}
-	if records := recordsOf(t, recorder); len(records) != 0 {
-		t.Errorf("stored %d records for a stream that never reported a channel", len(records))
-	}
-}
-
-func TestObserveTextMentionOfNeedleKeepsTheRecord(t *testing.T) {
-	recorder, clock := newRecorder(t)
-	// The model writes the needle word four times -- more than the retry budget -- before the
-	// real channel report arrives. Reading those chunks as a routing block split across
-	// boundaries would spend the budget, give the stream up, and lose the record; the request
-	// would then sit in the pending map until the janitor swept it.
-	feedStream(t, recorder, clock, "req-mention", "deepseek-flash-1",
-		framePlainText, frameTextMentioningRouting, frameTextMentioningRouting,
-		frameTextMentioningRouting, frameTextMentioningRouting, frameRouting)
 
 	records := recordsOf(t, recorder)
 	if len(records) != 1 {
-		t.Fatalf("want 1 record although the text mentioned the needle, got %d: %+v", len(records), records)
-	}
-	if records[0].FinalProvider != "deepseek" || records[0].SessionID != "sess-fixture-1" {
-		t.Errorf("record = %+v, want final_provider deepseek and session sess-fixture-1", records[0])
-	}
-	health := recorder.Health()
-	if health.ParseFailures != 0 {
-		t.Errorf("parse_failures = %d, want 0: a word in the answer is not a parse failure", health.ParseFailures)
-	}
-	if health.NeedleMisses < 4 {
-		t.Errorf("needle_misses = %d, want at least 4", health.NeedleMisses)
-	}
-}
-
-func TestObserveSplitRoutingFrame(t *testing.T) {
-	recorder, clock := newRecorder(t)
-	// The routing frame arrives cut in two, which is what a chunk boundary inside a large
-	// SSE frame looks like. The second half cannot be decoded on its own; the recorder has
-	// to retry with the previous chunk prepended.
-	cut := strings.Index(frameRouting, `"clientSessionId"`)
-	feedStream(t, recorder, clock, "req-split", "deepseek-flash-1",
-		framePlainText, frameRouting[:cut], frameRouting[cut:])
-
-	records := recordsOf(t, recorder)
-	if len(records) != 1 {
-		t.Fatalf("want exactly 1 record from a split frame, got %d: %+v", len(records), records)
+		t.Fatalf("want exactly 1 stored record, got %d: %+v", len(records), records)
 	}
 	record := records[0]
-	if record.FinalProvider != "deepseek" {
-		t.Errorf("final_provider = %q, want deepseek", record.FinalProvider)
+	if !record.Failed {
+		t.Error("failed = false, want true for a payload the host reported as failed")
 	}
-	if record.SessionID != "sess-fixture-1" {
-		t.Errorf("session_id = %q, want sess-fixture-1", record.SessionID)
+	if record.StatusCode != 503 {
+		t.Errorf("status_code = %d, want the host's own 503", record.StatusCode)
 	}
-	if record.InputTokens != 800 || record.OutputTokens != 200 {
-		t.Errorf("tokens = %d/%d, want 800/200", record.InputTokens, record.OutputTokens)
+	if record.FinalProvider != providerOther {
+		t.Errorf("final_provider = %q, want %q", record.FinalProvider, providerOther)
 	}
-	if health := recorder.Health(); health.Resolved != 1 || health.ParseFailures != 0 {
-		t.Errorf("health = %+v, want 1 resolved and no parse failure", health)
+	health := recorder.Health()
+	if health.Events != 1 || health.FailedEvents != 1 {
+		t.Errorf("health = %+v, want 1 event and 1 failed event", health)
+	}
+	// The window view carries the failure itself: the process counters above reset with the
+	// plugin, so a page that reported them as the window's failures would read 0 after any
+	// restart while the records still hold hundreds of 502s.
+	summary := recorder.Summary(mustWindow(t, "24h"))
+	if summary.FailedRequests != 1 {
+		t.Errorf("summary.failed_requests = %d, want 1", summary.FailedRequests)
+	}
+	if summary.Resolved != 1 {
+		t.Errorf("summary.resolved_requests = %d, want 1", summary.Resolved)
+	}
+	providers := map[string]int64{}
+	for _, row := range summary.Providers {
+		providers[row.Provider] = row.Failed
+	}
+	if providers[providerOther] != 1 {
+		t.Errorf("provider failed counts = %+v, want %s:1", providers, providerOther)
+	}
+	hourFailed := int64(0)
+	for _, point := range summary.Hours {
+		hourFailed += point.Failed
+	}
+	if hourFailed != 1 {
+		t.Errorf("hour failed total = %d, want 1", hourFailed)
 	}
 }
 
-func TestObserveFallbackRecordAndSummary(t *testing.T) {
+// TestObserveUsageLeavesSpeedUnmeasuredForAShortWindow keeps the TPS floor: a short decode
+// window measures the batching, not the speed, so the derived speed is dropped while the raw
+// numbers stay.
+func TestObserveUsageLeavesSpeedUnmeasuredForAShortWindow(t *testing.T) {
+	recorder, _ := newRecorder(t)
+	wire := usageFixture(providerBaseline, fixtureNow.Add(-time.Minute))
+	wire.Latency = 54 * time.Millisecond
+	wire.TTFT = 50 * time.Millisecond
+	feedUsage(t, recorder, wire)
+
+	records := recordsOf(t, recorder)
+	if len(records) != 1 {
+		t.Fatalf("want exactly 1 record, got %d: %+v", len(records), records)
+	}
+	record := records[0]
+	if record.DecodeMs <= 0 || record.DecodeMs >= minDecodeWindowMs {
+		t.Fatalf("decode window = %d ms, want 0 < decode < %d", record.DecodeMs, minDecodeWindowMs)
+	}
+	if record.TPS != 0 {
+		t.Errorf("tokens_per_second = %v, want 0: a %d ms window measures the batching, not the speed",
+			record.TPS, record.DecodeMs)
+	}
+	if record.OutputTokens == 0 || record.TTFTMs == 0 || record.DurationMs == 0 {
+		t.Errorf("record lost its raw numbers: %+v", record)
+	}
+	if summary := recorder.Summary(mustWindow(t, "24h")); summary.DecodeP50TPS != 0 {
+		t.Errorf("window decode_p50_tps = %v, want 0: an unmeasured speed must not reach the page",
+			summary.DecodeP50TPS)
+	}
+}
+
+// TestObserveUsageFallsBackOnMissingFields covers the three fallbacks the contract asks for:
+// the trace id when there is no request id, the recorder clock when the timestamp does not
+// parse, and input+output when the host reports no total.
+func TestObserveUsageFallsBackOnMissingFields(t *testing.T) {
 	recorder, clock := newRecorder(t)
-	feedStream(t, recorder, clock, "req-fallback", "deepseek-flash-1",
-		frameRoleOnly, framePlainText, framePlainText, frameRoutingFallback)
-	feedStream(t, recorder, clock, "req-normal", "deepseek-flash-1",
-		frameRoleOnly, framePlainText, framePlainText, frameRouting)
+	wire := usageFixture(providerBaseline, fixtureNow)
+	wire.RequestID = ""
+	wire.TraceID = "trace-fixture"
+	wire.RequestedAt = "not a timestamp"
+	wire.Detail.TotalTokens = 0
+	feedUsage(t, recorder, wire)
+
+	records := recordsOf(t, recorder)
+	if len(records) != 1 {
+		t.Fatalf("want exactly 1 record, got %d: %+v", len(records), records)
+	}
+	record := records[0]
+	if record.RequestID != "trace-fixture" {
+		t.Errorf("request_id = %q, want the trace id", record.RequestID)
+	}
+	if !record.Time.Equal(clock.at) {
+		t.Errorf("time = %v, want the recorder clock %v", record.Time, clock.at)
+	}
+	if want := record.InputTokens + record.OutputTokens; record.TotalTokens != want {
+		t.Errorf("total_tokens = %d, want input+output = %d", record.TotalTokens, want)
+	}
+}
+
+// TestStoreRoundTripAndHourlySummary keeps the store and aggregate tests: what was fed comes
+// back through RecordsSince, and the hourly summary adds up per provider and against the
+// baseline.
+func TestStoreRoundTripAndHourlySummary(t *testing.T) {
+	recorder, _ := newRecorder(t)
+	first := usageFixture(providerBaseline, fixtureNow.Add(-90*time.Minute))
+	first.RequestID = "req-on-baseline"
+	second := usageFixture(providerOther, fixtureNow.Add(-10*time.Minute))
+	second.RequestID = "req-off-baseline"
+	feedUsage(t, recorder, first)
+	feedUsage(t, recorder, second)
 
 	records := recordsOf(t, recorder)
 	if len(records) != 2 {
-		t.Fatalf("want 2 records, got %d", len(records))
+		t.Fatalf("want 2 records back from the store, got %d: %+v", len(records), records)
 	}
-	var fallback Record
-	for _, record := range records {
-		if record.FinalProvider == "alibaba" {
-			fallback = record
-		}
+	if records[0].RequestID != "req-off-baseline" || records[1].RequestID != "req-on-baseline" {
+		t.Errorf("records are not newest first: %q then %q", records[0].RequestID, records[1].RequestID)
 	}
-	if fallback.RequestID != "req-fallback" {
-		t.Fatalf("no fallback record found in %+v", records)
-	}
-	if fallback.FinalProvider == fallback.ResolvedProvider {
-		t.Errorf("final_provider and resolved_provider are both %q; the fixture must differ",
-			fallback.FinalProvider)
-	}
-	if fallback.ResolvedProvider != "deepseek" {
-		t.Errorf("resolved_provider = %q, want deepseek", fallback.ResolvedProvider)
-	}
-	if len(fallback.Fallbacks) != 1 || fallback.Fallbacks[0] != "particle" {
-		t.Errorf("fallbacks_available = %v, want [particle]", fallback.Fallbacks)
-	}
-	if fallback.Attempts != 3 {
-		t.Errorf("total_provider_attempt_count = %d, want 3", fallback.Attempts)
-	}
-	if fallback.StatusCode != 429 {
-		t.Errorf("status_code = %d, want the first provider attempt's 429", fallback.StatusCode)
+	if records[0].SessionID != "codex:sess-fixture-1" || records[0].InputTokens != 37 || records[0].DurationMs != 1097 {
+		t.Errorf("the record did not survive the JSONL round trip: %+v", records[0])
 	}
 
-	window, _ := ParseWindow("24h")
-	summary := recorder.Summary(window)
-	if summary.Resolved != 2 || summary.OffBaseline != 1 {
-		t.Fatalf("summary resolved=%d off_baseline=%d, want 2/1", summary.Resolved, summary.OffBaseline)
+	summary := recorder.Summary(mustWindow(t, "24h"))
+	if summary.Resolved != 2 {
+		t.Errorf("resolved_requests = %d, want 2", summary.Resolved)
 	}
-	if summary.OffRatio != 0.5 {
-		t.Errorf("off_baseline_ratio = %v, want 0.5", summary.OffRatio)
+	if summary.OffBaseline != 1 || summary.OffRatio != 0.5 {
+		t.Errorf("off_baseline = %d (ratio %v), want 1 at 0.5", summary.OffBaseline, summary.OffRatio)
 	}
-	if summary.Baseline != "deepseek" {
-		t.Errorf("baseline_provider = %q, want deepseek", summary.Baseline)
+	if summary.Baseline != providerBaseline {
+		t.Errorf("baseline_provider = %q, want %q", summary.Baseline, providerBaseline)
 	}
 	if summary.Channels != 2 {
 		t.Errorf("channels = %d, want 2", summary.Channels)
@@ -386,54 +396,59 @@ func TestObserveFallbackRecordAndSummary(t *testing.T) {
 	for _, provider := range summary.Providers {
 		seen[provider.Provider] = provider
 	}
-	if got := seen["alibaba"]; got.Requests != 1 || got.OffBaseline != 1 || got.Ratio != 0.5 {
-		t.Errorf("alibaba provider row = %+v, want 1 request, off baseline, ratio 0.5", got)
+	if got := seen[providerBaseline]; got.Requests != 1 || got.OffBaseline != 0 || got.Ratio != 0.5 {
+		t.Errorf("%s provider row = %+v, want 1 request on baseline at ratio 0.5", providerBaseline, got)
 	}
-	if got := seen["deepseek"]; got.Requests != 1 || got.OffBaseline != 0 {
-		t.Errorf("deepseek provider row = %+v, want 1 request on baseline", got)
+	if got := seen[providerOther]; got.Requests != 1 || got.OffBaseline != 1 {
+		t.Errorf("%s provider row = %+v, want 1 request off baseline", providerOther, got)
 	}
-	if got := seen["alibaba"]; got.TTFTP50Ms != 1200 {
-		t.Errorf("alibaba ttft_p50_ms = %v, want 1200", got.TTFTP50Ms)
-	}
-	// 300 output tokens over a 1 s decode window: the per-provider rate is the same figure the
-	// page shows for a single request, so it has to come out of that request's own timings.
-	if got := seen["alibaba"]; got.DecodeP50 < 299.99 || got.DecodeP50 > 300.01 {
-		t.Errorf("alibaba decode_p50_tps = %v, want 300", got.DecodeP50)
-	}
-	// The hourly timeline has to be dense: a chart with a hole in it would read as "no
-	// requests" when the hour had none rather than as a gap. The window starts inside an
-	// hour, so it takes 25 marks for 24 hours: the first and last bar cover a part of their
-	// hour, and their sums still add up to the window total because the buckets are the same
-	// ones the totals were read from.
+	// The timeline covers the window hour by hour, not only the hours that saw traffic.
 	if len(summary.Hours) != 25 {
 		t.Errorf("hours = %d, want one point per hour mark of the window", len(summary.Hours))
 	}
-	first, last := summary.Hours[0], summary.Hours[len(summary.Hours)-1]
-	if !first.Hour.Equal(summary.From.Truncate(time.Hour)) || !last.Hour.Equal(summary.To.Truncate(time.Hour)) {
-		t.Errorf("timeline runs %v..%v, want %v..%v", first.Hour, last.Hour,
+	firstHour, lastHour := summary.Hours[0], summary.Hours[len(summary.Hours)-1]
+	if !firstHour.Hour.Equal(summary.From.Truncate(time.Hour)) || !lastHour.Hour.Equal(summary.To.Truncate(time.Hour)) {
+		t.Errorf("timeline runs %v..%v, want %v..%v", firstHour.Hour, lastHour.Hour,
 			summary.From.Truncate(time.Hour), summary.To.Truncate(time.Hour))
 	}
 }
 
-func TestWriteCSVKeepsChannelColumns(t *testing.T) {
-	recorder, clock := newRecorder(t)
-	feedStream(t, recorder, clock, "req-fallback", "deepseek-flash-1",
-		framePlainText, frameRoutingFallback)
+// TestSummaryFlipsWithTheBaseline pins that off-baseline is a property of the question, not
+// of the record: the same two requests give the opposite answer under the other baseline.
+func TestSummaryFlipsWithTheBaseline(t *testing.T) {
+	flipped, _ := newRecorderWithBaseline(t, providerOther)
+	onBaseline := usageFixture(providerBaseline, fixtureNow.Add(-90*time.Minute))
+	offBaseline := usageFixture(providerOther, fixtureNow.Add(-10*time.Minute))
+	feedUsage(t, flipped, onBaseline)
+	feedUsage(t, flipped, offBaseline)
 
-	window, _ := ParseWindow("24h")
-	recorder.Flush()
-	buffer := &bytes.Buffer{}
-	rows, errWrite := recorder.WriteCSV(window, buffer)
-	if errWrite != nil {
-		t.Fatalf("WriteCSV: %v", errWrite)
+	summary := flipped.Summary(mustWindow(t, "24h"))
+	if summary.Resolved != 2 || summary.OffBaseline != 1 {
+		t.Fatalf("summary resolved=%d off_baseline=%d, want 2/1", summary.Resolved, summary.OffBaseline)
 	}
-	if rows != 1 {
-		t.Fatalf("WriteCSV wrote %d rows, want 1", rows)
+	seen := map[string]ProviderStat{}
+	for _, provider := range summary.Providers {
+		seen[provider.Provider] = provider
 	}
-	lines := strings.Split(strings.TrimSpace(buffer.String()), "\n")
-	if len(lines) != 2 {
-		t.Fatalf("want a header and one row, got %d lines: %q", len(lines), buffer.String())
+	if got := seen[providerBaseline]; got.OffBaseline != 1 {
+		t.Errorf("%s row = %+v, want it off the flipped baseline", providerBaseline, got)
 	}
+	if got := seen[providerOther]; got.OffBaseline != 0 {
+		t.Errorf("%s row = %+v, want it on the flipped baseline", providerOther, got)
+	}
+}
+
+// TestWriteCSVCarriesTheNewColumns keeps the export useful: the usage-hook columns are there,
+// the retired ones are gone, and off_baseline is still evaluated against the baseline at read
+// time and case-insensitively.
+func TestWriteCSVCarriesTheNewColumns(t *testing.T) {
+	recorder, _ := newRecorder(t)
+	wire := usageFixture(providerOther, fixtureNow.Add(-time.Minute))
+	wire.Detail.CacheReadTokens = 512
+	wire.Detail.CacheCreationTokens = 64
+	feedUsage(t, recorder, wire)
+
+	lines := csvLines(t, recorder)
 	header := strings.Split(lines[0], ",")
 	row := strings.Split(lines[1], ",")
 	if len(header) != len(row) {
@@ -443,113 +458,249 @@ func TestWriteCSVKeepsChannelColumns(t *testing.T) {
 	for index, name := range header {
 		column[name] = row[index]
 	}
-	for _, name := range []string{"final_provider", "resolved_provider", "pinned_provider", "canonical_slug", "off_baseline"} {
+	for _, name := range []string{
+		"final_provider", "resolved_provider", "pinned_provider", "canonical_slug", "off_baseline",
+		"auth_id", "auth_index", "auth_type", "alias", "failed", "cache_read_tokens",
+		"cache_creation_tokens", "executor_type", "reasoning_effort", "service_tier",
+	} {
 		if _, ok := column[name]; !ok {
-			t.Fatalf("CSV has no %s column: %v", name, header)
+			t.Fatalf("the export has no %s column: %v", name, header)
 		}
 	}
-	if column["final_provider"] != "alibaba" || column["resolved_provider"] != "deepseek" {
-		t.Errorf("channel columns = %q/%q, want alibaba/deepseek", column["final_provider"], column["resolved_provider"])
+	for _, gone := range []string{
+		"frames", "cost_usd", "is_byok", "affinity", "fallbacks_available",
+		"model_attempts", "provider_attempts", "user_agent", "claude_code_version",
+	} {
+		if _, ok := column[gone]; ok {
+			t.Errorf("the export still carries the retired column %s", gone)
+		}
 	}
-	// The export is asked "which requests left the official channel", so a row that landed
-	// on another provider has to be marked as such in the file itself.
-	if column["off_baseline"] != "yes" {
-		t.Errorf("off_baseline = %q, want yes for the alibaba row", column["off_baseline"])
+	for name, want := range map[string]string{
+		"final_provider":        providerOther,
+		"resolved_provider":     providerOther,
+		"alias":                 "deepseek-flash-2",
+		"auth_type":             "apikey",
+		"executor_type":         "OpenAICompatExecutor",
+		"reasoning_effort":      "high",
+		"service_tier":          "auto",
+		"failed":                "false",
+		"cache_read_tokens":     "512",
+		"cache_creation_tokens": "64",
+		"status_code":           "200",
+		"off_baseline":          "yes",
+		"tokens_per_second":     "35.24",
+	} {
+		if column[name] != want {
+			t.Errorf("csv %s = %q, want %q", name, column[name], want)
+		}
+	}
+
+	// The same row against the other baseline: the column is computed when it is written, so
+	// the answer follows the question. The comparison is case-insensitive.
+	recorder.options.Baseline = strings.ToUpper(providerOther)
+	if got := csvColumn(t, recorder, "off_baseline"); got != "" {
+		t.Errorf("off_baseline = %q for a row on the flipped baseline, want it empty", got)
 	}
 }
 
-func TestHandleKeepsChunkAndNeverFails(t *testing.T) {
-	recorder, clock := newRecorder(t)
-	SetActive(recorder)
-	t.Cleanup(func() { SetActive(nil) })
+// TestWarmupReadsV1Lines keeps the old on-disk schema readable: a line written by the retired
+// stream-sniffing source has keys a v2 record no longer fills, and it must load without
+// disturbing the collector.
+func TestWarmupReadsV1Lines(t *testing.T) {
+	directory := t.TempDir()
+	now := time.Now().UTC()
+	line := `{"v":1,"time":"` + now.Add(-time.Hour).UTC().Format(time.RFC3339) + `","request_id":"legacy-request",` +
+		`"session_id":"legacy-session","generation_id":"legacy-generation","model":"deepseek-flash-1",` +
+		`"upstream_model":"deepseek/deepseek-v4.1-flash","canonical_slug":"deepseek/deepseek-v4.1-flash",` +
+		`"final_provider":"deepseek","resolved_provider":"deepseek","pinned_provider":"deepseek",` +
+		`"affinity":"confirmed","upstream_request_id":"legacy-upstream","model_attempt_count":1,` +
+		`"total_provider_attempt_count":1,"protocol":"openai","stream":true,"status_code":200,"ttft_ms":1200,` +
+		`"duration_ms":3100,"decode_ms":1900,"frames":5,"input_tokens":800,"output_tokens":200,` +
+		`"reasoning_tokens":200,"cached_tokens":512,"total_tokens":1000,"cost_usd":0.0012}` + "\n"
+	writeStoredLine(t, directory, now, line)
 
-	valid := &InterceptRequest{
-		RequestID:       "req-handle",
-		Model:           "deepseek-flash-1",
-		SourceFormat:    "openai",
-		RequestHeaders:  map[string][]string{"User-Agent": {"claude-cli/2.1.0"}},
-		ResponseHeaders: map[string][]string{"X-Upstream-Status": {"200"}},
-		ChunkIndex:      ChunkHeaderInitIndex,
-	}
-	raw, errMarshal := json.Marshal(valid)
-	if errMarshal != nil {
-		t.Fatalf("marshal request: %v", errMarshal)
-	}
-	answer, errHandle := Handle(raw)
-	if errHandle != nil {
-		t.Fatalf("Handle returned an error: %v", errHandle)
-	}
-	var envelope struct {
-		OK     bool            `json:"ok"`
-		Result json.RawMessage `json:"result"`
-	}
-	if errUnmarshal := json.Unmarshal(answer, &envelope); errUnmarshal != nil {
-		t.Fatalf("answer is not the envelope the host expects: %v (%s)", errUnmarshal, answer)
-	}
-	if !envelope.OK {
-		t.Fatalf("answer ok=false: %s", answer)
-	}
-	// An empty result means "keep this chunk": anything else would rewrite client traffic.
-	var change InterceptResponse
-	if errUnmarshal := json.Unmarshal(envelope.Result, &change); errUnmarshal != nil {
-		t.Fatalf("result is not an intercept response: %v (%s)", errUnmarshal, envelope.Result)
-	}
-	if change.DropChunk || len(change.Body) != 0 || len(change.Headers) != 0 || len(change.ClearHeaders) != 0 {
-		t.Fatalf("the plugin answered with a change: %+v", change)
-	}
-
-	// Unparseable input, and no recorder installed at all: both must still answer "keep".
-	for _, broken := range [][]byte{nil, []byte("data: not json"), []byte(`{"RequestID":`)} {
-		if _, errBroken := Handle(broken); errBroken != nil {
-			t.Fatalf("Handle(%q) returned an error: %v", broken, errBroken)
-		}
-	}
-	SetActive(nil)
-	if _, errInactive := Handle(raw); errInactive != nil {
-		t.Fatalf("Handle with no active recorder returned an error: %v", errInactive)
-	}
-	clock.advance(time.Second)
-}
-
-func TestRecorderSurvivesAnUnwritableStore(t *testing.T) {
-	// A file where the directory should be: opening the store fails, and the failure must
-	// stay inside the collector. The answer to the host is still "keep the chunk".
-	directory := filepath.Join(t.TempDir(), "not-a-directory")
-	if errWrite := os.WriteFile(directory, []byte("occupied"), 0o644); errWrite != nil {
-		t.Fatalf("prepare file: %v", errWrite)
-	}
-	clock := &testClock{at: time.Now().UTC().Truncate(time.Second)}
-	recorder := New(Options{Enabled: true, Directory: directory, RetentionDays: 3, MaxSizeMB: 16, Baseline: "deepseek"})
-	recorder.nowFn = clock.now
+	recorder := New(Options{
+		Enabled:       true,
+		Directory:     directory,
+		RetentionDays: 3,
+		MaxSizeMB:     16,
+		Baseline:      providerBaseline,
+	})
 	recorder.Start()
 	t.Cleanup(recorder.Stop)
 
 	health := recorder.Health()
-	if health.LastError == "" {
-		t.Fatalf("health did not report the unusable directory: %+v", health)
+	if health.Warmup.Records != 1 {
+		t.Errorf("warmup records = %d, want the one v1 line", health.Warmup.Records)
 	}
-	if health.Enabled != true {
-		t.Errorf("enabled = %v, want true", health.Enabled)
+	if health.LastError != "" {
+		t.Errorf("reading a v1 line reported an error: %s", health.LastError)
+	}
+	records := recordsOf(t, recorder)
+	if len(records) != 1 {
+		t.Fatalf("want the v1 line back, got %d records", len(records))
+	}
+	record := records[0]
+	if record.Schema != 1 || record.RequestID != "legacy-request" {
+		t.Errorf("record = %+v, want the v1 line unchanged", record)
+	}
+	if record.FinalProvider != providerBaseline || record.PinnedProvider != providerBaseline || record.CostUSD != 0.0012 {
+		t.Errorf("the v1 keys did not survive the round trip: %+v", record)
+	}
+	if summary := recorder.Summary(mustWindow(t, "24h")); summary.Resolved != 1 {
+		t.Errorf("summary resolved = %d, want the v1 line counted", summary.Resolved)
+	}
+}
+
+// TestHandleUsageCountsDecodeFailures is the diagnostic path: a payload this build cannot read
+// is counted, never stored and never allowed to fail the call.
+func TestHandleUsageCountsDecodeFailures(t *testing.T) {
+	recorder, _ := newRecorder(t)
+	useRecorder(t, recorder)
+
+	for _, broken := range [][]byte{[]byte(`{"Detail":`), []byte(`{"Latency":"soon"}`)} {
+		answer, errHandle := HandleUsage(broken)
+		if errHandle != nil {
+			t.Fatalf("HandleUsage(%q) returned an error: %v", broken, errHandle)
+		}
+		decodeKeepAnswer(t, answer, "HandleUsage(broken)")
 	}
 
-	SetActive(recorder)
-	t.Cleanup(func() { SetActive(nil) })
-	raw, _ := json.Marshal(&InterceptRequest{RequestID: "req-unwritable", ChunkIndex: 0, Body: []byte(frameRouting)})
-	if _, errHandle := Handle(raw); errHandle != nil {
-		t.Fatalf("Handle returned an error with an unusable store: %v", errHandle)
+	health := recorder.Health()
+	if health.DecodeFailures != 2 {
+		t.Errorf("decode_failures = %d, want 2", health.DecodeFailures)
+	}
+	if health.LastDecodeError == "" || health.LastDecodeErrorAt == nil {
+		t.Errorf("the last decode error was not recorded: %+v", health)
+	}
+	if health.Events != 0 || health.Written != 0 || health.FailedEvents != 0 {
+		t.Errorf("health = %+v, want nothing accepted or written", health)
+	}
+	if records := recordsOf(t, recorder); len(records) != 0 {
+		t.Errorf("stored %d records for undecodable payloads", len(records))
+	}
+}
+
+// TestHandleUsageAlwaysKeepsAndNeverFails is the fail-open guard: whatever arrives — empty
+// bytes, junk, a truncated object, a payload from a host build this plugin does not know, or
+// no recorder at all — the answer is the keep envelope and the error is nil.
+func TestHandleUsageAlwaysKeepsAndNeverFails(t *testing.T) {
+	recorder, _ := newRecorder(t)
+	useRecorder(t, recorder)
+
+	for _, input := range [][]byte{
+		nil,
+		{},
+		[]byte("data: not json"),
+		[]byte(`{"Provider":"x","Unknown":{"nested":[1,2,3]}}`),
+		[]byte(`{"Provider":"x","Latency":1.5}`),
+	} {
+		answer, errHandle := HandleUsage(input)
+		if errHandle != nil {
+			t.Fatalf("HandleUsage(%q) returned an error: %v", input, errHandle)
+		}
+		decodeKeepAnswer(t, answer, "HandleUsage")
+	}
+
+	// A plugin that is loaded with observation switched off has no recorder installed; the
+	// host must still get the keep answer.
+	SetActive(nil)
+	if answer, errInactive := HandleUsage([]byte(liveUsagePayload)); errInactive != nil {
+		t.Fatalf("HandleUsage with no active recorder returned an error: %v", errInactive)
+	} else {
+		decodeKeepAnswer(t, answer, "HandleUsage(inactive)")
+	}
+}
+
+// TestRecorderSurvivesAnUnwritableStore keeps the failure containment: a store that cannot be
+// written still counts the request, still feeds the aggregate, and still answers the host.
+func TestRecorderSurvivesAnUnwritableStore(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "not-a-directory")
+	if errWrite := os.WriteFile(directory, []byte("occupied"), 0o644); errWrite != nil {
+		t.Fatalf("prepare file: %v", errWrite)
+	}
+	recorder := New(Options{Enabled: true, Directory: directory, RetentionDays: 3, MaxSizeMB: 16, Baseline: providerBaseline})
+	recorder.Start()
+	t.Cleanup(recorder.Stop)
+
+	if health := recorder.Health(); health.LastError == "" {
+		t.Fatalf("health did not report the unusable directory: %+v", health)
+	}
+	useRecorder(t, recorder)
+
+	wire := usageFixture(providerBaseline, time.Now().UTC())
+	raw, errMarshal := json.Marshal(wire)
+	if errMarshal != nil {
+		t.Fatalf("marshal payload: %v", errMarshal)
+	}
+	if _, errHandle := HandleUsage(raw); errHandle != nil {
+		t.Fatalf("HandleUsage returned an error with an unusable store: %v", errHandle)
 	}
 	recorder.Stop()
 
-	health = recorder.Health()
+	health := recorder.Health()
 	if health.WriteFailures == 0 {
 		t.Errorf("write_failures = 0, want the failed append to be counted: %+v", health)
 	}
-	if health.Resolved != 1 {
-		t.Errorf("resolved = %d, want 1: the channel was still observed", health.Resolved)
+	if health.Events != 1 {
+		t.Errorf("events = %d, want 1: the request was still observed", health.Events)
 	}
 	summary := recorder.Summary(mustWindow(t, "24h"))
 	if summary.Resolved != 1 || summary.OffBaseline != 0 {
 		t.Errorf("summary = %+v, want the in-memory aggregate to keep working", summary)
+	}
+}
+
+// TestSummaryLabelsEveryHourOnce keeps the timeline contract: one point per absolute hour,
+// all labelled the same way, and a filled hour carries the timings of its requests.
+func TestSummaryLabelsEveryHourOnce(t *testing.T) {
+	recorder, clock := newRecorder(t)
+	first := usageFixture(providerBaseline, clock.at.Add(-time.Minute))
+	first.RequestID = "req-hour-a"
+	feedUsage(t, recorder, first)
+	clock.advance(30 * time.Minute)
+	second := usageFixture(providerBaseline, clock.at.Add(-time.Minute))
+	second.RequestID = "req-hour-b"
+	feedUsage(t, recorder, second)
+
+	summary := recorder.Summary(mustWindow(t, "24h"))
+
+	seen := map[int64]bool{}
+	filled := 0
+	for _, point := range summary.Hours {
+		if seen[point.Hour.Unix()] {
+			t.Fatalf("hour %s appears twice in the timeline", point.Hour)
+		}
+		seen[point.Hour.Unix()] = true
+		if point.Hour.Location() != summary.From.Location() {
+			t.Errorf("hour %s is labelled in %s, want the window's %s",
+				point.Hour, point.Hour.Location(), summary.From.Location())
+		}
+		if point.Requests > 0 {
+			filled++
+			if point.TTFTP50Ms <= 0 || point.DecodeP50 <= 0 {
+				t.Errorf("hour %s carries %d requests but no timing: %+v", point.Hour, point.Requests, point)
+			}
+		}
+	}
+	if filled == 0 {
+		t.Fatal("no hour carries the two recorded requests")
+	}
+	if len(summary.Hours) != 25 {
+		t.Errorf("timeline has %d points, want 25 for a rolling 24h window", len(summary.Hours))
+	}
+	// A model row without its percentiles reads as a zero through the API, which looks like a
+	// stalled stream rather than a missing field.
+	if len(summary.Models) == 0 {
+		t.Fatal("no model row")
+	}
+	for _, model := range summary.Models {
+		if model.Model != "cline-pass/deepseek-v4.1-flash" {
+			t.Errorf("model row = %+v, want the model the client asked for", model)
+		}
+		if model.TTFTP50Ms <= 0 || model.DecodeP50 <= 0 {
+			t.Errorf("model row %+v has no timing, want the percentiles of its requests", model)
+		}
 	}
 }
 
@@ -586,89 +737,65 @@ func mustWindow(t *testing.T, raw string) Window {
 	return window
 }
 
-func TestObserveLeavesSpeedUnmeasuredForABatchedStream(t *testing.T) {
-	recorder, clock := newRecorder(t)
-	clock.advance(time.Second)
-	recorder.Observe(&InterceptRequest{
-		RequestID:    "req-batched",
-		Model:        "deepseek-flash-1",
-		SourceFormat: "openai",
-		ChunkIndex:   ChunkHeaderInitIndex,
-	})
-	clock.advance(10 * time.Millisecond)
-	recorder.Observe(&InterceptRequest{RequestID: "req-batched", ChunkIndex: 1, Body: []byte(framePlainText)})
-	// The rest of the answer, routing frame included, is handed over in one batch.
-	clock.advance(4 * time.Millisecond)
-	recorder.Observe(&InterceptRequest{RequestID: "req-batched", ChunkIndex: 2, Body: []byte(frameRouting)})
-
-	records := recordsOf(t, recorder)
-	if len(records) != 1 {
-		t.Fatalf("want exactly 1 record, got %d: %+v", len(records), records)
+// csvLines exports the 24h window and returns the header and one line per record.
+func csvLines(t *testing.T, recorder *Recorder) []string {
+	t.Helper()
+	recorder.Flush()
+	buffer := &bytes.Buffer{}
+	rows, errWrite := recorder.WriteCSV(mustWindow(t, "24h"), buffer)
+	if errWrite != nil {
+		t.Fatalf("WriteCSV: %v", errWrite)
 	}
-	record := records[0]
-	if record.DecodeMs <= 0 || record.DecodeMs >= minDecodeWindowMs {
-		t.Fatalf("decode window = %d ms, want 0 < decode < %d", record.DecodeMs, minDecodeWindowMs)
+	if rows != 1 {
+		t.Fatalf("WriteCSV wrote %d rows, want 1", rows)
 	}
-	if record.TPS != 0 {
-		t.Errorf("tokens_per_second = %v, want 0: a %d ms window measures the batching, not the speed",
-			record.TPS, record.DecodeMs)
+	lines := strings.Split(strings.TrimSpace(buffer.String()), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("want a header and one row, got %d lines: %q", len(lines), buffer.String())
 	}
-	// Only the derived speed is dropped: the window and the tokens stay in the record.
-	if record.OutputTokens == 0 || record.TTFTMs == 0 {
-		t.Errorf("record lost its raw numbers: %+v", record)
-	}
-	if summary := recorder.Summary(mustWindow(t, "24h")); summary.DecodeP50TPS != 0 {
-		t.Errorf("window decode_p50_tps = %v, want 0: an unmeasured speed must not reach the page",
-			summary.DecodeP50TPS)
-	}
+	return lines
 }
 
-func TestSummaryLabelsEveryHourOnce(t *testing.T) {
-	recorder, clock := newRecorder(t)
-	feedStream(t, recorder, clock, "req-hour-a", "deepseek-flash-1",
-		frameRoleOnly, framePlainText, frameRouting)
-	clock.advance(30 * time.Minute)
-	feedStream(t, recorder, clock, "req-hour-b", "deepseek-flash-1",
-		frameRoleOnly, framePlainText, frameRouting)
-
-	summary := recorder.Summary(mustWindow(t, "24h"))
-
-	// One point per absolute hour, all labelled the same way. When a bucket that holds data is
-	// labelled in a different location from the empty points of the same hour, the timeline
-	// lists that hour twice and the chart draws the traffic at the wrong place.
-	seen := map[int64]bool{}
-	filled := 0
-	for _, point := range summary.Hours {
-		if seen[point.Hour.Unix()] {
-			t.Fatalf("hour %s appears twice in the timeline", point.Hour)
+// csvColumn re-exports the window and returns one column of its first data row.
+func csvColumn(t *testing.T, recorder *Recorder, name string) string {
+	t.Helper()
+	lines := csvLines(t, recorder)
+	header := strings.Split(lines[0], ",")
+	row := strings.Split(lines[1], ",")
+	for index, column := range header {
+		if column == name {
+			return row[index]
 		}
-		seen[point.Hour.Unix()] = true
-		if point.Hour.Location() != summary.From.Location() {
-			t.Errorf("hour %s is labelled in %s, want the window's %s",
-				point.Hour, point.Hour.Location(), summary.From.Location())
+	}
+	t.Fatalf("the export has no %s column: %v", name, header)
+	return ""
+}
+
+// storedLine returns the raw JSONL line of one stored record, so a test can assert on the keys
+// the wire actually carries rather than on the struct it decoded into.
+func storedLine(t *testing.T, recorder *Recorder, requestID string) string {
+	t.Helper()
+	recorder.Flush()
+	for _, entry := range recorder.store.list() {
+		content, errRead := os.ReadFile(entry.path)
+		if errRead != nil {
+			t.Fatalf("read %s: %v", entry.path, errRead)
 		}
-		if point.Requests > 0 {
-			filled++
-			if point.TTFTP50Ms <= 0 || point.DecodeP50 <= 0 {
-				t.Errorf("hour %s carries %d requests but no timing: %+v", point.Hour, point.Requests, point)
+		for _, line := range strings.Split(string(content), "\n") {
+			if strings.Contains(line, `"request_id":"`+requestID+`"`) {
+				return line
 			}
 		}
 	}
-	if filled == 0 {
-		t.Fatal("no hour carries the two recorded requests")
-	}
-	if len(summary.Hours) != 25 {
-		t.Errorf("timeline has %d points, want 25 for a rolling 24h window", len(summary.Hours))
-	}
+	t.Fatalf("no stored line for request %q", requestID)
+	return ""
+}
 
-	// A model row without its percentiles reads as a zero through the API, which looks like a
-	// stalled stream rather than a missing field.
-	if len(summary.Models) == 0 {
-		t.Fatal("no model row")
-	}
-	for _, model := range summary.Models {
-		if model.TTFTP50Ms <= 0 || model.DecodeP50 <= 0 {
-			t.Errorf("model row %+v has no timing, want the percentiles of its requests", model)
-		}
+// writeStoredLine writes one pre-serialised record into the day file a store would use.
+func writeStoredLine(t *testing.T, directory string, date time.Time, line string) {
+	t.Helper()
+	path := filepath.Join(directory, filePrefix+date.UTC().Format(dateLayout)+fileSuffix)
+	if errWrite := os.WriteFile(path, []byte(line), 0o644); errWrite != nil {
+		t.Fatalf("write %s: %v", path, errWrite)
 	}
 }

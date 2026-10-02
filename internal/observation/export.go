@@ -8,6 +8,11 @@ import (
 
 // csvHeader is the fixed column order of the export. It is written even when the window has
 // no records, so a spreadsheet template can be built from an empty export.
+//
+// The columns are the ones a usage-hook record can fill, plus the v1 columns that still have
+// a source on a line written by the retired stream-sniffing build: those rows keep reading
+// back, and a column with an empty cell is cheaper than a schema the operator has to know
+// about.
 func csvHeader() []string {
 	return []string{
 		"time_utc",
@@ -15,19 +20,23 @@ func csvHeader() []string {
 		"session_id",
 		"generation_id",
 		"model",
+		"alias",
 		"upstream_model",
 		"canonical_slug",
 		"original_model_id",
 		"final_provider",
 		"resolved_provider",
 		"pinned_provider",
-		"affinity",
+		"auth_id",
+		"auth_index",
+		"auth_type",
+		"executor_type",
+		"reasoning_effort",
+		"service_tier",
 		"upstream_request_id",
-		"model_attempts",
-		"provider_attempts",
-		"fallbacks_available",
 		"off_baseline",
 		"status_code",
+		"failed",
 		"protocol",
 		"ttft_ms",
 		"duration_ms",
@@ -37,11 +46,9 @@ func csvHeader() []string {
 		"output_tokens",
 		"reasoning_tokens",
 		"cached_tokens",
+		"cache_read_tokens",
+		"cache_creation_tokens",
 		"total_tokens",
-		"cost_usd",
-		"frames",
-		"user_agent",
-		"claude_code_version",
 	}
 }
 
@@ -59,19 +66,23 @@ func csvRecord(record Record, baseline string) []string {
 		record.SessionID,
 		record.GenerationID,
 		record.Model,
+		record.Alias,
 		record.UpstreamModel,
 		record.CanonicalSlug,
 		record.OriginalModel,
 		record.FinalProvider,
 		record.ResolvedProvider,
 		record.PinnedProvider,
-		record.AffinityOutcome,
+		record.AuthID,
+		record.AuthIndex,
+		record.AuthType,
+		record.ExecutorType,
+		record.ReasoningEffort,
+		record.ServiceTier,
 		record.UpstreamRequestID,
-		strconv.Itoa(record.ModelAttempts),
-		strconv.Itoa(record.Attempts),
-		strconv.Itoa(len(record.Fallbacks)),
 		off,
 		strconv.Itoa(record.StatusCode),
+		strconv.FormatBool(record.Failed),
 		record.Protocol,
 		strconv.FormatInt(record.TTFTMs, 10),
 		strconv.FormatInt(record.DurationMs, 10),
@@ -81,16 +92,14 @@ func csvRecord(record Record, baseline string) []string {
 		strconv.FormatInt(record.OutputTokens, 10),
 		strconv.FormatInt(record.ReasoningTokens, 10),
 		strconv.FormatInt(record.CachedTokens, 10),
+		strconv.FormatInt(record.CacheReadTokens, 10),
+		strconv.FormatInt(record.CacheCreationTokens, 10),
 		strconv.FormatInt(record.TotalTokens, 10),
-		strconv.FormatFloat(record.CostUSD, 'f', 6, 64),
-		strconv.Itoa(record.Frames),
-		record.UserAgent,
-		record.ClaudeCodeVersion,
 	}
 }
 
-// recordChannel is the channel a request actually landed on. The upstream reports
-// finalProvider on the routing block; resolvedProvider covers a frame that only carries the
+// recordChannel is the channel a request actually landed on. Both record fields carry the
+// credential the host reported; resolved_provider covers a v1 line that only carries the
 // second one.
 func recordChannel(record Record) string {
 	if strings.TrimSpace(record.FinalProvider) != "" {

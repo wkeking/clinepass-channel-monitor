@@ -17,6 +17,7 @@ import (
 	"github.com/wkeking/clinepass-channel-monitor/internal/abi"
 	"github.com/wkeking/clinepass-channel-monitor/internal/buildinfo"
 	"github.com/wkeking/clinepass-channel-monitor/internal/hostapi"
+	"github.com/wkeking/clinepass-channel-monitor/internal/observation"
 	"github.com/wkeking/clinepass-channel-monitor/internal/plan"
 	"github.com/wkeking/clinepass-channel-monitor/internal/state"
 )
@@ -83,6 +84,10 @@ func route(req *pluginapi.ManagementRequest) pluginapi.ManagementResponse {
 		return pluginapi.ManagementResponse{StatusCode: http.StatusOK, Headers: htmlHeaders(), Body: indexHTML(req)}
 	case strings.HasSuffix(path, "/health"):
 		return jsonResponse(buildHealthResponse())
+	case strings.HasSuffix(path, "/channel.csv"):
+		return buildChannelCSV(req)
+	case strings.HasSuffix(path, "/channel"):
+		return buildChannelView(req)
 	default:
 		hostapi.LogAsync("warn", buildinfo.ID+": unknown management path", map[string]string{"path": req.Path})
 		return pluginapi.ManagementResponse{
@@ -119,6 +124,10 @@ type healthResponse struct {
 	// PlanAccounts lists every configured Cline credential so a deployment with several
 	// entries or several keys can be checked at a glance.
 	PlanAccounts []planAccountHealth `json:"plan_accounts,omitempty"`
+	// ChannelObservation is the per-request channel collector: whether it runs, how many
+	// streamed responses it resolved a channel for, how many it had to drop, and when it
+	// last wrote a record. A deployment with no new rows on the 「渠道」 view starts here.
+	ChannelObservation observation.Health `json:"channel_observation"`
 	// RequestHeaderNames and RequestBearerLen describe the last request seen on the request
 	// path. This build declares no request capability, so they stay empty; they are kept
 	// because they never contain a credential value, only header names and a length.
@@ -164,6 +173,7 @@ func buildHealthResponse() healthResponse {
 		PlanEnabled:        cfg.PlanEnabled,
 		RequestHeaderNames: headerNames,
 		RequestBearerLen:   bearerLen,
+		ChannelObservation: observationHealth(),
 	}
 	resp.PlanUsage = plan.UsageState{Enabled: cfg.PlanUsageEnabled}
 	if poller := state.Plan(); poller != nil {

@@ -22,7 +22,13 @@ func TestPanelHidesFixedDefaults(t *testing.T) {
 			t.Errorf("%s must not be exposed in the configuration panel", name)
 		}
 	}
-	for _, name := range []string{"timezone", "plan_config_path", "plan_refresh"} {
+	for _, name := range []string{
+		"timezone", "plan_config_path", "plan_refresh",
+		// The channel observation knobs must stay reachable from the panel: turning the
+		// collector off is the documented rollback for the per-frame scan cost.
+		"channel_observe_enabled", "channel_store_dir", "channel_retention_days",
+		"channel_max_size_mb", "channel_baseline_provider",
+	} {
 		if !fields[name] {
 			t.Errorf("%s must stay in the configuration panel", name)
 		}
@@ -55,11 +61,26 @@ func TestDeclaresManagementOnly(t *testing.T) {
 	}
 }
 
-// TestManagementRoutesAreHealthOnly pins the served routes: the three statistics endpoints
-// are gone, and 404 is the expected answer for them.
-func TestManagementRoutesAreHealthOnly(t *testing.T) {
+// TestManagementRoutesAreDataEndpoints pins the served routes: the v0.1.x statistics
+// endpoints stay gone, while the channel view endpoints must be declared here because the
+// host only forwards declared paths (an undeclared one is answered by the host's own 404).
+func TestManagementRoutesAreDataEndpoints(t *testing.T) {
+	const base = "/v0/management/plugins/clinepass-channel-monitor"
+	want := []string{base + "/health", base + "/channel", base + "/channel.csv"}
 	routes := buildManagementRegistration().Routes
-	if len(routes) != 1 || routes[0].Path != "/v0/management/plugins/clinepass-channel-monitor/health" {
-		t.Fatalf("routes = %+v, want /health only", routes)
+	if len(routes) != len(want) {
+		t.Fatalf("routes = %+v, want %v", routes, want)
+	}
+	for i, path := range want {
+		if routes[i].Path != path {
+			t.Errorf("routes[%d] = %q, want %q", i, routes[i].Path, path)
+		}
+	}
+	for _, gone := range []string{base + "/stats", base + "/events", base + "/export"} {
+		for _, route := range routes {
+			if route.Path == gone {
+				t.Errorf("route %q must not exist: the v0.1.x statistics endpoints stay gone", route.Path)
+			}
+		}
 	}
 }

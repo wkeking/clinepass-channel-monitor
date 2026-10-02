@@ -101,6 +101,34 @@ td.num,th.num{text-align:right}
     </div>
   </section>
 
+  <section id="channel-section">
+    <h2 style="display:flex;align-items:center;gap:10px">渠道<span class="info" id="channel-info" tabindex="0" aria-describedby="channel-info-tip" aria-label="渠道口径说明">!<span class="tip" id="channel-info-tip" role="tooltip"></span></span><button id="channel-csv" style="margin-left:auto;padding:4px 10px;font-size:12px;font-weight:600;letter-spacing:0;text-transform:none">导出 CSV</button></h2>
+    <div class="msg hidden" id="channel-off"></div>
+    <div class="msg hidden" id="channel-msg"></div>
+    <div id="channel-data" class="hidden">
+      <div class="sub" id="channel-headline" style="margin:-4px 0 10px"></div>
+      <div class="sub" id="channel-note" style="margin:-4px 0 12px"></div>
+      <div class="cards" id="channel-cards"></div>
+      <div class="sub" id="channel-providers-note" style="margin:18px 0 8px;font-weight:600">渠道分布</div>
+      <div class="wrap"><table id="channel-providers"><thead>
+        <tr><th>渠道</th><th class="num">请求</th><th class="num">占比</th><th class="num">偏离</th><th class="num">TTFT p50</th><th class="num">TTFT p90</th><th class="num">解码 p50</th><th class="num">输入</th><th class="num">输出</th><th class="num">缓存</th><th class="num">成本</th></tr>
+      </thead><tbody></tbody></table></div>
+      <div class="sub" id="channel-models-note" style="margin:18px 0 8px;font-weight:600">按模型</div>
+      <div class="wrap"><table id="channel-models"><thead>
+        <tr><th>模型</th><th class="num">请求</th><th class="num">偏离</th><th class="num">TTFT p50</th><th class="num">解码 p50</th></tr>
+      </thead><tbody></tbody></table></div>
+      <div class="sub" id="channel-timeline-note" style="margin:18px 0 8px;font-weight:600">时间线（每小时）</div>
+      <div class="cards" id="channel-timeline"></div>
+      <div class="wrap" style="margin-top:14px"><table id="channel-hours"><thead>
+        <tr><th>时间</th><th class="num">请求</th><th class="num">偏离</th><th class="num">回退</th><th class="num">TTFT p50</th><th class="num">解码 p50</th><th class="num">成本</th></tr>
+      </thead><tbody></tbody></table></div>
+      <div class="sub" id="channel-records-note" style="margin:18px 0 8px;font-weight:600">原始记录</div>
+      <div class="wrap"><table id="channel-records"><thead>
+        <tr><th>时间</th><th>模型</th><th>渠道</th><th>绑定</th><th class="num">尝试</th><th class="num">TTFT</th><th class="num">解码 t/s</th><th class="num">输入/输出/缓存</th><th class="num">状态</th><th>会话</th></tr>
+      </thead><tbody></tbody></table></div>
+    </div>
+  </section>
+
   <section id="plan-section">
     <h2>Cline 套餐用量（官方接口）</h2>
     <div class="plan-head">
@@ -463,7 +491,395 @@ function renderCards(plan){
   renderOverviewNote(view);
 }
 
+// --- 渠道观测（GET /channel）--------------------------------------------------
+// 这一块只回答一个问题：窗口内的 clinepass 请求里有多少比例没落在基线官渠。先给结论
+// （headline + 卡片），再拆到渠道、模型、小时与原始记录；原始记录是给上面每个数字做
+// 抽查用的。非基线渠道只做标记、不隐藏——把它们藏起来才是最容易看错的口径。
+
+function channelBaselineName(summary){
+  const name=String((summary&&summary.baseline_provider)||"").trim();
+  return name||"默认官渠";
+}
+
+function pctText(ratio){return fixed(n(ratio)*100,2)+"%"}
+
+function msText(value){return n(value)>0?fixed(value,0)+" ms":"—"}
+
+function tpsText(value){return n(value)>0?fixed(value,1):"—"}
+
+function moneyText(value){return n(value)?"$"+fixed(value,4):"—"}
+
+// 小时点是 RFC3339，表格里只需要到小时。
+function fmtHour(value){
+  const date=new Date(value);
+  if(isNaN(date))return value==null?"—":String(value);
+  const p=x=>String(x).padStart(2,"0");
+  return p(date.getMonth()+1)+"-"+p(date.getDate())+" "+p(date.getHours())+":00";
+}
+
+// 一条记录落在哪个渠道：finalProvider 优先，只有 resolvedProvider 时退回它。
+function channelOfRecord(record){
+  const final=String((record&&record.final_provider)||"").trim();
+  if(final)return final;
+  return String((record&&record.resolved_provider)||"").trim();
+}
+
+function channelIsOff(record,baseline){
+  const provider=channelOfRecord(record);
+  if(!provider||!baseline)return false;
+  return provider.toLowerCase()!==baseline.toLowerCase();
+}
+
+function shortID(value){
+  const text=String(value==null?"":value);
+  if(!text)return "—";
+  return text.length>14?text.slice(0,14)+"…":text;
+}
+
+// 下载文件名优先用服务端给的 Content-Disposition，拿不到再退回本地拼的名字。
+function filenameFromDisposition(value){
+  const header=String(value==null?"":value);
+  const quoted=header.match(/filename\s*=\s*"([^"]+)"/i);
+  if(quoted&&quoted[1])return quoted[1];
+  const bare=header.match(/filename\s*=\s*([^;]+)/i);
+  if(bare&&bare[1])return bare[1].trim();
+  return "";
+}
+
+// 未开启时要说清"没有记录"而不是显示一排 0，并且把开关的名字和目录一起给出。
+function renderChannelOff(health){
+  const box=$("channel-off");
+  if(!box)return;
+  const directory=health&&health.directory?String(health.directory):"";
+  box.className="msg";
+  box.innerHTML="<strong>渠道观测未开启</strong>：配置项 <code>channel_observe_enabled</code> 为 false 时插件不观察响应流，"+
+    "这里没有记录可显示（不是 0，是没有数据）。"+
+    (directory?"记录目录 <code>"+esc(directory)+"</code>。":"")+
+    "把它设为 true 并重载插件后，本区开始统计偏离官渠的比例。";
+  box.classList.remove("hidden");
+}
+
+function renderChannelProviders(summary,baseline){
+  const body=$("channel-providers").querySelector("tbody");
+  const rows=(summary&&summary.providers)||[];
+  if(!rows.length){
+    body.innerHTML='<tr class="empty-row"><td colspan="11">该窗口还没有识别到渠道：上游没有回报 provider_metadata，或者窗口内没有流量。</td></tr>';
+    return;
+  }
+  body.innerHTML=rows.map(function(row){
+    const provider=String(row.provider||"");
+    const isBaseline=provider.toLowerCase()===baseline.toLowerCase();
+    const off=n(row.off_baseline);
+    return "<tr>"+
+      '<td><span class="mono">'+esc(provider||"—")+"</span>"+
+        (isBaseline?'<span class="chip" style="margin-left:6px">官渠</span>':"")+
+        (off>0?'<span class="plan-warn" style="margin-left:6px">偏离</span>':"")+"</td>"+
+      '<td class="num">'+int(row.requests)+"</td>"+
+      '<td class="num">'+pctText(row.ratio)+"</td>"+
+      '<td class="num">'+int(row.off_baseline)+"</td>"+
+      '<td class="num">'+msText(row.ttft_p50_ms)+"</td>"+
+      '<td class="num">'+msText(row.ttft_p90_ms)+"</td>"+
+      '<td class="num">'+tpsText(row.decode_p50_tps)+"</td>"+
+      '<td class="num">'+scaled(row.input_tokens)+"</td>"+
+      '<td class="num">'+scaled(row.output_tokens)+"</td>"+
+      '<td class="num">'+scaled(row.cached_tokens)+"</td>"+
+      '<td class="num">'+moneyText(row.cost_usd)+"</td>"+
+      "</tr>";
+  }).join("");
+}
+
+function renderChannelModels(summary){
+  const body=$("channel-models").querySelector("tbody");
+  const rows=(summary&&summary.models)||[];
+  if(!rows.length){
+    body.innerHTML='<tr class="empty-row"><td colspan="5">该窗口没有按模型的数据。</td></tr>';
+    return;
+  }
+  body.innerHTML=rows.map(function(row){
+    const slug=String(row.canonical_slug||"");
+    return "<tr>"+
+      '<td><span class="mono">'+esc(row.model||"—")+"</span>"+
+        (slug?'<div class="sub" style="margin-top:2px">'+esc(slug)+"</div>":"")+"</td>"+
+      '<td class="num">'+int(row.requests)+"</td>"+
+      '<td class="num">'+(n(row.off_baseline)>0?'<span class="plan-warn">'+int(row.off_baseline)+"</span>":int(row.off_baseline))+"</td>"+
+      '<td class="num">'+msText(row.ttft_p50_ms)+"</td>"+
+      '<td class="num">'+tpsText(row.decode_p50_tps)+"</td>"+
+      "</tr>";
+  }).join("");
+}
+
+function renderChannelTimeline(summary,baseline){
+  const box=$("channel-timeline");
+  const hours=(summary&&summary.hours)||[];
+  if(!hours.length){
+    box.innerHTML='<div class="msg">该窗口没有小时数据。</div>';
+    return;
+  }
+  const requests=hours.map(function(point){return n(point.requests)});
+  const offs=hours.map(function(point){return n(point.off_baseline)});
+  const costs=hours.map(function(point){return n(point.cost_usd)});
+  let peakRatio=0,peakHour="",peakCost=0;
+  hours.forEach(function(point){
+    const ratio=n(point.requests)>0?n(point.off_baseline)/n(point.requests):0;
+    if(ratio>peakRatio){peakRatio=ratio;peakHour=fmtHour(point.hour)}
+    if(n(point.cost_usd)>peakCost)peakCost=n(point.cost_usd);
+  });
+  let total=0,offTotal=0;
+  hours.forEach(function(point){total+=n(point.requests);offTotal+=n(point.off_baseline)});
+  box.innerHTML=[
+    card({label:"每小时请求",icon:"⇄",tint:"#60a5fa",
+      tip:"按小时拆开的已识别请求数，含窗口内全部小时；某个小时为 0 就是当时没有请求，不做插值。",
+      value:int(total),unit:"条",
+      sub:[hours.length+" 个小时点","偏离合计 "+int(offTotal)+" 条"],
+      spark:requests}),
+    card({label:"每小时偏离官渠",icon:"!",tint:"#f87171",
+      tip:"按小时拆开的偏离请求数；峰值小时是比例最高的那一个。",
+      value:int(offTotal),unit:"条",
+      sub:[peakHour?("峰值 "+pctText(peakRatio)+"（"+peakHour+"）"):"窗口内没有偏离请求"],
+      spark:offs}),
+    card({label:"每小时成本",icon:"$",tint:"#fbbf24",
+      tip:"按小时拆开的参考成本，来自响应里的 usage.cost。",
+      value:fixed(costs.reduce(function(sum,value){return sum+value},0),4),unit:"USD",
+      sub:["单小时最高 "+fixed(peakCost,4)+" USD"],
+      spark:costs})
+  ].join("");
+}
+
+function renderChannelHours(summary){
+  const body=$("channel-hours").querySelector("tbody");
+  const hours=(summary&&summary.hours)||[];
+  if(!hours.length){
+    body.innerHTML='<tr class="empty-row"><td colspan="7">该窗口没有小时数据。</td></tr>';
+    return;
+  }
+  body.innerHTML=hours.map(function(point){
+    const off=n(point.off_baseline);
+    return "<tr>"+
+      "<td>"+esc(fmtHour(point.hour))+"</td>"+
+      '<td class="num">'+int(point.requests)+"</td>"+
+      '<td class="num">'+(off>0?'<span class="plan-warn">'+int(off)+"</span>":int(off))+"</td>"+
+      '<td class="num">'+int(point.fallbacks)+"</td>"+
+      '<td class="num">'+msText(point.ttft_p50_ms)+"</td>"+
+      '<td class="num">'+tpsText(point.decode_p50_tps)+"</td>"+
+      '<td class="num">'+moneyText(point.cost_usd)+"</td>"+
+      "</tr>";
+  }).join("");
+}
+
+function renderChannelRecords(view,baseline){
+  const body=$("channel-records").querySelector("tbody");
+  const note=$("channel-records-note");
+  const rows=(view&&view.records)||[];
+  const total=n(view&&view.records_total);
+  if(note){
+    note.innerHTML="原始记录"+(rows.length<total
+      ?" · 显示最新 "+int(rows.length)+" / 共 "+int(total)+" 条（导出 CSV 是完整窗口）"
+      :" · 共 "+int(total)+" 条");
+  }
+  if(!rows.length){
+    body.innerHTML='<tr class="empty-row"><td colspan="10">该窗口没有原始记录。</td></tr>';
+    return;
+  }
+  body.innerHTML=rows.map(function(record){
+    const provider=channelOfRecord(record);
+    const off=channelIsOff(record,baseline);
+    const fallbacks=(record.fallbacks_available||[]).length;
+    const attempts=[int(record.total_provider_attempt_count)];
+    if(n(record.model_attempt_count)>1)attempts.push("模型 "+int(record.model_attempt_count));
+    if(fallbacks)attempts.push("备选 "+int(fallbacks));
+    return "<tr>"+
+      "<td>"+esc(fmtTime(record.time))+"</td>"+
+      '<td><span class="mono">'+esc(record.model||"—")+"</span></td>"+
+      "<td>"+(off?'<span class="plan-warn" style="font-weight:600">':"")+esc(provider||"—")+
+        (off?"（偏离）</span>":'<span class="chip" style="margin-left:6px">官渠</span>')+"</td>"+
+      "<td>"+esc(record.pinned_provider||"—")+(record.affinity?"<div class=\"sub\" style=\"margin-top:2px\">"+esc(record.affinity)+"</div>":"")+"</td>"+
+      '<td class="num">'+attempts.map(function(text,index){
+        return index?'<div class="sub" style="margin-top:2px">'+esc(text)+"</div>":esc(text);
+      }).join("")+"</td>"+
+      '<td class="num">'+msText(record.ttft_ms)+"</td>"+
+      '<td class="num">'+tpsText(record.tokens_per_second)+"</td>"+
+      '<td class="num">'+scaled(record.input_tokens)+" / "+scaled(record.output_tokens)+" / "+scaled(record.cached_tokens)+"</td>"+
+      '<td class="num">'+int(record.status_code)+
+        (record.is_byok?'<span class="chip" style="margin-left:6px">BYOK</span>':"")+
+        (record.stream===false?'<span class="sub" style="margin-left:6px">非流式</span>':"")+"</td>"+
+      '<td title="'+esc(record.session_id||"")+'"><span class="mono">'+esc(shortID(record.session_id))+"</span></td>"+
+      "</tr>";
+  }).join("");
+}
+
+function renderChannel(view){
+  const data=view||{};
+  const summary=data.summary||{};
+  const health=data.health||summary.health||{};
+  const enabled=data.enabled===true;
+  const msg=$("channel-msg");
+  if(msg){msg.className="msg hidden";msg.textContent=""}
+  $("channel-off").classList.toggle("hidden",enabled);
+  $("channel-data").classList.toggle("hidden",!enabled);
+  if(!enabled){
+    renderChannelOff(health);
+    return;
+  }
+
+  const baseline=channelBaselineName(summary);
+  const win=windowLabel(String(summary.window||$("window").value||"24h"));
+  const resolved=n(summary.resolved_requests);
+  const offCount=n(summary.off_baseline_requests);
+  const unresolved=n(health.unresolved);
+
+  const headline="<strong>过去 "+esc(win.replace("近",""))+"</strong>共识别 "+int(resolved)+" 条请求，其中 <strong>"+
+    int(offCount)+"</strong> 条没有落在 <strong>"+esc(baseline)+'</strong> 官渠，占比 <span class="chip">'+
+    esc(resolved>0?pctText(summary.off_baseline_ratio):"—")+"</span>。";
+  const headlineBits=[headline];
+  if(unresolved>0)headlineBits.push('<span class="plan-warn">另有 '+int(unresolved)+" 条请求上游没有回报渠道（未识别），不计入该比例。</span>");
+  if(!resolved)headlineBits.push('<span class="plan-warn">该窗口还没有已识别的请求，因此比例不可用。</span>');
+  $("channel-headline").innerHTML=headlineBits.join(" ");
+
+  const hourList=summary.hours||[];
+  const noteBits=[
+    "窗口 "+(summary.from?esc(fmtTime(summary.from).slice(5,16)):"—")+" ~ "+(summary.to?esc(fmtTime(summary.to).slice(5,16)):"—"),
+    "生成于 "+(summary.generated_at?esc(fmtTime(summary.generated_at).slice(11,19)):"—"),
+    "渠道数 "+int(summary.channels),
+    "已写入 "+int(health.written)+" 条"
+  ];
+  if(n(health.queued))noteBits.push("待写 "+int(health.queued));
+  if(n(health.pending_streams))noteBits.push("进行中 "+int(health.pending_streams));
+  if(n(health.dropped))noteBits.push('<span class="plan-warn">队列丢弃 '+int(health.dropped)+"</span>");
+  if(n(health.write_failures))noteBits.push('<span class="plan-warn">写入失败 '+int(health.write_failures)+"</span>");
+  if(n(health.parse_failures))noteBits.push('<span class="plan-warn">解析失败 '+int(health.parse_failures)+"</span>");
+  if(health.warmup&&n(health.warmup.records))noteBits.push("重载回填 "+int(health.warmup.records)+" 条"+(health.warmup.truncated?"（已截断）":""));
+  if(health.last_write_at)noteBits.push("最后写入 "+esc(fmtTime(health.last_write_at).slice(11,19)));
+  if(health.directory)noteBits.push("记录目录 "+esc(String(health.directory)));
+  if(health.enabled===false)noteBits.push('<span class="plan-warn">采集器未运行</span>');
+  if(health.last_error)noteBits.push('<span class="plan-warn">最近错误：'+esc(health.last_error)+"</span>");
+  if(health.last_parse_error)noteBits.push('<span class="plan-warn">最近解析错误：'+esc(health.last_parse_error)+"</span>");
+  $("channel-note").innerHTML=noteBits.join(" · ");
+
+  const hourRequests=hourList.map(function(point){return n(point.requests)});
+  const hourOffs=hourList.map(function(point){return n(point.off_baseline)});
+  const hourTPS=hourList.map(function(point){return n(point.decode_p50_tps)});
+  $("channel-cards").innerHTML=[
+    card({label:"偏离官渠",icon:"!",tint:"#f87171",
+      tip:"最终渠道不是 "+baseline+" 的请求数与占比；分母是已识别渠道的请求数，不是全部请求。",
+      value:int(offCount),unit:"条",
+      sub:["占比 "+(resolved>0?pctText(summary.off_baseline_ratio):"—")+"（分母 "+int(resolved)+" 条）","基线官渠 "+baseline],
+      spark:hourOffs}),
+    card({label:"已识别请求",icon:"⇄",tint:"#60a5fa",
+      tip:"上游在响应里回报了渠道的请求数；未识别的请求没有渠道，进不了比例。",
+      value:int(resolved),unit:"条",
+      sub:["未识别 "+int(unresolved)+" 条","覆盖渠道 "+int(summary.channels)+" 个"],
+      spark:hourRequests}),
+    card({label:"发生回退",icon:"↺",tint:"#fbbf24",
+      tip:"上游尝试次数大于 1 的请求数：一次请求换过模型或渠道才成功。",
+      value:int(summary.fallback_requests),unit:"条",
+      sub:["占总请求的 "+(resolved>0?pctText(n(summary.fallback_requests)/resolved):"—")]}),
+    card({label:"TTFT 首字延时",icon:"⏱",tint:"#a78bfa",
+      tip:"从上游响应头到达算到第一个文本块，不含网关排队时间。",
+      value:msText(summary.ttft_p50_ms),unit:"",
+      sub:["p90 "+msText(summary.ttft_p90_ms)]}),
+    card({label:"解码速度",icon:"⚡",tint:"#34d399",
+      tip:"输出 token / 解码耗时（首个 token 之后的时间）的中位数。",
+      value:tpsText(summary.decode_p50_tps),unit:"t/s",
+      sub:["p50 中位数"],spark:hourTPS}),
+    card({label:"Tokens",icon:"Σ",tint:"#38bdf8",
+      tip:"窗口内已识别请求的 token 汇总。",
+      value:scaled(n(summary.input_tokens)+n(summary.output_tokens)),unit:"token",
+      sub:["输入 "+scaled(summary.input_tokens),"输出 "+scaled(summary.output_tokens),"缓存 "+scaled(summary.cached_tokens)]}),
+    card({label:"参考成本",icon:"$",tint:"#f472b6",
+      tip:"上游 usage.cost 的汇总，仅供参考，不是账单。",
+      value:fixed(summary.cost_usd,4),unit:"USD",
+      sub:["来自响应里的 usage.cost"]})
+  ].join("");
+
+  renderChannelProviders(summary,baseline);
+  renderChannelModels(summary);
+  renderChannelTimeline(summary,baseline);
+  renderChannelHours(summary);
+  renderChannelRecords(data,baseline);
+
+  const tip=$("channel-info-tip");
+  if(tip){
+    tip.textContent=[
+      "「已识别请求」= 上游在响应里回报了渠道（provider_metadata.gateway.routing）的请求；只有这些请求能算比例。",
+      "「偏离官渠」= 最终渠道不是 "+baseline+" 的请求，占比 = 偏离数 / 已识别请求数。",
+      "TTFT 是上游响应头到达之后到第一个文本块的时间；解码速度 = 输出 token / 解码耗时。",
+      "小时表保留窗口内每个小时，空小时按 0 显示，不做插值；原始记录只带最新 20 条，完整数据走 CSV 导出。"
+    ].join("\n");
+  }
+}
+
+function renderChannelError(err){
+  const msg=$("channel-msg");
+  if(msg){
+    msg.className="msg plan-err";
+    msg.textContent="渠道数据加载失败："+((err&&err.message)?err.message:String(err||""));
+    msg.classList.remove("hidden");
+  }
+  $("channel-data").classList.add("hidden");
+  $("channel-off").classList.add("hidden");
+}
+
+// 渠道视图按窗口在服务端聚合，所以改窗口要重新取一次，不能只用本地快照重画。
+async function loadChannel(){
+  const win=$("window").value||"24h";
+  try{
+    renderChannel(await api("/channel?window="+encodeURIComponent(win)));
+  }catch(err){
+    if(err.code===401||err.code===403){
+      $("gate").classList.remove("hidden");
+      $("statusline").textContent="管理密钥无效或缺失（HTTP "+err.code+"）";
+      return;
+    }
+    renderChannelError(err);
+  }
+}
+
+// /channel.csv 也要 Bearer 头，所以不能用 <a href>：先取 Blob，再用一个临时链接触发下载。
+async function downloadChannelCSV(){
+  const button=$("channel-csv");
+  const win=$("window").value||"24h";
+  const label=button?button.textContent:"";
+  if(button){button.disabled=true;button.textContent="导出中…"}
+  try{
+    const url=new URL(BASE+"/channel.csv?window="+encodeURIComponent(win),location.origin);
+    const res=await fetch(url,{headers:{"Authorization":"Bearer "+store.get(TOKEN_KEY)},cache:"no-store"});
+    if(res.status===401||res.status===403){const e=new Error("unauthorized");e.code=res.status;throw e}
+    if(!res.ok)throw new Error("HTTP "+res.status);
+    const blob=await res.blob();
+    const name=filenameFromDisposition(res.headers.get("Content-Disposition"))||("channel-observation-"+win+".csv");
+    const href=URL.createObjectURL(blob);
+    const link=document.createElement("a");
+    link.href=href;
+    link.download=name;
+    document.body.appendChild(link);
+    link.click();
+    if(link.parentNode)link.parentNode.removeChild(link);
+    setTimeout(function(){URL.revokeObjectURL(href)},1000);
+    const count=res.headers.get("X-Record-Count");
+    const msg=$("channel-msg");
+    if(msg){
+      msg.className="msg";
+      msg.textContent="已导出 "+(count==null?"":count+" 条记录 · ")+name;
+      msg.classList.remove("hidden");
+    }
+  }catch(err){
+    if(err.code===401||err.code===403){
+      $("gate").classList.remove("hidden");
+      $("statusline").textContent="管理密钥无效或缺失（HTTP "+err.code+"）";
+    }
+    const msg=$("channel-msg");
+    if(msg){
+      msg.className="msg plan-err";
+      msg.textContent="导出 CSV 失败："+err.message;
+      msg.classList.remove("hidden");
+    }
+  }finally{
+    if(button){button.disabled=false;button.textContent=label||"导出 CSV"}
+  }
+}
+
 async function load(){
+  loadChannel();
   try{
     const health=await api("/health");
     $("ver").textContent="v"+health.version;
@@ -492,7 +908,8 @@ $("save").addEventListener("click",()=>{const v=$("token").value.trim();if(!v)re
 $("token").addEventListener("keydown",e=>{if(e.key==="Enter")$("save").click()});
 $("forget").addEventListener("click",()=>{store.del(TOKEN_KEY);$("token").value="";$("gate").classList.remove("hidden");$("statusline").textContent="已清除本机保存的密钥"});
 $("refresh").addEventListener("click",()=>load());
-$("window").addEventListener("change",()=>{renderCards(planSnapshot||{});renderModels(planSnapshot||{})});
+$("window").addEventListener("change",()=>{renderCards(planSnapshot||{});renderModels(planSnapshot||{});loadChannel()});
+$("channel-csv").addEventListener("click",()=>downloadChannelCSV());
 $("plan-account").addEventListener("change",()=>{store.set(PLAN_ACCOUNT_KEY,$("plan-account").value);renderPlan(planSnapshot||{});renderCards(planSnapshot||{});renderModels(planSnapshot||{})});
 
 if(!store.get(TOKEN_KEY))$("gate").classList.remove("hidden");

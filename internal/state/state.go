@@ -1,5 +1,5 @@
-// Package state holds the process-wide runtime state: the active configuration and the
-// Cline usage poller.
+// Package state holds the process-wide runtime state: the active configuration, the
+// Cline usage poller, and the channel-observation collector.
 //
 // The plugin package publishes it on load and on every reconfigure; the management API
 // reads it. Keeping it in its own package is what lets those packages depend on one
@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/wkeking/clinepass-channel-monitor/internal/config"
+	"github.com/wkeking/clinepass-channel-monitor/internal/observation"
 	"github.com/wkeking/clinepass-channel-monitor/internal/plan"
 )
 
@@ -17,6 +18,7 @@ var (
 	mu  sync.RWMutex
 	cfg = config.Default()
 	pol *plan.Poller
+	obs *observation.Recorder
 )
 
 // Config returns the active configuration (defaults before the first load).
@@ -33,6 +35,13 @@ func Plan() *plan.Poller {
 	return pol
 }
 
+// Observation returns the channel-observation collector, or nil when it is switched off.
+func Observation() *observation.Recorder {
+	mu.RLock()
+	defer mu.RUnlock()
+	return obs
+}
+
 // SetConfig publishes a new configuration.
 func SetConfig(value config.Config) {
 	mu.Lock()
@@ -44,5 +53,12 @@ func SetConfig(value config.Config) {
 func SetPlan(value *plan.Poller) {
 	mu.Lock()
 	pol = value
+	mu.Unlock()
+}
+
+// SetObservation publishes the collector.
+func SetObservation(value *observation.Recorder) {
+	mu.Lock()
+	obs = value
 	mu.Unlock()
 }

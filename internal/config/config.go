@@ -18,6 +18,25 @@ import (
 const (
 	// DefaultPlanBaseURL is Cline's public API. It is a default, never a hard requirement.
 	DefaultPlanBaseURL = "https://api.cline.bot/api/v1"
+	// DefaultChannelStoreDir is where the per-request channel records are appended. It is a
+	// directory of its own on purpose: v0.1.x wrote a different schema into
+	// /CLIProxyAPI/logs/channel-monitor, which stays untouched and out of the size budget.
+	DefaultChannelStoreDir = "/CLIProxyAPI/logs/channel-observation"
+	// DefaultChannelBaselineProvider is the provider every other one is compared against
+	// when the page answers "how much of the traffic did not land on the expected
+	// channel". ClinePass answers "deepseek" today; it is configuration, not a constant,
+	// because the expected channel is a property of the subscription, not of Cline.
+	DefaultChannelBaselineProvider = "deepseek"
+	// DefaultChannelRetentionDays and DefaultChannelMaxSizeMB bound the on-disk history.
+	// Retention is the primary limit; the size cap is the safety net for a traffic burst
+	// that makes a day of records far larger than usual.
+	DefaultChannelRetentionDays = 3
+	DefaultChannelMaxSizeMB     = 512
+	// maxChannelRetentionDays and minChannelMaxSizeMB bound the two knobs the same way
+	// normalize() bounds the polling intervals: a value that cannot work is replaced by
+	// one that can, instead of silently producing an empty page.
+	maxChannelRetentionDays = 30
+	minChannelMaxSizeMB     = 16
 	// DefaultPlanRefresh is how often the subscription quota is refreshed, and
 	// DefaultPlanUsageRefresh how often the official per-request records are paged. The
 	// usage interval is the longer one on purpose: the quota calls are cheap, while the
@@ -63,6 +82,20 @@ type Config struct {
 	// windows (request count, tokens, cache hit ratio) fetched from /users/{id}/usages.
 	PlanUsageEnabled bool     `yaml:"plan_usage_enabled"`
 	PlanUsageRefresh Duration `yaml:"plan_usage_refresh"`
+
+	// ---- 逐请求渠道观测 ----
+	// ChannelObserveEnabled decides whether the plugin declares the stream chunk
+	// interceptor at all. Off means the capability is not advertised, so the host never
+	// builds a chunk payload for this plugin: it is the emergency switch and the
+	// "capability off" arm of the benchmark.
+	ChannelObserveEnabled bool `yaml:"channel_observe_enabled"`
+	// ChannelStoreDir is the directory the JSONL files are appended to.
+	ChannelStoreDir string `yaml:"channel_store_dir"`
+	// ChannelRetentionDays and ChannelMaxSizeMB bound that directory.
+	ChannelRetentionDays int `yaml:"channel_retention_days"`
+	ChannelMaxSizeMB     int `yaml:"channel_max_size_mb"`
+	// ChannelBaselineProvider is the provider the "off-channel" ratio is measured against.
+	ChannelBaselineProvider string `yaml:"channel_baseline_provider"`
 }
 
 // Duration accepts both Go duration strings ("5s", "1m30s") and plain numbers,
@@ -113,6 +146,12 @@ func Default() Config {
 		PlanDailyEnabled: true,
 		PlanUsageEnabled: true,
 		PlanUsageRefresh: Duration{Value: defaultPlanUsageRefresh, Set: true},
+
+		ChannelObserveEnabled:   true,
+		ChannelStoreDir:         DefaultChannelStoreDir,
+		ChannelRetentionDays:    DefaultChannelRetentionDays,
+		ChannelMaxSizeMB:        DefaultChannelMaxSizeMB,
+		ChannelBaselineProvider: DefaultChannelBaselineProvider,
 	}
 }
 
@@ -189,6 +228,27 @@ func normalize(cfg *Config) {
 		// dozens of upstream calls per cycle for no visible gain.
 		cfg.PlanUsageRefresh.Value = time.Minute
 	}
+	if strings.TrimSpace(cfg.ChannelStoreDir) == "" {
+		cfg.ChannelStoreDir = DefaultChannelStoreDir
+	}
+	if cfg.ChannelRetentionDays <= 0 {
+		cfg.ChannelRetentionDays = DefaultChannelRetentionDays
+	}
+	if cfg.ChannelRetentionDays > maxChannelRetentionDays {
+		cfg.ChannelRetentionDays = maxChannelRetentionDays
+	}
+	if cfg.ChannelMaxSizeMB <= 0 {
+		cfg.ChannelMaxSizeMB = DefaultChannelMaxSizeMB
+	}
+	if cfg.ChannelMaxSizeMB < minChannelMaxSizeMB {
+		// Below this a single busy day would not fit, and the cleaner would delete the
+		// history it is supposed to keep.
+		cfg.ChannelMaxSizeMB = minChannelMaxSizeMB
+	}
+	if strings.TrimSpace(cfg.ChannelBaselineProvider) == "" {
+		cfg.ChannelBaselineProvider = DefaultChannelBaselineProvider
+	}
+	cfg.ChannelBaselineProvider = strings.ToLower(strings.TrimSpace(cfg.ChannelBaselineProvider))
 }
 
 // HostMatched reports whether a Cline entry's base_url host is one of the configured hosts.

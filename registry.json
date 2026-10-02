@@ -4,9 +4,9 @@
     {
       "id": "clinepass-channel-monitor",
       "name": "Cline 渠道监控",
-      "description": "展示 Cline 套餐、限额与官方用量，并提供管理页。",
+      "description": "展示 Cline 套餐、限额与官方用量，并观测请求最终落在哪个渠道。",
       "author": "wkeking",
-      "version": "0.2.1",
+      "version": "0.3.0",
       "repository": "https://github.com/wkeking/clinepass-channel-monitor",
       "homepage": "https://github.com/wkeking/clinepass-channel-monitor",
       "license": "MIT",

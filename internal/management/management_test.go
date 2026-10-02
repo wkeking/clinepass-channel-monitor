@@ -171,11 +171,14 @@ func TestIndexPageCarriesNoData(t *testing.T) {
 	if !strings.Contains(page, "grid-template-columns:repeat(3,minmax(0,1fr))") {
 		t.Errorf("the overview must render its three cards on a single row")
 	}
-	// The statistics the local store produced are gone with it: no local latency or
-	// generation-speed card, no per-request views, no CSV export. The labels are matched
-	// with their card syntax so an explanatory sentence about what the official API does
-	// not provide (which the page legitimately carries) is not mistaken for the card.
-	for _, needle := range []string{"/stats", "/events", "/export", "渠道分布", "cache-bar", "导出 CSV",
+	// The local statistics v0.1.x kept are still gone: no latency or generation-speed card
+	// from the local store, no /stats or /events view, and no /export endpoint. What
+	// replaced them is the channel view, which reports which upstream served each request
+	// rather than how fast the local store answered, so its own labels are allowed: see
+	// TestChannelViewIsPresent below. The labels here are matched with their card syntax so
+	// an explanatory sentence about what the official API does not provide is not mistaken
+	// for the card.
+	for _, needle := range []string{"/stats", "/events", "/export", "cache-bar",
 		`label:"平均延时"`, `label:"生成速度"`} {
 		if strings.Contains(page, needle) {
 			t.Errorf("page must not keep the %q local statistics element", needle)

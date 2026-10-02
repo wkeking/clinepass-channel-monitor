@@ -372,6 +372,10 @@ func (s *store) loadRecent(window time.Duration, maxBytes int64, fn func(Record)
 // writeCSV streams the stored records of a window as CSV. The columns are the ones the
 // operator question is answered with, plus the identity of the request so a row can be
 // traced back to the raw chunk it came from.
+//
+// The gateway channel is joined in per row, exactly as the 「渠道」 view does it: an export that
+// reported a credential where the page reported a channel would make the two disagree about
+// the same request.
 func (r *Recorder) WriteCSV(window Window, sink io.Writer) (int, error) {
 	if r == nil || r.store == nil {
 		return 0, nil
@@ -381,8 +385,12 @@ func (r *Recorder) WriteCSV(window Window, sink io.Writer) (int, error) {
 		return 0, errHeader
 	}
 	written := 0
+	join := r.openJoin()
 	since := r.now().Add(-window.Duration())
 	_, errScan := r.store.scan(since, scanLimits{}, func(record Record) error {
+		if fact, matched := join.match(record); matched {
+			record = record.withChannel(fact)
+		}
 		if errWrite := writer.Write(csvRecord(record, r.options.Baseline)); errWrite != nil {
 			return errWrite
 		}

@@ -1,21 +1,30 @@
-# 渠道观测（逐请求渠道分布）—— Step 0 判定与实现说明
+# 渠道观测（逐请求渠道分布）—— 判定、更正与实现说明
+
+结论先行：
+
+- 渠道信号有**两个已上线的来源**，取自 CPA 的不同位置：
+  1. **usage 钩子（P1）**：宿主在每个请求结束后回调一次，给的是 CPA 为这条请求选中的**凭据**（`Provider` / `AuthID` / `AuthIndex` / `AuthType`）加上宿主自己测的 TTFT / token 账。它覆盖所有客户端协议（含 `POST /v1/responses`），是**记录（record）**的来源，页面现有的「渠道」区取自它；
+  2. **CPA 请求日志（P2，Phase 2 已上线）**：CPA 自己看到的**上游响应原文**里有 Cline 网关的 `provider_metadata.gateway.routing`，只有这些日志能看到。它是网关级渠道**事实（fact）**的来源（`finalProvider` / `resolvedProvider` / 尝试次数 / 网关成本）。
+- **本文旧版有两处因果写错，已更正**（`docs/request-log-channel-plan.md` §8 指定的更正）：
+  - 旧版把 P2 判为「本部署下是死路」。成立的只是「不动 `commercial-mode` 时是死路」；关掉之后 P2 是网关级渠道的**唯一**来源，现已实现并上线（§2.2）。
+  - 旧版把「`/v1/responses` 的响应里没有渠道块」当成**上游**事实。错：上游响应里有这个块，是 CPA 把上游 `chat/completions` 响应翻译成 Responses 事件时把它丢掉了；而 clinepass 上游**根本没有 `/responses` 端点**（直连实测 404）。块消失的位置是**客户端可见的流**，不是上游（§2.3）。
+- **P3（响应侧分片拦截器）退役不变，但理由按同一更正重写**：它挂在翻译之后，只能看到客户端可见的流，因此在约 99% 的 `POST /v1/responses` 流量上永远看不到渠道块。
+- 代价与边界：P2 要求 CPA 侧同时打开请求日志（`observability.logs.request-log: true` **且** `server.commercial-mode: false`），日志里是**明文 prompt**，长上下文请求单文件 4.0–5.7 MB，实测目录增速约 8 MB/分钟、日增量约 3.5 GB；开关前后的代价对照见 §4.3。
+- **fact 已并进记录并画到页面上**（Phase 3/4，构建 `0.3.0-dev.181/182`）。两个维度分列：记录与页面把网关级 `finalProvider` 记在 `final_provider` / `resolved_provider` / `gateway_*`（`channel_source` 标明是否来自日志），把 CPA 侧凭据记在 **`cpa_provider`**（schema v3 改名；v1/v2 旧行的 `final_provider` 仍在读时按凭据解释）。`off_baseline` 现在只对**真渠道**判定，默认 `deepseek` 才真正成立；fail 的请求上游不返回路由块，渠道列显示「无渠道块」而不是记 0。join 用**持久化的事实文件**（见 §3.5）做读时匹配，因此重启后历史窗口仍可判定。
 
 本文回答一个问题，并记录它的取证过程：**过去 24 小时里，clinepass 的请求有多少条 / 多大比例没有落在基准渠道**，
 以及这些请求的 TTFT 与解码速度是多少。
 
-数据来源是**宿主的 usage 钩子**（能力键 `usage_plugin`，ABI 方法 `usage.handle`）：宿主在**每个请求结束后**调用一次，
-载荷里带 CPA 为这条请求选中的凭据。它与客户端说什么协议无关，所以 `POST /v1/responses`（生产上约 99% 的流量）也在覆盖范围内。
-
-本文的判定先于实现：`§2` 的三路径结论是在写第一行实现代码之前、用可复现命令在 oracle 上取证得出的（命令与原始输出见各小节）。
+本文的判定先于实现：`§2` 的路径结论是在写第一行实现代码之前、用可复现命令在 oracle 上取证得出的（命令与原始输出见各小节）。
 `§2.3` 记录的流式分片路径（`response_stream_interceptor`）**曾选定、后被退役**：它只能看到 OpenAI
 `/v1/chat/completions` 响应里的 `provider_metadata.gateway.routing`，在 `/v1/responses` 的流上实测 34 帧里 0 帧命中，
-而生产主机 24 小时 5,843 条请求里约 **99%** 是 `POST /v1/responses`——即旧设计只能记到验收探针，记不到真实流量。
-退役理由与数字见 §2.3、§4.3。
-`§4` 的性能数字分两批：`§4.1` 是现设计（usage 钩子）的成本模型（量化实测**待做**），`§4.2` 是为**退役设计**测的三态数字
-（保留，但必须当历史读）。
+而那正是生产上约 99% 的流量（24 小时 5,843 条请求里）——即旧设计只能记到验收探针，记不到真实流量。
+退役理由与数字见 §2.3、§4.5。
+`§4` 的性能数字分三批：`§4.1` 是 P1（usage 钩子）的成本模型（量化实测**待做**），`§4.2`／`§4.3` 是 P2（CPA 请求日志）
+的体积与代价实测（2026-10-02），`§4.4` 是为**退役设计**测的三态数字（保留，但必须当历史读）。
 
 宿主侧源码引用（`sdk/...`、`internal/pluginhost/...` 的行号）来自本仓库 `.reference/CLIProxyAPI` 的 **v8.0.8** 检出；
-本插件自身依赖的是 `CLIProxyAPI/v7 v7.3.8`（`go.mod`）。
+本插件自身依赖的是 `CLIProxyAPI/v7 v7.3.8`（`go.mod`）。`internal/channellog/...` 是本仓库自己的代码。
 
 ## 1. 目标与硬约束
 
@@ -32,26 +41,31 @@
    clone 并向插件 JSON 序列化两份请求体（当时 7–16 ms/帧、cpa CPU 106–192%、357 → ~100 t/s）。
    现实现只声明 `UsagePlugin` 这一个数据能力，且宿主在请求**结束后**才调用它；除此之外不声明任何请求侧 /
    响应侧 / 翻译 / 归一化能力（`ResponseBeforeTranslator`、`ResponseAfterTranslator`、`ResponseTranslator`、
-   `StreamChunkInterceptor` 全都不声明）。
+   `StreamChunkInterceptor` 全都不声明）。P2 是**旁路读文件**，也不在请求路径上（§2.2）。
 2. 插件**永不阻塞**请求：任何失败都必须 fail-open（宿主捕获 panic 并熔断插件，见 §3.4）。
 3. v0.2.x 的能力不得回退：套餐/额度/官方用量、凭据自动发现、`/health` 自诊断都必须照旧。
 4. 不改 CPA 源码、不改写请求或响应、不干预路由与固定（pinning）。
-5. **接受信号降级**（本轮确立的边界）：usage 载荷里**没有** Cline 网关级的 `provider_metadata.gateway.routing.finalProvider`。
-   渠道改用 CPA 侧凭据（`Provider` / `AuthID` / `AuthIndex` / `AuthType`）与上游模型 slug（`upstream_model`）表达。
-   网关内部是否发生回退（例如这条请求落到了 `alibaba` / `particle` 而不是 `deepseek`）现在**看不到**；
-   这是已知代价，不是待修的 bug。
+5. **信号分层（本轮更正）**：usage 载荷里**没有** Cline 网关级的 `provider_metadata.gateway.routing.finalProvider`。
+   - 默认部署（P2 关闭）：渠道口径是 **CPA 侧凭据**（`Provider` / `AuthID` / `AuthIndex` / `AuthType`）与上游模型
+     slug（`upstream_model`）；网关内部是否发生回退（例如这条请求落到了 `alibaba` / `particle` 而不是 `deepseek`）
+     **看不到**，这是默认配置下的已知代价。
+   - 打开 P2（`channel_log_enabled: true`，且 CPA 侧已开请求日志）：网关级 `finalProvider` 可见，代价见 §4.2 / §4.3；
+     记录与页面把两套值分列（`cpa_provider` 与 `final_provider`/`gateway_*`），判定基准口径用后者（§2.4）。
+6. **明文 prompt 只在必要时间内存在**。P2 读的日志含客户端明文 prompt，所以 `channel_log_delete_after_read`
+   默认 `true`（fact 落盘后才 unlink 源文件），并且生产上不得把请求日志长期常开（§5.2、§6「仍未做」）。
 
 ## 2. Step 0：三条路径的判定
 
-渠道信息在 CPA 内部有两处：上游响应体里的网关路由块，与宿主自己的 usage 记录。判定如下：
+渠道信息在 CPA 内部有三处可及：宿主自己的 usage 记录、CPA 写下的请求日志（内含上游响应原文）、
+以及插件侧响应拦截钩子（只能看翻译之后的流）。判定如下：
 
 | 路径 | 能否拿到渠道 | 覆盖哪些流量 | 结论 |
 | --- | --- | --- | --- |
-| P1 usage 钩子（`UsagePlugin` / `usage.handle`） | 能：CPA 为这条请求**选中的凭据**（`Provider` + `AuthID` / `AuthIndex` / `AuthType`） | **所有客户端协议**，每请求一次 | **选定** |
-| P2 解析 CPA 自身 request-log | 能（原始报文里有网关路由块） | 全量，但必须先开 request-log | 本部署下是死路：要关 `commercial-mode`，代价与约束 1 矛盾 |
-| P3 响应侧拦截器（`response_stream_interceptor`） | 能：网关级 `finalProvider` | 只有带 `provider_metadata` 帧的响应；实测只在 `/v1/chat/completions` 上出现 | **曾选定，已退役** |
+| P1 usage 钩子（`UsagePlugin` / `usage.handle`） | 能：CPA 为这条请求**选中的凭据**（`Provider` + `AuthID` / `AuthIndex` / `AuthType`） | **所有客户端协议**，每请求一次 | **选定（记录来源）** |
+| P2 解析 CPA 自身 request-log | 能：上游响应原文里的**网关路由块**（`finalProvider` 等） | 全量（每请求一个日志文件），但必须先开 CPA 请求日志并**重启容器** | **Phase 2 已上线（网关渠道来源）** |
+| P3 响应侧拦截器（`response_stream_interceptor`） | 翻译之后看不到渠道块，只有客户端可见流里侥幸出现的帧 | 只在翻译前带 `provider_metadata` 的 `/v1/chat/completions` 响应上有 | **退役（理由已更正）** |
 
-### 2.1 P1：usage 钩子 —— 现在的渠道来源（选定）
+### 2.1 P1：usage 钩子 —— 记录来源（选定）
 
 - `sdk/pluginapi/types.go:1315-1316`：`type UsagePlugin interface { HandleUsage(context.Context, UsageRecord) }`，
   每个请求结束调用一次。
@@ -73,37 +87,72 @@
   这类），`AuthID` / `AuthIndex` / `AuthType` 进一步指到具体凭据（`openai-compatibility:cline2:bcaef0dbf8d3`、
   `7dff1d7b60577eec`、`apikey`）。旧判定把 P1 判为「拿不到渠道」，是因为当时只在找网关的 `provider_metadata`；
   真实答案是 **`UsageRecord` 没有响应体字段，但它有 CPA 侧的落点**，而这正是「这条请求走了哪条渠道」的代理指标。
-- **它拿不到什么**：网关级 `finalProvider`（回退可见性，见 §1 硬约束 5）、成本、`cost_usd`、原始响应帧相关字段
-  （`frames` / `protocol` / `pinned_provider` / `affinity` 等）。
+- **它拿不到什么**：网关级 `finalProvider`（回退可见性，见 §1 约束 5）、网关成本、原始响应帧相关字段
+  （`frames` / `protocol` / `pinned_provider` / `affinity` 等）。这些字段现在由 P2 的 fact 提供（§2.2 / §3.5），
+  但尚未与记录合并。
 - **它的代价**：宿主每完成一个请求调用一次插件（一次 JSON 解码 + 一条记录构建）。没有逐帧工作、不读响应字节、
   不克隆请求体；关闭观测时不声明该能力，这次调用不存在。
 
-### 2.2 P2：解析 CPA 自己的 request-log —— 本部署下是死路
+### 2.2 P2：解析 CPA 自己的 request-log —— 网关级渠道的唯一来源（Phase 2 已上线）
 
-取证过程（结论不随 P1/P3 改变，保留原文）：
+**旧版写错的地方（`docs/request-log-channel-plan.md` §8 指定的更正）**：
 
-1. 打开 request-log：`PUT /v0/management/request-log`，body `{"value":true}`
-   （处理函数 `internal/api/handlers/management/handler.go:426-436 updateBoolField` 只读 `Value *bool`）；
-   reload 日志确认 `request-log: false -> true`。
-2. 打一条真实流式请求（37 帧，含 `provider_metadata`）。
-3. 3 分钟内在 `/opt/cpa/logs` 里**除 `main.log` 外没有出现任何新文件**。
+| 旧版的写法 | 更正后的事实 |
+| --- | --- |
+| 「本部署下是死路」 | 在**不动 `commercial-mode`** 的前提下确实出不来文件（旧版的取证成立）；关掉 `commercial-mode` 并打开 `observability.logs.request-log` 后，P2 是网关级渠道的**唯一**来源，已实现并上线 |
+| 「代价与约束 1 矛盾」 | 不矛盾。约束 1 禁的是**插件回到请求路径**；P2 是旁路读 CPA 写好的日志文件，不声明任何请求侧 / 响应侧 / 翻译能力。真正的代价是 CPA 侧要开一套请求日志与 HTTP 中间件，以及**明文 prompt 落盘**（§4.2 / §4.3） |
 
-根因（源码）：
+**网关确实返回渠道块。** Cline 网关在响应里给出：
 
-- `internal/api/server.go:156 if !cfg.CommercialMode {` —— 非商业模式下才安装 `RequestLoggingMiddleware`；
-  当前部署 `server.commercial-mode: True`。
-- `internal/api/server_options.go:51-52 if cfg.CommercialMode { sdkCfg.RequestLog = false }` —— 商业模式下强制关闭。
+- `provider_metadata.gateway.routing`：`finalProvider` / `resolvedProvider` / `canonicalSlug` / `originalModelId` /
+  `modelAttemptCount` / `totalProviderAttemptCount` / `affinity.pinnedProvider`；
+- `provider_metadata.gateway.cost`。
 
-也就是说 **P2 要生效必须先关 `commercial-mode`**，那会同时打开一套高开销中间件，与约束 1 的目标相反；
-而且「寄生地 tail 别人的请求日志」把解析逻辑绑在 CPA 的日志实现上（字段、轮转、清理策略一变就烂），
-可靠性风险高于收益。已回滚（`PUT` `false`）。
+**clinepass（`api.cline.bot`）没有 `/responses` 端点。** 直连它的 `/responses` 返回
+`404 {"error":"Not Found","success":false}`，四种变体都试过（流式 / 非流式 / 带 `providerOptions` / 带 `metadata`）。
+CPA 给客户端提供 `/v1/responses` 的方式，是把它自己的上游 `chat/completions` 调用**翻译**成 Responses 事件，
+而翻译过程丢掉 `provider_metadata`。所以：
 
-参考事实（若将来 P2 复活）：`internal/config/sdk_config.go:51 RequestLog bool "yaml:\"request-log\""`；
-v8 的嵌套键是 `observability.logs.request-log`（映射表 `internal/config/config_v8.go:59`，示例
-`config.example.yaml:1079`）；文件出现在 `/CLIProxyAPI/logs/`，命名 `<unix>-<requestid>.log`，
-内容保留原始请求/响应（含 `provider_metadata`）；日志清理是 `find … -mtime +1 -delete`。
+- 渠道块的缺失发生在**翻译之后、客户端可见的流**里；
+- `POST /v1/responses`（生产上约 99% 的真实流量）的渠道，只能从 **CPA 自己看到的上游响应**里取，
+  也就是 CPA 的请求日志——这是 P2 存在的唯一理由。
 
-### 2.3 P3：响应侧拦截器 —— 曾选定，已退役（保留取证）
+**前置条件（实测）**：
+
+- 两个开关同时满足才写日志：`observability.logs.request-log: true` **且** `server.commercial-mode: false`。
+  源码：`internal/runtime/executor/helps/logging_helpers.go` 的
+  `requestLogCaptureEnabled = cfg.RequestLog && !cfg.CommercialMode`。
+- **reload 不够，必须重启容器。** 实测：管理接口 reload 成功（日志里出现
+  `config successfully reloaded, triggering client reload`）但**零个** request-log 文件；`docker restart cpa`
+  之后一分钟内出现两个文件。源码原因：中间件与 `sdkCfg.RequestLog` 在 server 构造时装配
+  （`internal/api/server.go`、`internal/api/server_options.go`）。
+- 生产主机：CPA **v8.0.8**（commit `fd48ea6`，build 2026-10-01），容器 `eceasy/cli-proxy-api:latest`，
+  容器内日志目录 `/CLIProxyAPI/logs`（宿主 `/opt/cpa/logs`）。
+
+**旧版取证（保留，结论已按上表修正）**：`PUT /v0/management/request-log`，body `{"value":true}`
+（处理函数 `internal/api/handlers/management/handler.go:426-436 updateBoolField` 只读 `Value *bool`）→
+reload 确认 `request-log: false -> true` → 打一条真实流式请求（37 帧，含 `provider_metadata`）→
+3 分钟内在 `/opt/cpa/logs` 里**除 `main.log` 外没有出现任何新文件**。根因是当时 `server.commercial-mode: True`：
+`internal/api/server.go:156 if !cfg.CommercialMode {` 才安装 `RequestLoggingMiddleware`；
+`internal/api/server_options.go:51-52 if cfg.CommercialMode { sdkCfg.RequestLog = false }` 在商业模式下强制关闭。
+**修正**：这证明的是「不动 `commercial-mode` 时开不出日志」，不是「本部署下此路不通」。
+
+**日志形态（真实，v8.0.8）**：按出现顺序分段 `REQUEST INFO`（`Version` / `URL` / `Method` /
+`Downstream Transport` / `Upstream Transport` / `Timestamp`）、`HEADERS`（`Authorization` 已被 CPA 掩码成
+`sk-4...cnF7`；部分客户端带 `Session_id: session-<uuid>`）、`REQUEST BODY`（**明文 prompt**，实测某条请求
+`Content-Length: 2501640`）、`API REQUEST 1`、可选的 `API ERROR RESPONSE`、`API RESPONSE 1`、`RESPONSE`。
+重试过的请求里会先有错误段、再跟被服务的响应段，解析器必须取**最后一个成功的 `API RESPONSE`**。
+
+文件名：`<路径下划线化>-<YYYY-MM-DDTHHMMSS>-<CPA 内部 UUIDv7 的后 8 位>.log`。这个 id **不**出现在 usage 载荷里，
+所以文件名不是 join key。
+
+**join key（实测，12 条里对上 10 条）**：日志 `HEADERS` 里的 `Session_id` 头是 `session-<uuid>`；
+usage 记录的 `session_id` 是 `codex:session-<uuid>`（同一个 uuid）。匹配规则：该 uuid 出现在记录的 `session_id` 里
+**且** `|log.Timestamp − record.time| ≤ 2s`；实测偏移 **72–218 ms**（记录的时间是 usage 上报的 `RequestedAt`，
+晚于日志的到达时间戳）。**不发 `Session_id` 头的客户端**（其记录形如 `lcp:v1:<hex>`）只能靠 token/时间兜底，
+这条路**还没实现**（§6「仍未做」）。
+
+### 2.3 P3：响应侧拦截器 —— 曾选定，已退役（因果已更正）
 
 **当时为什么选它。** 上游响应字节的可用入口只有这些（除三个被禁的 Response\*Translator 之外）：
 
@@ -128,33 +177,47 @@ v8 的嵌套键是 `observability.logs.request-log`（映射表 `internal/config
 - 分片钩子的 `RequestID` 与 `UsageRecord.RequestID` 是**两个不同的 UUID**，唯一的公共键 `TraceID` 并不在
   `StreamChunkInterceptRequest` 里（`:1216-1247`）——所以渠道记录无法与 usage 记录按键 join，这正是当时
   「渠道信息只从响应帧自给自足地取全」的原因。这条缺口现在由 usage 载荷直接补齐（一条记录里同时有
-  `Provider` 与 `Detail`）。
+  `Provider` 与 `Detail`），而网关渠道由 P2 的 fact 补齐。
 
-当时还证明过「只记上游模型 slug 等于没有渠道」：历史数据里 16,396 条 `deepseek-v4.1-flash` 记录中有 4 条
-`finalProvider` 是 `alibaba`(3) / `particle`(1)，而 `canonicalSlug` 仍然是 `deepseek/deepseek-v4.1-flash`。
-这条证据今天同样成立：现设计里的 `upstream_model` 是**上游模型名**，它替代不了 `finalProvider`，
-回退到哪个渠道仍然不可见（§1 约束 5）。
+**因果更正（本节旧版写错的地方）。** 旧版写「渠道块只出现在 OpenAI `/v1/chat/completions` 的响应帧里」、
+「`POST /v1/responses` 的流式响应一帧都没有 `provider_metadata`」，并把这两句当成上游的事实。正确说法是：
+
+- 渠道块在**上游**（CPA → `api.cline.bot` 的 `chat/completions`）响应里有，而且一直在；
+- CPA 把上游 chat 帧翻译成 Responses 事件时丢掉 `provider_metadata`，所以**客户端可见的** `/v1/responses` 流里
+  一帧都没有；实测 dump 了 34 帧、含渠道帧 0 帧，只有 `response.completed` 带 `usage`；
+- 拦截钩子 `StreamChunkInterceptor` 的注释写明它在 "before downstream delivery"，即**翻译之后**，
+  所以它天然看不到上游原文。这就是「本地看不到渠道块」的原因，不是上游没给。
 
 **退役理由（实测）。**
 
-1. 渠道块只出现在 OpenAI `/v1/chat/completions` 的响应帧里。历史上 70 帧的流里只有 1 帧带 `provider_metadata`
-   （`sudo python3 /tmp/channel_probe.py stream 120 deepseek-flash-1`）。
-2. `POST /v1/responses` 的流式响应**一帧都没有** `provider_metadata`：对它的流 dump 了 **34 帧，含渠道帧为 0**，
-   只有 `response.completed` 带 `usage`。
+1. 渠道块只在翻译前带 `provider_metadata` 的 `/v1/chat/completions` 响应帧里出现；历史上 70 帧的流里只有 1 帧带
+   `provider_metadata`（`sudo python3 /tmp/channel_probe.py stream 120 deepseek-flash-1`）。
+2. 客户端可见的 `POST /v1/responses` 流里，渠道帧为 0（见上，34 帧 0 命中）——拦截器挂在这一侧，等于在
+   生产的主要流量上无效。
 3. 生产主机的流量构成决定性地否掉了它：24 小时内 **5,843 条**请求里约 **99%** 是 `POST /v1/responses`。
-   也就是说旧设计能记到的只有验收探针自己打的 chat 请求，真实流量几乎全部漏掉。
+   也就是说旧设计能记到的只有验收探针自己打的 chat 请求，真实流量几乎全部漏掉。要拿网关渠道，正确的位置是
+   CPA 自己看到上游响应的地方，即请求日志（P2），不是翻译之后的流。
 4. 它还要为探针假阳性埋单：`provider_metadata` 这个词会出现在模型正文里，当时实测到「假阳性吃掉重试预算 →
    放弃该流 → 真正渠道帧被跳过 → 记录丢失」（`parse_failures: 4`）。当时的修正（假阳性只计 `needle_misses`、
-   终止帧当场 `abandon` 计 `unresolved`）随该设计一起移除，记录在此以免重犯。
+   终止帧当场 `abandon` 计 `unresolved`）随该设计一起移除，记录在此以免重犯。P2 的解析器对同一问题的处理是
+   **逐帧 JSON 解码、绝不文本匹配**（§3.5），有测试守着。
+
+**「只记上游模型 slug 等于没有渠道」这条当时同样成立。** 历史数据里 16,396 条 `deepseek-v4.1-flash` 记录中有 4 条
+`finalProvider` 是 `alibaba`(3) / `particle`(1)，而 `canonicalSlug` 仍然是 `deepseek/deepseek-v4.1-flash`。
+这条证据今天仍然成立：记录里的 `upstream_model` 是**上游模型名**，它替代不了 `finalProvider`；回退到哪个渠道
+只有 P2 的 fact 能看到。
 
 ### 2.4 选型结论
 
-- 渠道信号在 CPA 侧就能拿到，不必读响应体：**usage 钩子（P1）是唯一同时满足「全协议覆盖 / 每请求一次 /
-  不回到请求路径 / 可关闭」的来源**，作为唯一渠道来源。
-- 代价是信号降级：网关级 `finalProvider` 不再可见（§1 约束 5）。替代信号是凭据（`Provider` / `AuthID` /
-  `AuthIndex` / `AuthType`）与上游模型 slug（`upstream_model`）。
-- P2 保持放弃：要动 CPA 的 `commercial-mode`，且与日志实现耦合。
-- P3 退役：它唯一的优势（网关级 `finalProvider`）不足以抵消「在 ~99% 流量上完全失效」。
+- **P1（usage 钩子）是记录来源**：全协议覆盖、每请求一次、不回到请求路径、可关闭；回答「CPA 把这条请求交给了哪个凭据」
+  以及 TTFT / token 账。
+- **P2（CPA 请求日志）是网关渠道来源**：唯一能看到 `provider_metadata.gateway.routing` 的位置，Phase 2 已上线；
+  代价是必须打开 CPA 请求日志（明文 prompt 落盘、磁盘增量见 §4.2/§4.3），而且**默认关闭**。
+- **两者目前是并列的，不是合并的**：fact 只写进 `channel-log-<UTC 日期>.jsonl` 并通过
+  `/channel`、`/health` 的 `channel_log` 段暴露（最新 20 条），页面上的渠道口径仍是 P1 的 CPA 凭据。
+  合并（Phase 3：记录改名 `cpa_provider`、`final_provider` 让给网关值、按 join key 并字段）与页面（Phase 4）
+  **在本文对应的实测构建（`0.3.0-dev.180`）里尚未实现**，见 §6「仍未做」。
+- P3 退役不变：它唯一的优势（网关级 `finalProvider`）不足以抵消「在 ~99% 流量上完全失效」。
 
 ## 3. 实现（as-built）
 
@@ -162,17 +225,20 @@ v8 的嵌套键是 `observability.logs.request-log`（映射表 `internal/config
 
 | 位置 | 作用 |
 | --- | --- |
-| `internal/config/config.go` | 5 个键：`channel_observe_enabled`(bool, 默认 true)、`channel_store_dir`(默认 `/CLIProxyAPI/logs/channel-observation`)、`channel_retention_days`(默认 3，上限 30)、`channel_max_size_mb`(默认 512，下限 16)、`channel_baseline_provider`(默认 `deepseek`) |
-| `internal/observation/observation.go` | `usage.handle` 入口（`HandleUsage`）、载荷结构 `usageWire`、记录映射 `buildRecord`、`Recorder` / `Health`、写入队列与重启回填 |
+| `internal/config/config.go` | 9 个 `channel_*` 键：P1 的 5 个（`channel_observe_enabled` 默认 true、`channel_store_dir` 默认 `/CLIProxyAPI/logs/channel-observation`、`channel_retention_days` 默认 3 上限 30、`channel_max_size_mb` 默认 512 下限 16、`channel_baseline_provider` 默认 `deepseek`）与 P2 的 4 个（`channel_log_enabled` 默认 false、`channel_log_dir` 默认 `/CLIProxyAPI/logs`、`channel_log_delete_after_read` 默认 true、`channel_log_min_age_seconds` 默认 5） |
+| `internal/observation/observation.go` | P1 的 `usage.handle` 入口（`HandleUsage`）、载荷结构 `usageWire`、记录映射 `buildRecord`、`Recorder` / `Health`、写入队列与重启回填 |
 | `internal/observation/store.go` | 按 UTC 日一文件 `channel-<YYYY-MM-DD>.jsonl`，异步批量写、按保留天数与体积清理、流式扫描、CSV 导出（`WriteCSV`） |
 | `internal/observation/aggregate.go` | 内存小时环（`bucketSlots = 24*7`）+ 中位数/分位数 + `Summary(window)` |
 | `internal/observation/export.go` | CSV 表头与行（含 `off_baseline` 列，由基线口径算出） |
-| `internal/plugin/plugin.go` | 声明 `ManagementAPI` + 仅当 `channel_observe_enabled` 时声明 `usage_plugin`；方法分发里的 `pluginabi.MethodUsageHandle` case；`LoadConfig`/`Shutdown` 负责启停 recorder |
-| `internal/management/channel.go`、`internal/management/index.html` | `GET /channel`（JSON）、`GET /channel.csv`（CSV）、页面「渠道」区；`/health` 增加 `channel_observation` |
+| `internal/channellog/channellog.go` | P2 的 scanner：轮询、seen 集、健康度、fact 内存环与 fact 文件保留 |
+| `internal/channellog/parse.go` | P2 的日志解析：按 `=== NAME ===` 分段、`data:` 帧 JSON 解码、取最后一个成功响应段 |
+| `internal/channellog/store.go` | P2 的 fact 落盘：`channel-log-<UTC 日期>.jsonl` 一条一行，open/append/close |
+| `internal/plugin/plugin.go` | 声明 `ManagementAPI` + 仅当 `channel_observe_enabled` 时声明 `usage_plugin`；仅当 `channel_log_enabled` 时启动 scanner；方法分发里的 `pluginabi.MethodUsageHandle` case；`LoadConfig`/`Shutdown` 负责启停 |
+| `internal/management/channel.go`、`internal/management/index.html` | `GET /channel`（JSON，含 `channel_log` 段）、`GET /channel.csv`（CSV）、页面「渠道」区；`/health` 增加 `channel_observation` 与 `channel_log` |
 | `cmd/channel-probe/` | 诊断探针（非发布产物）：把宿主交给插件的原始载荷落盘，用来确认渠道 / 凭据对插件是否可见 |
 | `scripts/bench_channel.py` | 计时/CPU 基准脚本，口径仍是旧设计的三态（流式请求的帧间隔 / 解码窗口 / CPA CPU）；现设计的测量需要另写 |
 
-### 3.2 记录映射与热路径
+### 3.2 记录映射与热路径（P1）
 
 热路径只有一件事：**一次 JSON 解码 + 一条记录**，由宿主在每个请求结束后触发。
 
@@ -186,7 +252,7 @@ v8 的嵌套键是 `observability.logs.request-log`（映射表 `internal/config
   | --- | --- |
   | `time` | `RequestedAt`（RFC3339，解析失败用插件时钟） |
   | `request_id` | `RequestID`，空时退回 `TraceID` |
-  | `final_provider` / `resolved_provider` | 同值，都取 `Provider` |
+  | `final_provider` / `resolved_provider` | 同值，都取 `Provider`（**注意：这是 CPA 凭据名，不是网关渠道**；Phase 3 要改名 `cpa_provider`，见 §2.4） |
   | `model` | `Model`（路由名，例如 `cline-pass/deepseek-v4.1-flash`） |
   | `upstream_model` / `canonical_slug` | 同值，都取 `ResponseModel`（上游真实模型，例如 `deepseek/deepseek-v4.1-flash`） |
   | `ttft_ms` | `TTFT` ÷ 1e6（载荷单位是纳秒） |
@@ -198,11 +264,11 @@ v8 的嵌套键是 `observability.logs.request-log`（映射表 `internal/config
 
 - 不落盘 `APIKey`、`Source`（凭据哈希）与载荷里的 `BaseURL`；`Detail` 的七个 token 计数全部落盘。
 
-### 3.3 存储、口径与健康度
+### 3.3 存储、口径与健康度（P1）
 
 - 文件：`<channel_store_dir>/channel-<YYYY-MM-DD>.jsonl`（UTC 日切），一行一条记录，`v` 为 schema 版本（当前 **2**）。
-  目录里不属本插件命名的文件**绝不删除**。异步写入：`queue` → `writeLoop`（`bufio.Writer`，按字节数或定时 flush），
-  队列满只丢弃并计数。
+  目录里不属本插件命名的文件**绝不删除**（P2 的 `channel-log-*.jsonl` 正是靠命名前缀被 reader 跳过）。异步写入：
+  `queue` → `writeLoop`（`bufio.Writer`，按字节数或定时 flush），队列满只丢弃并计数。
 - 保留：先按 `channel_retention_days` 删旧文件，再按 `channel_max_size_mb` 从最旧删到限额；目录打不开只记健康度，不致命。
 - 重启回填：启动时回填最近 24 小时的 JSONL（超过 `warmupByteCap = 96 MB` 截断，`/health` 的 `warmup.truncated` 标出来），
   内存小时桶覆盖滚动的 7 天。
@@ -211,6 +277,7 @@ v8 的嵌套键是 `observability.logs.request-log`（映射表 `internal/config
   `model_attempt_count`、`total_provider_attempt_count`、`protocol`、`frames`、`cost_usd`、`is_byok`、`user_agent`、
   `claude_code_version`、`client_app`、`source_format` 这些键，因为 usage 载荷里没有对应字段。CSV 表头保留其中五列
   （`generation_id` / `original_model_id` / `pinned_provider` / `upstream_request_id` / `protocol`），v2 行留空。
+  这些字段现在由 P2 的 fact 提供（§3.5），但**还没有并进记录**。
 - 页面口径（页面上也写了同样的说明）：
   - **分母是窗口内的记录数**：每条完成的请求一条记录，与协议无关，没有「未识别」这一类（旧设计的
     `resolved` / `unresolved` / `parse_failures` / `needle_misses` / `pending_streams` 随分片探针一起移除）；
@@ -221,10 +288,12 @@ v8 的嵌套键是 `observability.logs.request-log`（映射表 `internal/config
   - 页面区块顺序固定为 **Cline 套餐用量（官方接口） → 概览 → 官方用量明细 → 渠道**，渠道在最后。渠道区内部依次是
     概览卡片、`渠道分布`、`按模型`、时间线（卡片 + 小时表）、`原始记录` 表。成本列与成本卡片已随成本字段一起移除；
     `原始记录` 表显示 时间 / 模型 / 渠道 / 凭据（认证 ID + 索引）/ 失败 / TTFT / 解码 t/s / 输入-输出-缓存读 / 状态 / 会话。
+    **P2 的 fact 与 `channel_log` 目前不在页面里**（页面还没有渲染这一块，Phase 4 未做）。
   - 「偏离基准渠道」= `final_provider` 与 `channel_baseline_provider` 不区分大小写地不等，**读时**判定
     （`aggregate.go` 里 `provider != "" && baseline != "" && !strings.EqualFold(provider, baseline)`，记录本身不落盘
     `off_baseline`），所以改基准会立刻改变历史窗口的比例。页面上的基线名取自 payload 的 `baseline_provider`，
-    **页面里不硬编码渠道名**。
+    **页面里不硬编码渠道名**。注意它比的是记录里的 `final_provider`——**当前是 CPA 凭据名**，不是网关渠道；
+    Phase 3 把 `final_provider` 让给网关值之后，这个判定才会落在真渠道上（plan §5）。
   - **当前生产上的口径冲突（未决）**：配置的基准仍是 `deepseek`，而 CPA 侧的渠道名是
     `openai-compatible-cline1/2/3`，两者不可能相等，于是窗口内每一条都算偏离（验收时 1h 窗口 6 条全部
     `off_baseline=yes`）。基准该怎么定（改基准名、还是按 `upstream_model` 重新定义「官渠」）**尚未决定**。
@@ -257,28 +326,113 @@ v8 的嵌套键是 `observability.logs.request-log`（映射表 `internal/config
 
 - 插件返回的信封恒为 `{"ok":true,"result":{}}`：不改写、不阻塞、不参与请求处理；回调发生在请求结束之后。
 - 观测层的任何错误都在插件内部消化（`HandleUsage` 永不返回 error）；观测关闭时能力为 nil，宿主根本不注册 adapter。
+- P2 的 scanner 同样 fail-open：目录不存在、权限不足、解析失败、落盘失败，一律只记健康度，不删源文件、不影响请求。
 - v0.2.x 的页面与接口在测试里仍然被断言（页面不得出现渠道以外的本地统计元素，见
   `internal/management/management_test.go`）。
 
+### 3.5 CPA 请求日志 reader（P2，Phase 2 as-built）
+
+插件构建 `0.3.0-dev.180`；scanner 只在 `channel_log_enabled: true` 时启动（关闭时不启协程、不访问目录）。
+
+配置键：
+
+| 键 | 默认值 | 说明 |
+| --- | --- | --- |
+| `channel_log_enabled` | `false` | 扫描开关。默认关闭是刻意的：源日志含客户端**明文 prompt**，且只有 CPA 侧同时开了请求日志才会写文件 |
+| `channel_log_dir` | `/CLIProxyAPI/logs` | CPA 请求日志目录（容器内路径；宿主是 `/opt/cpa/logs`）。只扫描该目录**顶层**，不递归子目录 |
+| `channel_log_delete_after_read` | `true` | fact 落盘后 unlink 源日志；解析失败或落盘失败的文件不删 |
+| `channel_log_min_age_seconds` | `5` | 只读 mtime 早于该秒数的文件，避免读到 CPA 正在写的半个请求 |
+
+扫描与解析：
+
+- 每 **2 s** 列一次目录，只认顶层 `*.log`；**跳过 `main.log`**（CPA 自己的进程日志，不是请求日志）；
+  子目录一律不进（插件自己的 JSONL 在 `logs/channel-observation/`，正好靠这条隔开）。
+- mtime 在最近 5 s 内的文件跳过（`skipped_young`）；读前读后比对大小，变大的文件留到下一轮（`skipped_growing`）。
+- 流式读取用 **1 MiB** `bufio.Reader`：实测一个 6,292,038 字节的日志解析期间分配 **1,088,296** 字节，
+  单次最大读取 **1,048,576** 字节；`io.ReadAll` 等价物会分配 **14,972,200** 字节。
+- 按 `=== NAME ===` 分段；`API RESPONSE n` 段里的 SSE 只取 `data:` 行、逐帧 JSON 解码，读
+  `choices[].delta.provider_metadata`，非流式别名 `choices[].message.provider_metadata` 同样取；
+  **绝不做文本匹配**——正文里出现 `provider_metadata` 字样必须产出空渠道，有测试守着这条。
+- 有 `API ERROR RESPONSE` 段时记 `had_error_response: true`，但仍然取**最后一个成功的** `API RESPONSE` 段；
+  尝试次数记在 `attempts_seen`。
+
+fact 落盘：
+
+- 追加到 `<channel_store_dir>/channel-log-<UTC 日期>.jsonl`，一行一条。前缀刻意与记录文件
+  `channel-<YYYY-MM-DD>.jsonl` 不同，好让观测 store 的 reader **主动跳过**它们（`store.go` 里写明这是决定而不是巧合）。
+- `channel_log_delete_after_read: true` 时，fact 落盘（并 close）之后才 unlink 源日志；落盘失败就保留文件并计数。
+- fact 文件按 `channel_retention_days` 同一个时钟过期：文件名里的 UTC 日期早于保留窗口即删。
+
+fact 键（每条都必定出现，日志没给出的字段留空而不是填默认值）：
+
+`time, path, method, session_id, session_uuid, has_session, final_provider, resolved_provider, canonical_slug,
+original_model_id, pinned_provider, affinity_outcome, model_attempt_count, total_provider_attempt_count,
+fallbacks_available, gateway_cost, frames, attempts_seen, had_error_response, source_file, parsed_at`
+
+健康度（`channel_log.health`，字段恰好是这些）：
+
+`enabled, directory, scanned, parsed, with_channel, without_channel, parse_failures, deleted, deleted_bytes,
+skipped_young, skipped_growing, skipped_seen, skip_main_log, pruned, pruned_bytes, last_fact_at, last_error,
+last_error_at, pending_files`
+
+实测一轮读 223 个文件：`parsed 223`、`parse_failures 0`、`with_channel 213`、`without_channel 10`。
+「没有渠道」是解析器能给出的正常答案（失败或被重试覆盖的请求本来就没有 routing 块），不是错误。
+
+试运行中修掉的缺陷（留档）：
+
+- 没有「已读」集合时，每一趟轮询都会重新解析同一批文件（约 210 个文件产出 **2702** 条 fact），把所有比例成倍放大。
+  修法：seen 集以 `name|size|mtime` 为键，命中即跳过（`skipped_seen`）；开启删除时顺带把这些已落盘的文件消费掉。
+
 ## 4. 性能数据
 
-### 4.1 现设计（usage 钩子）的成本模型 —— 实测待做
+### 4.1 P1（usage 钩子）的成本模型 —— 量化实测待做
 
 - 每次**完成的请求**一次 ABI 调用：插件侧一次 JSON 解码 + 一条记录构建 + 一次入队。没有逐帧工作、不读响应字节、
   不克隆请求体、不做探针。
 - 调用点在请求结束之后，不在请求处理路径上，因此不影响任何请求的时延与吞吐。
 - 观测关闭时不声明 `usage_plugin`，宿主不注册 usage 适配层，这次调用不存在（等价于没装插件）。
-- **量化实测未做**：下面 §4.2 的三态数字属于已退役的流式分片设计，不能当作现设计的性能证据。现有的
+- **量化实测未做**：§4.4 的三态数字属于已退役的流式分片设计，不能当作现设计的性能证据。现有的
   `scripts/bench_channel.py` 测的是流式请求的帧间隔 / 解码窗口 / CPA CPU（旧口径），现设计需要一套按**请求**计的
   基准才能量出「每请求一次回调」的成本。
 
-### 4.2 旧设计的三态实测（历史，保留）
+### 4.2 CPA 请求日志的体积（V3，实测）
+
+- 单个请求日志：短请求 **16–47 KB**；**长上下文请求 4.0–5.7 MB**（请求体约 2.5 MB + 上游 SSE 约 3 MB）。
+- 实测 10 个文件 = **31.2 MB**，在约 2.5 分钟内产生；真实流量下目录 5 分钟长了约 **40 MB**（约 8 MB/分钟）。
+- 按今天的请求构成（**743** 条 input > 100k token）估算：日增量约 **3.5 GB/天**，突发时 **≥10 GB/天**。
+  试运行期间生产把 `logs-max-total-size-mb` 设为 **2048**。
+- **目录上限与 `main.log` 共享**：CPA 的清理器按 `logs-max-total-size-mb`（默认 10 MB）清理 `*.log`，
+  所以上限不提的话，请求日志会在几秒内被删掉（这也是必须同时调这个键的原因）。
+
+### 4.3 打开请求日志的代价对照（V4，实测 2026-10-02）
+
+方法：三个阶段各取每分钟一个样本；指标是插件自己的 1 小时窗口聚合加 `docker stats`。
+
+| 阶段 | 时间（UTC） | 样本 | 请求（中位） | 失败 | TTFT p50（中位） | 解码 p50（中位） | 容器 CPU 中位（峰值） | 内存中位（峰值） |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| ① 切换前 | 14:10–14:17 | 7 | 423 | 314（74.2%） | 590.5 ms | 143.0 t/s | 0.01%（5.79%） | 158.4 MiB（179.5 MiB） |
+| ② 打开日志 | 14:39–15:08 | 30 | 778 | 494（62.6%） | 1453.5 ms | 177.9 t/s | 0.38%（144.83%） | 154.9 MiB（202.0 MiB） |
+| ③ 再次关闭（干净回滚） | 15:12–15:42 | 24（去重后） | 869 | 536（61.7%） | 1690.0 ms | 180.5 t/s | 0.03%（48.67%） | 140.3 MiB（183.1 MiB） |
+
+**怎么读这张表（诚实版）**：① 是另一个流量档位（① 到 ③ 之间流量大约翻了倍），所以有意义的对照是 **② vs ③**：
+
+- 解码 p50 在**打开日志时低 1.4%**（177.9 vs 180.5 t/s）；
+- TTFT p50 在打开日志时**更低**（1453.5 vs 1690.0 ms）——在这个分辨率下看不到延迟惩罚；
+- 容器 CPU 中位高 **0.35 个百分点**（0.38% vs 0.03%），但峰值高得多（144.83% vs 48.67%）；
+- 内存中位高 **14.6 MiB**（154.9 vs 140.3 MiB），峰值 202.0 vs 183.1 MiB；
+- 失败率（约 62%）由上游限流驱动，两个阶段一致，**不能归因于日志**（§5.2 的 429 原文与 §3.3 的失败口径）。
+
+**必须一起读的限制**：① 只有 7 个样本（开关在这条序列跑完之前就生效了）；③ 有 24 个有效样本（按分钟去重后；最初误起两个采样进程，同一分钟出现两行）；关闭相位最初还跑着
+重复的采样进程（同一分钟的重复行在统计时按每分钟一行去重）；插件的窗口聚合成型慢。所以这张表回答的是
+「打开日志大概要付多少代价」这个**数量级**问题，不是精确基准；要精确数字需要 §6「仍未做」里的全长度基准。
+
+### 4.4 旧设计的三态实测（历史，保留）
 
 脚本：`scripts/bench_channel.py`（oracle 上 `sudo python3 /tmp/bench_tristate.py --label NAME --ctx-chars N --max-tokens M --runs R`），
 测的是 CPA → `deepseek-flash-1` 的流式链路：usage token 数、SSE 帧分类计数、TTFT、解码窗口吞吐、
 相邻文本帧间隔 p50/p90、以及 `cpa` 容器的 CPU（运行中 median/mean/max + 运行前 5 秒空闲 median）。
 
-**§4.2.1 基线（无插件）**
+**§4.4.1 基线（无插件）**
 
 | 场景 | ctx chars | prompt tokens | 总帧 | 文本帧 | 静默帧 | TTFT | 解码窗口 | 吞吐 | 帧间隔 p50 | CPU（空闲 → 运行 median） |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -294,7 +448,7 @@ v8 的嵌套键是 `observability.logs.request-log`（映射表 `internal/config
   4.78%–14.52% 之间漂移，所以看 CPU 要**减空闲中位数**，不看绝对值。
 - 输入侧比例约 0.19 token/char（4,000 chars → 800 tokens；227,000 → 42,612，线性无截断）。
 
-**§4.2.2 观测开启 vs 关闭（旧设计复测）**
+**§4.4.2 观测开启 vs 关闭（旧设计复测）**
 
 **方法**：先做过一轮顺序相位（先关后开，各 1 轮），short 段给出 −6.9% 的吞吐差；但同机负载漂移足以解释它
 （空闲 CPU 中位数在同一台机上从 3.7% 漂到 46%；CPU 配对差散布在 −61…+34.6 个百分点之间）。
@@ -312,7 +466,7 @@ v8 的嵌套键是 `observability.logs.request-log`（映射表 `internal/config
 
 **当时的判定：通过（当时可留在生产开启）。** 判定线是吞吐 ≥ 基线 95%、TTFT ≤ 基线 110%：
 观测开启相对关闭的吞吐中位差 −1.88%（中位比值 0.979），TTFT 中位差 +1.98%，都落在同状态内 run 间离散度之内。
-该判定随流式分片设计一起退役；现设计的成本模型见 §4.1。
+该判定随流式分片设计一起退役；P1 的成本模型见 §4.1，P2 的代价见 §4.3。
 
 读这份表时必须一起看三件事：
 
@@ -322,14 +476,16 @@ v8 的嵌套键是 `observability.logs.request-log`（映射表 `internal/config
    不能拿它当结论。要拿 CPU 数字，必须换独占环境重测。
 3. 每次 PATCH 重载都会让 `written` 等计数器归零，`warmup` 则从磁盘回填，所以「计数器归零」不是数据丢失。
 
-### 4.3 真实流量取证：为什么流式分片路径必须退役
+### 4.5 真实流量取证：为什么流式分片路径必须退役
 
 旧设计在 A/B 期间暴露了 `/health` 的 `parse_failures: 4`、`pending_streams: 18`、
 `last_parse_error: provider_metadata present but no routing block`。追下去发现这不是上游的错，而是两类真实流量：
 
-1. **Responses API 永远没有渠道帧**：`POST /v1/responses` 是真实的 clinepass 流量（日志里
+1. **客户端可见的 Responses 流永远没有渠道帧**：`POST /v1/responses` 是真实的 clinepass 流量（日志里
    `session=codex:se… model=deepseek-flash-2`，每分钟若干条）。对它的流式响应 dump 了 **34 帧，含
    `provider_metadata` 的帧数为 0**，只有 `response.completed` 带 usage。
+   **因果更正**：这不是「上游没给渠道块」，而是 CPA 把上游 chat 帧翻译成 Responses 事件时丢掉了它
+   （上游 `api.cline.bot` 连 `/responses` 端点都没有，直连 404）；拦截器挂在翻译之后，所以看不到。
 2. **needle 假阳性**：`provider_metadata` 这个词也会出现在模型自己的输出文本里；这种帧解不出 routing，
    若按「解析失败 → 重试 → 超预算放弃」处理，会让该流真正的路由帧被永久跳过，**记录直接丢失**。
 
@@ -338,13 +494,14 @@ v8 的嵌套键是 `observability.logs.request-log`（映射表 `internal/config
 
 把第 1 条放到生产规模上看，结论就变了：生产主机 24 小时内 **5,843 条**请求中约 **99%** 是 `POST /v1/responses`。
 旧设计在这 99% 的流量上一条都记不到——它记到的只有验收探针自己发的 chat 请求。这就是改用 usage 钩子的直接原因
-（改用后的覆盖验证见 §6）。
+（改用后的覆盖验证见 §6），也是为什么网关渠道只能走 P2：唯一还留着上游响应原文的位置就是 CPA 的请求日志。
 
 ## 5. 部署与回滚
 
 - 目标：`/opt/cpa/plugins/linux/arm64/clinepass-channel-monitor.so`（`abi_version=1`、`schema_version=6`）。
   替换 `.so` 不需要重启容器；只写本插件的 `.so`。
-- 前置：备份 `/opt/cpa/config.yaml` 并记录 sha256；配置只做**增量**改动（新增 5 个 `channel_*` 键），改动后给出 config diff。
+- 前置：备份 `/opt/cpa/config.yaml` 并记录 sha256；配置只做**增量**改动（P1 新增 5 个键、P2 新增 4 个键），
+  改动后给出 config diff。
 - 启用/重载：换 `.so` 后 `PATCH /v0/management/plugins/clinepass-channel-monitor/enabled {"enabled":false}` 再 `{"enabled":true}`；
   配置改动走 `PATCH …/config`（带完整 config 对象）；开关落在 `config.yaml` 的 `plugins.configs.clinepass-channel-monitor.enabled`。
 - **正确顺序（2026-10-02 实测通过）**：装新 `.so`（旧版本继续运行）→ `PATCH enabled` 触发热重载 → 回读
@@ -365,11 +522,19 @@ v8 的嵌套键是 `observability.logs.request-log`（映射表 `internal/config
   否则 BSD `sort`（macOS）与 glibc `sort`（服务器）排序不同会得到假不一致：
   `find internal cmd -type f \( -name '*.go' -o -name '*.html' \) | LC_ALL=C sort | xargs sha256sum | sha256sum`。
   整树比对还要排掉本地新改、未同步的文件（如 `docs/`、`README.md`）。
+- **P2 的前置动作（CPA 侧，必须重启容器）**：在 `/opt/cpa/config.yaml` 里设
+  `observability.logs.request-log: true`、`server.commercial-mode: false`，并把 `logs-max-total-size-mb`
+  提到试运行所需（本次 2048；默认 10 MB 会让日志几秒内被清理器删掉）。改完 **`docker restart cpa`**：
+  实测 reload 成功但零文件，重启后一分钟内出现两个文件（§2.2）。插件侧再设 `channel_log_enabled: true`。
 - 验收口径（本轮实际做到的与未做到的对照见 §6）：面板能回答窗口内的请求数与偏离比例；抽查原始记录与宿主 usage
-  数据库对照；CSV 含渠道字段；关掉观测（`channel_observe_enabled=false`）后请求转发照旧；磁盘/写入失败时转发照旧。
+  数据库对照；CSV 含渠道字段；关掉观测（`channel_observe_enabled=false`）后请求转发照旧；磁盘/写入失败时转发照旧；
+  P2 侧：源日志被解析成 fact、fact 落盘后源日志被 unlink、恢复上限后 CPA 把请求日志删掉。
 - 回滚：恢复原 `.so` + 把 `channel_observe_enabled` 置 false（或删除新增配置键）→ 重载 → 确认
   `registered: true` 且 `/health` 的 `channel_observation.enabled` 为 false，页面显示「渠道观测未开启」。
   历史 JSONL 不需要动：reader 兼容 `v: 1` 与 `v: 2` 两种行。
+  **P2 的回滚分两段**：插件侧 `channel_log_enabled: false`（scanner 停）；CPA 侧把
+  `request-log: false`、`logs-max-total-size-mb: 10`、`commercial-mode: true` 写回配置并**重启容器**。
+  只做插件侧不会删掉已经写在盘上的请求日志，只要 CPA 侧还开着，日志就会继续落盘。
 
 ### 5.1 2026-10-02 第二轮部署的补充教训
 
@@ -380,11 +545,34 @@ v8 的嵌套键是 `observability.logs.request-log`（映射表 `internal/config
   而已加载实例仍是旧版（实测 `path` 指 `0.3.0-dev.177`、`/health` 仍回 `0.3.0-dev.176`，`main.log` 没有对应的
   `plugin hot reloaded` 行）。两者版本号不一致时用 `sudo docker restart cpa` 兜底（本次即如此恢复）。
 
+### 5.2 2026-10-02 请求日志试运行（P2）的事故与教训
+
+- **回滚脚本的 payload 写错，「回滚演练」静默地什么都没做。** 第一版脚本用
+  `{"request-log":false}`，而管理接口要求 `{"value":false}`（`updateBoolField` 绑定的是 `{"value": …}`）。
+  于是演练看着像成功、实际开关没关；如果按原计划让 90 分钟看门狗去关，结果会是**请求日志留在开启状态、
+  明文 prompt 继续落盘**。它是在回读实时配置时被抓到的。
+- **修正后的回滚脚本已跑过并核对**：正确 payload + 对 `commercial-mode` 做**不依赖缩进**的改写
+  （管理接口 PATCH 会重新序列化 `config.yaml`，把 4 空格缩进规范化成 2 空格，纯文本改法会失效）→
+  回读确认 `request-log: false`、`logs-max-total-size-mb: 10`、`commercial-mode: true`、45 s 内没有新日志文件，
+  并且被恢复的上限把约 **1 GB** 请求日志清理掉。
+- **管理 PATCH 会重写整份 `config.yaml`，而且不落所有键**：`request-log` / `logs-max-total-size-mb`
+  必须同时写进文件，否则之后一次重启会把它们悄悄丢掉。比对该用**语义比较**（`yaml.safe_load` + 只比对改动的键），
+  不要文本 diff——语义比较还顺带避免把凭据段落打印出来。
+- **热重载在这个环境里反复换不上新构建**：插件列表显示的是新文件，而 `/health` 仍报旧版本，连续三次如此；
+  每次可靠的路径都是 `docker restart cpa`（与 §5.1 第二条同源）。
+- **当天的 502 风暴**：上游限流，原文
+  `failed to generate stream from Vercel: … status 429 … Rate limit exceeded for deepseek/deepseek-v4.1-flash: this team's limit of 100000000 input tokens per minute (per region) was reached`，
+  CPA 把它以 502 返回给客户端。官方 usage 记录只含**成功计费**请求，所以失败无法归因到某个上游渠道；
+  §4.3 里两个阶段的约 62% 失败率就是它，与是否打开请求日志无关。
+
 ## 6. 验收清单（2026-10-02 复验）
 
-宿主：生产主机；插件构建 `0.3.0-dev.173`；旧版本 `0.3.0-dev.171`。未记录该生产主机的 CPA 版本号。
+宿主：生产主机；插件构建 `0.3.0-dev.180`（P2）/ `0.3.0-dev.173`（P1 那轮）；
+生产宿主 CPA **v8.0.8**（commit `fd48ea6`，build 2026-10-01）——旧清单里「生产宿主的 CPA 版本号未记录」这一条就此关闭。
 
-（旧设计 2026-09 的那轮 Step 2 验收结论随分片探针一起退役，其性能数字保留在 §4.2；下面是 usage 钩子这一版的复验。）
+（旧设计 2026-09 的那轮 Step 2 验收结论随分片探针一起退役，其性能数字保留在 §4.4；下面是 P1 与 P2 各一轮的复验。）
+
+**P1（usage 钩子，构建 `0.3.0-dev.173`）**
 
 - [x] 部署与热重载：新 `.so` 装上时旧版本继续运行，宿主自行退休旧版本
       （`pluginhost: plugin hot reloaded … active_version=0.3.0-dev.173 retired_version=0.3.0-dev.171`），
@@ -397,6 +585,7 @@ v8 的嵌套键是 `observability.logs.request-log`（映射表 `internal/config
       `duration_ms=3129`、`tokens_per_second=120.76`、`input_tokens=158431`、`output_tokens=203`、
       `cache_read_tokens=158208`、`session_id=codex:179f84c9-…`；同窗口另一条 `session_id=lcp:v1:77c8c3ca…` 为
       `input_tokens=37 output_tokens=13 ttft_ms=707 duration_ms=1288`。
+      注意这里的 `final_provider` 装的是 **CPA 凭据名**，不是网关渠道（§2.2、§3.2）。
 - [x] 窗口内的渠道分布：`openai-compatible-cline2` 3 条、`openai-compatible-cline1` 2 条、
       `openai-compatible-cline3` 1 条（与上面 6 条一致）。
 - [x] CSV 导出：`X-Record-Count: 6`，表头含 `time_utc … final_provider,resolved_provider,pinned_provider,
@@ -411,23 +600,58 @@ v8 的嵌套键是 `observability.logs.request-log`（映射表 `internal/config
       `openai-compatible-cline3` 205、`openai-compatible-cline2` 173）。
 - [x] 「偏离基准渠道」是读时判定：窗口内 6 条记录全部 `off_baseline=yes`，因为基准仍是 `deepseek`、渠道名是
       `openai-compatible-cline*`（口径冲突本身**未决**，见 §3.3）。
-- [x] README 更新：能力、口径、代价、`/health` 字段、排障、升级/回滚、性能（旧数字标注为历史）。
 
-**本轮仍未做（不算通过）**：
+**P2（CPA 请求日志，构建 `0.3.0-dev.180`）**
 
-- [ ] **现设计（usage 钩子）的性能实测**：§4.2 的三态数字属于退役的流式分片设计，现设计只有成本模型（§4.1），
-      没有数字；`scripts/bench_channel.py` 的口径也要改。
+- [x] **V1 日志真的出来了（含更正）**：两个开关同时满足才写文件；管理接口 reload 成功（`config successfully
+      reloaded, triggering client reload`）但**零个** request-log 文件，`docker restart cpa` 后一分钟内出现两个——
+      「reload 就够」是错的，已写入 §2.2 / §5。
+- [x] **V2 join key 存在**：日志 `Session_id: session-<uuid>` ↔ 记录 `session_id: codex:session-<uuid>`，
+      规则是 uuid 命中 **且** `|log.Timestamp − record.time| ≤ 2s`；实测 **12 条里对上 10 条**，偏移 **72–218 ms**。
+      未覆盖：不发 `Session_id` 头的客户端（见「仍未做」）。
+- [x] **V3 体积与增量**：单文件短 16–47 KB、长上下文 4.0–5.7 MB；10 个文件 31.2 MB / 约 2.5 分钟；
+      约 8 MB/分钟；日增量约 3.5 GB（按 743 条 >100k input token 的请求），突发 ≥10 GB。数字见 §4.2。
+- [x] **V4 代价对照**：三阶段分钟采样，② vs ③ 解码 p50 −1.4%、TTFT p50 无可见惩罚、CPU 中位 +0.35 个百分点、
+      内存中位 +16 MiB；失败率约 62% 由上游限流驱动、两阶段一致，不归因于日志。数字与限制见 §4.3。
+- [x] **结构化解析、不误判**：`provider_metadata` 只按 JSON 帧解码取值，正文里出现该字样的请求产出空渠道，
+      有测试守着（`internal/channellog/parse_test.go`）。
+- [x] **归因正确性（失败请求渠道留空）**：实测一轮读 223 个文件得 `with_channel 213 / without_channel 10`、
+      `parse_failures 0`；没有 routing 块就产出空渠道，而不是猜一个渠道名。
+- [x] **磁盘不随时长增长**：`channel_log_delete_after_read` 默认 true，fact 落盘后 unlink 源日志；
+      恢复 `logs-max-total-size-mb: 10` 后 CPA 把约 1 GB 请求日志清理掉。目录 8 MB/分钟的增速是清理之前的观测值。
+- [x] **回滚演练（先失败、修正后通过）**：第一版脚本 payload 错、静默无效（§5.2）；修正后回读
+      `request-log: false`、`logs-max-total-size-mb: 10`、`commercial-mode: true`，45 s 内无新日志文件。
+- [x] **文档更正**：§2.2 / §2.3 已按 `docs/request-log-channel-plan.md` §8 改写（「死路」与「上游没有渠道块」
+      两处），README 同步。
+
+**仍未做（本轮明确未完成）**
+
+- [ ] **不带 `Session_id` 的客户端（记录形如 `lcp:v1:<hex>`）的 token/时间兜底 join**：未实现，
+      这些请求目前没有渠道 fact。
+- [x] **合并与页面（Phase 3 / Phase 4）**：构建 `0.3.0-dev.182` 已完成——schema 升 v3，凭据改名 `cpa_provider`，
+      网关值占用 `final_provider`/`resolved_provider`（另有 `gateway_slug`/`gateway_attempts`/`gateway_cost`/`channel_source`），
+      新增 `summary.unresolved_requests` 与 `summary.cpa_providers[]`，CSV 同步；页面的「真实渠道」表按网关维度、原始记录表
+      增加「真实渠道 / 尝试 / CPA 凭据」三列，标题与卡片写明分母是「能判定渠道」的条数。生产实测 24h 窗口：
+      `resolved 194 / unresolved 2350`（日志只在 23:00–23:11 开着，所以覆盖率就是这段），网关渠道全部 `deepseek`、
+      偏离 0；凭据维度 `cline2 950（失败 420）/ cline3 798（345）/ cline1 772（418）`。
+      **join 的关键修正**：最初实现只读扫描器内存里的 fact 环，重启后为空、且只留最新 200 条，24h 窗口判定不出来；
+      改为读持久化的 `channel-log-<UTC 日期>.jsonl`（5 秒缓存 + 与内存环按 `source_file|time` 去重）后才对上 194 条。
+- [ ] **全长度性能基准**：§4.3 是三阶段分钟采样的数量级结论，不是基准（① 只有 7 个样本、③ 只有 24 个有效样本、
+      关闭相位最初跑着重复采样进程、窗口聚合成型慢）。
+- [ ] **是否长期开启请求日志**：未决定。它含明文 prompt，日增量约 3.5 GB，且必须重启容器才能生效。
+
+**其余仍未做（本次材料没有触及，保持原状）**
+
 - [ ] **基准语义决定**：`channel_baseline_provider` 该取什么值（渠道名？`upstream_model` 口径？），未决定，
       现象与影响见 §3.3。
-- [ ] **存储里仍有旧设计的 `v: 1` 行**（探针 / 流式时代写下），reader 仍读、页面按空值显示；是否清理未决定，
-      也解释了 CSV 里那几列 v1 数据为空的原因。
+- [ ] **pin 验证**：plan §9 要求给出出站 body 里 `providerOptions.gateway.only` 的实际值，本次材料没有这个值。
+- [ ] **存储里仍有旧设计的 `v: 1` 行**（探针 / 流式时代写下），reader 仍读、页面按空值显示；是否清理未决定。
 - [ ] **插件侧 6 条 vs 宿主 usage DB 607 条的数量级差未解释**：采集窗口起点、观测开启时刻、记录落盘时序等原因
       本轮没有取证。
 - [ ] **TTFT / `Latency` 的起点未取证**：不知是否含「客户端 → CPA 排队 → 连上游」那段，因此新旧口径的 TTFT
       不可直接比较。
 - [ ] **fail-open 演练与原始记录逐字段抽查未在新设计下重做**：旧设计做过的两类演练（把 `channel_store_dir`
       指向普通文件、逐字段对照原始响应帧）本轮没有重跑。
-- [ ] **生产宿主的 CPA 版本号未记录**，因此无法声明新设计在哪些宿主版本上受支持。
 - [ ] `registry.json` 版本号与 release notes（若发版）——是否发版待确认。
 
 ### 6.1 第二轮（2026-10-02 晚）：上游渠道维度 + 失败口径
@@ -454,4 +678,4 @@ v8 的嵌套键是 `observability.logs.request-log`（映射表 `internal/config
       是否做日志侧归因（解析 `main.log`）未决定。
 - [ ] 「基准渠道」语义仍未决定：现在 24h 窗口 935/959 全部算偏离，因为基准 `deepseek` 与渠道名
       `openai-compatible-cline*` 不可能相等。
-- [ ] 现设计性能实测、`v: 1` 旧行清理、TTFT 起点取证、fail-open 演练、生产宿主 CPA 版本号——见上一条清单。
+- [ ] 现设计性能实测、`v: 1` 旧行清理、TTFT 起点取证、fail-open 演练——见上面两张清单。

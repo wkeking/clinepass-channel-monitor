@@ -1,5 +1,5 @@
 // Package state holds the process-wide runtime state: the active configuration, the
-// Cline usage poller, and the channel-observation collector.
+// Cline usage poller, the channel-observation collector and the CPA request-log scanner.
 //
 // The plugin package publishes it on load and on every reconfigure; the management API
 // reads it. Keeping it in its own package is what lets those packages depend on one
@@ -9,16 +9,18 @@ package state
 import (
 	"sync"
 
+	"github.com/wkeking/clinepass-channel-monitor/internal/channellog"
 	"github.com/wkeking/clinepass-channel-monitor/internal/config"
 	"github.com/wkeking/clinepass-channel-monitor/internal/observation"
 	"github.com/wkeking/clinepass-channel-monitor/internal/plan"
 )
 
 var (
-	mu  sync.RWMutex
-	cfg = config.Default()
-	pol *plan.Poller
-	obs *observation.Recorder
+	mu   sync.RWMutex
+	cfg  = config.Default()
+	pol  *plan.Poller
+	obs  *observation.Recorder
+	clog *channellog.Scanner
 )
 
 // Config returns the active configuration (defaults before the first load).
@@ -60,5 +62,19 @@ func SetPlan(value *plan.Poller) {
 func SetObservation(value *observation.Recorder) {
 	mu.Lock()
 	obs = value
+	mu.Unlock()
+}
+
+// ChannelLog returns the CPA request-log scanner, or nil when it is switched off.
+func ChannelLog() *channellog.Scanner {
+	mu.RLock()
+	defer mu.RUnlock()
+	return clog
+}
+
+// SetChannelLog publishes the scanner.
+func SetChannelLog(value *channellog.Scanner) {
+	mu.Lock()
+	clog = value
 	mu.Unlock()
 }

@@ -8,6 +8,10 @@
 //
 // It declares no request-side capability and no response translator: nothing on the request
 // path needs cloning or handing across the ABI.
+//
+// When CPA's request log is switched on, the plugin also polls it for the gateway channel
+// block the Responses translation drops (internal/channellog). That scanner is off by default,
+// and it is not on the request path either: it reads files CPA has already finished writing.
 package plugin
 
 import (
@@ -16,12 +20,14 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 
 	"github.com/wkeking/clinepass-channel-monitor/internal/abi"
 	"github.com/wkeking/clinepass-channel-monitor/internal/buildinfo"
+	"github.com/wkeking/clinepass-channel-monitor/internal/channellog"
 	"github.com/wkeking/clinepass-channel-monitor/internal/config"
 	"github.com/wkeking/clinepass-channel-monitor/internal/hostapi"
 	"github.com/wkeking/clinepass-channel-monitor/internal/management"
@@ -77,11 +83,13 @@ func LoadConfig(raw []byte) {
 		state.SetPlan(nil)
 	}
 	stopObservation()
+	stopChannelLog()
 	state.SetConfig(cfg)
 	if cfg.PlanEnabled {
 		state.SetPlan(plan.Start(cfg))
 	}
 	startObservation(cfg)
+	startChannelLog(cfg)
 	hostapi.LogAsync("info", buildinfo.ID+": configured", map[string]string{
 		"plan_enabled":      strconv.FormatBool(cfg.PlanEnabled),
 		"plan_refresh":      cfg.PlanRefresh.Or(config.DefaultPlanRefresh).String(),
@@ -90,6 +98,8 @@ func LoadConfig(raw []byte) {
 		"channel_observe":   strconv.FormatBool(cfg.ChannelObserveEnabled),
 		"channel_store_dir": cfg.ChannelStoreDir,
 		"channel_baseline":  cfg.ChannelBaselineProvider,
+		"channel_log":       strconv.FormatBool(cfg.ChannelLogEnabled),
+		"channel_log_dir":   cfg.ChannelLogDir,
 	})
 }
 
@@ -125,6 +135,13 @@ func startObservation(cfg config.Config) {
 		RetentionDays: cfg.ChannelRetentionDays,
 		MaxSizeMB:     cfg.ChannelMaxSizeMB,
 		Baseline:      cfg.ChannelBaselineProvider,
+		// The gateway channel half of every record: the facts the CPA request-log scanner
+		// parsed. The live ring alone is not enough — it is empty after a restart and holds only
+		// the newest facts — so the source merges it with the persisted fact files, which is
+		// what makes a 24-hour window answerable. Resolved at read time because the scanner is
+		// published just after this recorder (startChannelLog runs on the next line of
+		// LoadConfig).
+		Facts: observation.FactsFromStoreAndScanner(cfg.ChannelStoreDir, observation.FactsFromChannelLog(state.ChannelLog)),
 	})
 	recorder.Start()
 	observationMu.Lock()
@@ -134,9 +151,58 @@ func startObservation(cfg config.Config) {
 	observation.SetActive(recorder)
 }
 
+// channelLogScanner is the running CPA request-log scanner. Like the recorder, it is stopped
+// before a reconfigure starts a new one so a reload can never leave two readers on the same
+// directory: two scanners would race for the same files.
+var (
+	channelLogMu      sync.Mutex
+	channelLogScanner *channellog.Scanner
+)
+
+// stopChannelLog stops the scanner, if one is running, and makes the management view inert.
+func stopChannelLog() {
+	channelLogMu.Lock()
+	scanner := channelLogScanner
+	channelLogScanner = nil
+	channelLogMu.Unlock()
+	state.SetChannelLog(nil)
+	if scanner != nil {
+		scanner.Stop()
+	}
+}
+
+// startChannelLog starts the scanner when the configuration asks for it. Nothing happens when
+// it does not: no goroutine, no directory access, which is what makes the default (off) state
+// free of any cost at all.
+//
+// The facts are appended to the channel store directory the observation collector also uses.
+// That directory is a SUBDIRECTORY of the directory being scanned, which is one of the reasons
+// the scan never recurses.
+func startChannelLog(cfg config.Config) {
+	if !cfg.ChannelLogEnabled {
+		return
+	}
+	scanner := channellog.New(channellog.Options{
+		Enabled:         true,
+		Dir:             cfg.ChannelLogDir,
+		StoreDir:        cfg.ChannelStoreDir,
+		MinAge:          time.Duration(cfg.ChannelLogMinAgeSeconds) * time.Second,
+		DeleteAfterRead: cfg.ChannelLogDeleteAfterRead,
+		// The fact files are a sidecar of the observation records: they expire on the same
+		// clock, so channel_retention_days configures both.
+		RetentionDays: cfg.ChannelRetentionDays,
+	})
+	scanner.Start()
+	channelLogMu.Lock()
+	channelLogScanner = scanner
+	channelLogMu.Unlock()
+	state.SetChannelLog(scanner)
+}
+
 // Shutdown stops the background work.
 func Shutdown() {
 	stopObservation()
+	stopChannelLog()
 	if poller := state.Plan(); poller != nil {
 		poller.Stop()
 	}
@@ -156,6 +222,11 @@ func HandleMethod(method string, request []byte) ([]byte, error) {
 		}
 		return abi.OK(buildRegistration())
 	case pluginabi.MethodPluginQuiesce, pluginabi.MethodPluginShutdown:
+		// The scanner is a background poller with no way to be useful while the plugin is out
+		// of service, so it goes down with the lifecycle call. The published configuration and
+		// the usage collector stay as they are: a quiesce can be followed by a resume rather
+		// than by a reload, and this call carries no new configuration to act on.
+		stopChannelLog()
 		return abi.OK(nil)
 	case pluginabi.MethodManagementRegister:
 		return abi.OK(buildManagementRegistration())
@@ -205,6 +276,10 @@ func buildRegistration() registration {
 				{Name: "channel_retention_days", Type: pluginapi.ConfigFieldTypeNumber, Description: "渠道记录保留天数（默认 3，上限 30）。"},
 				{Name: "channel_max_size_mb", Type: pluginapi.ConfigFieldTypeNumber, Description: "渠道记录目录的总大小上限，单位 MB（默认 512，下限 16）；超出后从最旧的文件开始删。"},
 				{Name: "channel_baseline_provider", Type: pluginapi.ConfigFieldTypeString, Description: "基准渠道名（默认 deepseek）。finalProvider/resolvedProvider 不等于它的请求计入「未落在基准渠道」。"},
+				{Name: "channel_log_enabled", Type: pluginapi.ConfigFieldTypeBoolean, Description: "CPA 请求日志扫描开关（默认 false）。CPA 在 observability.logs.request-log 打开且 server.commercial-mode 关闭时，会把每个请求的完整调试日志写进 channel_log_dir，而上游 chat 响应原文里的 gateway.routing 渠道块只有这些日志能看到（CPA 翻译成 Responses 时丢掉了它）。开启后插件在旁路轮询该目录、解析 .log、把结论写入 channel_store_dir；关闭时不启协程、不访问目录。"},
+				{Name: "channel_log_dir", Type: pluginapi.ConfigFieldTypeString, Description: "CPA 请求日志目录（默认 /CLIProxyAPI/logs，容器内路径）。只扫描该目录顶层的 *.log，不递归子目录，且跳过 main.log。"},
+				{Name: "channel_log_delete_after_read", Type: pluginapi.ConfigFieldTypeBoolean, Description: "解析并落盘后删除日志文件（默认 true）。这些文件含明文 prompt，读完即 unlink，磁盘占用只与一个轮询窗口有关；解析失败的文件不删。"},
+				{Name: "channel_log_min_age_seconds", Type: pluginapi.ConfigFieldTypeNumber, Description: "只读取 mtime 早于该秒数（默认 5）的日志文件，避免读到 CPA 正在写的半个请求；读取前后都比对文件大小，变大的文件留到下一轮。"},
 			},
 		},
 		Capabilities: registrationCapability{

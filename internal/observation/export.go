@@ -9,10 +9,20 @@ import (
 // csvHeader is the fixed column order of the export. It is written even when the window has
 // no records, so a spreadsheet template can be built from an empty export.
 //
-// The columns are the ones a usage-hook record can fill, plus the v1 columns that still have
-// a source on a line written by the retired stream-sniffing build: those rows keep reading
-// back, and a column with an empty cell is cheaper than a schema the operator has to know
-// about.
+// The columns are the ones a written record can fill — plus the gateway channel, which the
+// reader joins in before the row is rendered, and the v1 columns that still have a source on a
+// line written by the retired stream-sniffing build. A column with an empty cell is cheaper
+// than a schema the operator has to know about.
+//
+// Two things about the channel columns are worth stating in one place, because a spreadsheet
+// row hides them:
+//
+//   - cpa_provider is the CPA-side credential. Rows written before schema v3 carried the same
+//     value under final_provider / resolved_provider and are read back here, so an old window
+//     exports with its credential intact and its gateway columns empty.
+//   - the gateway_* columns and channel_source are empty on a row whose request log named no
+//     channel: a failure, a client that sent no Session_id header, a fact that had not been
+//     parsed yet. Empty means "not known"; it never means "on the baseline".
 func csvHeader() []string {
 	return []string{
 		"time_utc",
@@ -24,8 +34,13 @@ func csvHeader() []string {
 		"upstream_model",
 		"canonical_slug",
 		"original_model_id",
-		"final_provider",
-		"resolved_provider",
+		"cpa_provider",
+		"gateway_provider",
+		"gateway_resolved_provider",
+		"gateway_slug",
+		"gateway_attempts",
+		"gateway_cost",
+		"channel_source",
 		"pinned_provider",
 		"auth_id",
 		"auth_index",
@@ -52,12 +67,15 @@ func csvHeader() []string {
 	}
 }
 
-// csvRecord renders one stored record in the header's column order. The baseline is passed
-// in because "off baseline" is a property of the question being asked, not of the record:
-// the same row is off-baseline against one provider and on-baseline against another.
+// csvRecord renders one view record in the header's column order. The baseline is passed in
+// because "off baseline" is a property of the question being asked, not of the record: the
+// same row is off-baseline against one channel and on-baseline against another.
+//
+// off_baseline marks the real channel only. A row with no known channel leaves the cell empty,
+// which is what keeps a 502 from being exported as a baseline hit.
 func csvRecord(record Record, baseline string) []string {
 	off := ""
-	if provider := recordChannel(record); provider != "" && baseline != "" && !strings.EqualFold(provider, baseline) {
+	if channel := record.GatewayChannel(); channel != "" && baseline != "" && !strings.EqualFold(channel, baseline) {
 		off = "yes"
 	}
 	return []string{
@@ -70,8 +88,13 @@ func csvRecord(record Record, baseline string) []string {
 		record.UpstreamModel,
 		record.CanonicalSlug,
 		record.OriginalModel,
-		record.FinalProvider,
-		record.ResolvedProvider,
+		record.CPProvider,
+		record.GatewayProvider,
+		record.GatewayResolvedProvider,
+		record.GatewaySlug,
+		strconv.Itoa(record.GatewayAttempts),
+		strconv.FormatFloat(record.GatewayCost, 'f', 8, 64),
+		record.ChannelSource,
 		record.PinnedProvider,
 		record.AuthID,
 		record.AuthIndex,
@@ -96,14 +119,4 @@ func csvRecord(record Record, baseline string) []string {
 		strconv.FormatInt(record.CacheCreationTokens, 10),
 		strconv.FormatInt(record.TotalTokens, 10),
 	}
-}
-
-// recordChannel is the channel a request actually landed on. Both record fields carry the
-// credential the host reported; resolved_provider covers a v1 line that only carries the
-// second one.
-func recordChannel(record Record) string {
-	if strings.TrimSpace(record.FinalProvider) != "" {
-		return record.FinalProvider
-	}
-	return record.ResolvedProvider
 }

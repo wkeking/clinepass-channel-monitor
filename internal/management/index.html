@@ -139,9 +139,9 @@ td.num,th.num{text-align:right}
       <div class="sub" id="channel-headline" style="margin:-4px 0 10px"></div>
       <div class="sub" id="channel-note" style="margin:-4px 0 12px"></div>
       <div class="cards" id="channel-cards"></div>
-      <div class="sub" id="channel-providers-note" style="margin:18px 0 8px;font-weight:600">渠道分布</div>
+      <div class="sub" id="channel-providers-note" style="margin:18px 0 8px;font-weight:600">真实渠道（网关 <code>finalProvider</code>，来自 CPA 请求日志）</div>
       <div class="wrap"><table id="channel-providers"><thead>
-        <tr><th>渠道</th><th class="num">请求</th><th class="num">占比</th><th class="num">偏离</th><th class="num">失败</th><th class="num">TTFT p50</th><th class="num">TTFT p90</th><th class="num">解码 p50</th><th class="num">输入</th><th class="num">输出</th><th class="num">缓存</th></tr>
+        <tr><th>真实渠道</th><th class="num">请求</th><th class="num">占比</th><th class="num">偏离</th><th class="num">失败</th><th class="num">TTFT p50</th><th class="num">TTFT p90</th><th class="num">解码 p50</th><th class="num">输入</th><th class="num">输出</th><th class="num">缓存</th></tr>
       </thead><tbody></tbody></table></div>
       <div class="sub" id="official-channels-note" style="margin:18px 0 8px;font-weight:600">上游推理渠道（官方 usage）</div>
       <div class="wrap"><table id="official-channels"><thead>
@@ -159,7 +159,7 @@ td.num,th.num{text-align:right}
       </thead><tbody></tbody></table></div>
       <div class="sub" id="channel-records-note" style="margin:18px 0 8px;font-weight:600">原始记录</div>
       <div class="wrap"><table id="channel-records"><thead>
-        <tr><th>时间</th><th>模型</th><th>渠道</th><th>凭据</th><th class="num">失败</th><th class="num">TTFT</th><th class="num">解码 t/s</th><th class="num">输入/输出/缓存读</th><th class="num">状态</th><th>会话</th></tr>
+        <tr><th>时间</th><th>模型</th><th>真实渠道</th><th class="num">尝试</th><th>CPA 凭据</th><th class="num">失败</th><th class="num">TTFT</th><th class="num">解码 t/s</th><th class="num">输入/输出/缓存读</th><th class="num">状态</th><th>会话</th></tr>
       </thead><tbody></tbody></table></div>
     </div>
   </section>
@@ -714,7 +714,7 @@ function renderChannelRecords(view,baseline){
       :" · 共 "+int(total)+" 条");
   }
   if(!rows.length){
-    body.innerHTML='<tr class="empty-row"><td colspan="10">该窗口没有原始记录。</td></tr>';
+    body.innerHTML='<tr class="empty-row"><td colspan="11">该窗口没有原始记录。</td></tr>';
     return;
   }
   body.innerHTML=rows.map(function(record){
@@ -722,13 +722,22 @@ function renderChannelRecords(view,baseline){
     const off=channelIsOff(record,baseline);
     const authID=String(record.auth_id||"");
     const authIndex=String(record.auth_index||"");
+    const cpa=String(record.cpa_provider||"");
+    const resolved=String(record.gateway_resolved_provider||"");
+    const attempts=n(record.gateway_attempts);
+    // A request whose log carried no routing block (typically a failure) has no real channel to
+    // show: "无渠道块" is the honest cell, and it is not the same thing as the baseline.
+    const channelCell=provider
+      ? (off?'<span class="plan-warn" style="font-weight:600">':"")+esc(provider)+(off?"（偏离）</span>":'<span class="chip" style="margin-left:6px">基准</span>')
+      : '<span class="sub">无渠道块</span>';
     return "<tr>"+
       "<td>"+esc(fmtTime(record.time))+"</td>"+
       '<td><span class="mono">'+esc(record.model||"—")+"</span>"+
         (record.upstream_model?'<div class="sub" style="margin-top:2px">'+esc(record.upstream_model)+"</div>":"")+"</td>"+
-      "<td>"+(off?'<span class="plan-warn" style="font-weight:600">':"")+esc(provider||"—")+
-        (off?"（偏离）</span>":'<span class="chip" style="margin-left:6px">基准</span>')+"</td>"+
-      "<td>"+(authID?'<span class="mono">'+esc(authID)+"</span>":'<span class="mono">—</span>')+
+      "<td>"+channelCell+
+        (resolved&&resolved!==provider?'<div class="sub" style="margin-top:2px">resolved '+esc(resolved)+"</div>":"")+"</td>"+
+      '<td class="num">'+(attempts?int(attempts):"—")+"</td>"+
+      "<td>"+(cpa?'<span class="mono">'+esc(cpa)+"</span>":'<span class="mono">—</span>')+
         (authIndex?'<div class="sub" style="margin-top:2px">索引 '+esc(authIndex)+"</div>":"")+"</td>"+
       '<td class="num">'+(record.failed?'<span class="plan-warn">失败</span>':"否")+"</td>"+
       '<td class="num">'+msText(record.ttft_ms)+"</td>"+
@@ -761,12 +770,14 @@ function renderChannel(view){
   const resolved=n(summary.resolved_requests);
   const offCount=n(summary.off_baseline_requests);
 
-  const headline="<strong>过去 "+esc(win.replace("近",""))+"</strong>共 <strong>"+int(resolved)+
-    "</strong> 条请求，其中 <strong>"+int(offCount)+"</strong> 条没有落在 <strong>"+esc(baseline)+
-    '</strong> 基准渠道，占比 <span class="chip">'+
-    esc(resolved>0?pctText(summary.off_baseline_ratio):"—")+"</span>。";
+  const unresolved=n(summary.unresolved_requests);
+  const headline="<strong>过去 "+esc(win.replace("近",""))+"</strong>共 <strong>"+int(resolved+unresolved)+
+    "</strong> 条请求，其中 <strong>"+int(offCount)+"</strong> 条的网关渠道不是 <strong>"+esc(baseline)+
+    '</strong>，占能判定渠道的 <strong>'+int(resolved)+
+    '</strong> 条的 <span class="chip">'+esc(resolved>0?pctText(summary.off_baseline_ratio):"—")+"</span>。";
   const headlineBits=[headline];
-  if(!resolved)headlineBits.push('<span class="plan-warn">该窗口还没有请求，因此比例不可用。</span>');
+  if(unresolved>0)headlineBits.push('<span class="plan-warn">另有 '+int(unresolved)+" 条没有渠道块（失败的请求上游不返回路由块，或客户端没送 Session_id），不计入比例。</span>");
+  if(!resolved)headlineBits.push('<span class="plan-warn">该窗口还没有能判定渠道的请求，因此比例不可用。</span>');
   $("channel-headline").innerHTML=headlineBits.join(" ");
 
   const hourList=summary.hours||[];
@@ -795,14 +806,15 @@ function renderChannel(view){
   const hourTPS=hourList.map(function(point){return n(point.decode_p50_tps)});
   $("channel-cards").innerHTML=[
     card({label:"偏离基准渠道",icon:"!",tint:"#f87171",
-      tip:"渠道不是「"+baseline+"」的请求数与占比；分母是本窗口的请求数。",
+      tip:"网关渠道不是「"+baseline+"」的请求数与占比；分母是能判定渠道（日志里有路由块且 Session_id 对得上）的请求数。",
       value:int(offCount),unit:"条",
       sub:["占比 "+(resolved>0?pctText(summary.off_baseline_ratio):"—")+"（分母 "+int(resolved)+" 条）","基准渠道 "+baseline],
       spark:hourOffs}),
     card({label:"请求数",icon:"⇄",tint:"#60a5fa",
-      tip:"窗口内 CPA 服务过的请求数，一条 usage 记录算一条；渠道来自 CPA 选中的凭据，与客户端协议无关。",
-      value:int(resolved),unit:"条",
-      sub:[(n(summary.failed_requests)?("失败 "+int(summary.failed_requests)+" 条（"+pctText(n(summary.failed_requests)/Math.max(1,resolved))+"）"):"窗口内无失败记录"),"覆盖渠道 "+int(summary.channels)+" 个"],
+      tip:"窗口内 CPA 服务过的请求数（一条 usage 记录算一条）。渠道来自 CPA 自己的请求日志，只有它能给出网关级的 finalProvider。",
+      value:int(resolved+unresolved),unit:"条",
+      sub:[(unresolved?("无渠道块 "+int(unresolved)+" 条"):"全部请求都有渠道块"),
+           (n(summary.failed_requests)?("失败 "+int(summary.failed_requests)+" 条"):"窗口内无失败记录")],
       spark:hourRequests}),
     card({label:"TTFT 首字延时",icon:"⏱",tint:"#a78bfa",
       tip:"CPA 记录的请求到首个 token 的时间（p50，单位毫秒）。",
@@ -828,8 +840,9 @@ function renderChannel(view){
   const tip=$("channel-info-tip");
   if(tip){
     tip.textContent=[
-      "「渠道」= CPA 为这条请求选中的凭据（provider 名 + AuthID/AuthIndex），由 CPA 的 usage 记录给出，与客户端协议无关（/v1/responses 也覆盖）。",
-      "「偏离基准渠道」= 渠道不等于 " + baseline + " 的请求数；占比 = 偏离数 / 窗口内请求数。",
+      "「真实渠道」= Cline 网关实际服务的渠道（finalProvider），来自 CPA 自己的请求日志里上游响应的 provider_metadata.gateway.routing；「CPA 凭据」= 这条请求用了哪把 key（usage 回调给出）。两者分列，不能互相替代。",
+      "只有日志里有路由块、且 Session_id 与 usage 记录对得上的请求才有真实渠道（实测偏移 72–218 ms，窗口 2 秒）；失败的请求上游不返回路由块，所以它们的渠道列显示「无渠道块」，不计入偏离比例。",
+      "「偏离基准渠道」= 真实渠道不等于 " + baseline + " 的请求数；占比 = 偏离数 / 能判定渠道的请求数。",
       "TTFT 与延时来自 CPA 的 usage 记录（纳秒转毫秒）；解码速度 = 输出 token / （总延时 − TTFT），窗口短于 50ms 时不记速度。",
       "「失败」= CPA 的 usage 记录里 Failed 为真的请求（当前实测全部是上游 502），按本窗口的记录计数，与页顶进程计数器无关。",
       "失败（failed）是上游执行失败，状态码取自 usage 记录的 Failure.StatusCode；小时表保留窗口内每个小时，空小时按 0 显示，不做插值。",

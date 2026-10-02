@@ -3,7 +3,6 @@ package observation
 import (
 	"sort"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -45,14 +44,23 @@ func (w Window) Duration() time.Duration {
 	}
 }
 
-// ProviderStat is one upstream channel inside the window.
+// ProviderStat is one row of a provider dimension.
+//
+// The same shape serves both dimensions, so the two tables on the page and in the payload read
+// the same way; what a row means depends on which list it is in. See Summary.
 type ProviderStat struct {
-	Provider    string  `json:"provider"`
-	Requests    int64   `json:"requests"`
-	Ratio       float64 `json:"ratio"`
-	OffBaseline int64   `json:"off_baseline"`
-	// Failed counts the requests the host reported as failed on this channel: the number
-	// that separates "this channel is slow" from "this channel is broken".
+	Provider string `json:"provider"`
+	Requests int64  `json:"requests"`
+	// Ratio is the row's share of its own dimension (the real channels, or the credentials).
+	Ratio float64 `json:"ratio"`
+	// OffBaseline counts the row's requests whose real channel differs from the baseline. It
+	// is always zero in the credential dimension: a CPA credential does not answer the
+	// question "was this the official channel", and mixing the two is the mistake this
+	// rename exists to prevent.
+	OffBaseline int64 `json:"off_baseline"`
+	// Failed counts the requests the host reported as failed on this row. In the channel
+	// dimension it is normally zero: a request that failed has no routing block, so it is not
+	// in a channel row at all — it is counted in unresolved_requests.
 	Failed       int64   `json:"failed"`
 	TTFTP50Ms    float64 `json:"ttft_p50_ms"`
 	TTFTP90Ms    float64 `json:"ttft_p90_ms"`
@@ -60,17 +68,21 @@ type ProviderStat struct {
 	InputTokens  int64   `json:"input_tokens"`
 	OutputTokens int64   `json:"output_tokens"`
 	CachedTokens int64   `json:"cached_tokens"`
-	CostUSD      float64 `json:"cost_usd"`
+	// CostUSD is the sum of the records' costs: the gateway's own figure for a joined record
+	// (gateway_cost), plus the legacy cost block of a v1 line.
+	CostUSD float64 `json:"cost_usd"`
 }
 
 // ModelStat is one requested model inside the window.
 type ModelStat struct {
-	Model         string  `json:"model"`
-	CanonicalSlug string  `json:"canonical_slug,omitempty"`
-	Requests      int64   `json:"requests"`
-	OffBaseline   int64   `json:"off_baseline"`
-	TTFTP50Ms     float64 `json:"ttft_p50_ms"`
-	DecodeP50     float64 `json:"decode_p50_tps"`
+	Model         string `json:"model"`
+	CanonicalSlug string `json:"canonical_slug,omitempty"`
+	Requests      int64  `json:"requests"`
+	// OffBaseline counts the model's requests whose real channel differs from the baseline.
+	// A request with no known channel is not counted here; it is in Hours[].unresolved.
+	OffBaseline int64   `json:"off_baseline"`
+	TTFTP50Ms   float64 `json:"ttft_p50_ms"`
+	DecodeP50   float64 `json:"decode_p50_tps"`
 }
 
 // HourPoint is one hour of the timeline. Empty hours are present with zeroes so the chart
@@ -81,13 +93,34 @@ type HourPoint struct {
 	OffBaseline int64     `json:"off_baseline"`
 	Failed      int64     `json:"failed"`
 	Fallbacks   int64     `json:"fallbacks"`
-	TTFTP50Ms   float64   `json:"ttft_p50_ms"`
-	DecodeP50   float64   `json:"decode_p50_tps"`
-	CostUSD     float64   `json:"cost_usd"`
+	// Unresolved counts the hour's requests whose real channel is unknown: the same split as
+	// the window-level unresolved_requests, so a spike that is really a logging gap does not
+	// read as a traffic spike.
+	Unresolved int64   `json:"unresolved"`
+	TTFTP50Ms  float64 `json:"ttft_p50_ms"`
+	DecodeP50  float64 `json:"decode_p50_tps"`
+	CostUSD    float64 `json:"cost_usd"`
 }
 
 // Summary is the answer to the operator question: how many of these requests did not land
 // on the expected channel, and how did those requests perform.
+//
+// It carries two provider dimensions of the same shape, because two different questions are
+// asked of one window:
+//
+//   - providers is the REAL channel: the Cline gateway channel the request landed on,
+//     joined in from CPA's request log (finalProvider). off_baseline_requests is measured on
+//     this dimension, against baseline_provider, and it means what the page always claimed:
+//     the request did not reach the official channel.
+//   - cpa_providers is the CPA-side credential the host reported
+//     ("openai-compatible-cline1"). It is the dimension this view had before the channel log
+//     existed: it says which key carried the request, never which channel served it.
+//
+// resolved_requests and unresolved_requests split the window by whether a real channel was
+// found at all, and that split is the honest denominator: a failed request has no routing
+// block, a client that sends no Session_id header can never be matched, and a fact may not
+// have been parsed yet. Those records can be counted but not attributed, so they are counted
+// as unresolved and are never recorded as baseline hits.
 type Summary struct {
 	GeneratedAt time.Time `json:"generated_at"`
 	Window      string    `json:"window"`
@@ -95,16 +128,24 @@ type Summary struct {
 	To          time.Time `json:"to"`
 	Baseline    string    `json:"baseline_provider"`
 
-	// Resolved counts the requests whose upstream reported a channel; those are the only
-	// ones a ratio can be computed from. Unresolved is reported by Health.
-	Resolved    int64   `json:"resolved_requests"`
+	// Resolved counts the records that carry a real channel; Unresolved the rest. Only the
+	// resolved ones can be attributed to a channel.
+	Resolved   int64 `json:"resolved_requests"`
+	Unresolved int64 `json:"unresolved_requests"`
+	// OffBaseline counts the resolved records whose channel differs from Baseline, so
+	// OffRatio = OffBaseline / Resolved.
 	OffBaseline int64   `json:"off_baseline_requests"`
 	OffRatio    float64 `json:"off_baseline_ratio"`
-	// FailedRequests counts the records the host reported as failed; a window's failure rate
-	// is FailedRequests / Resolved.
+	// FailedRequests is window-scoped: it counts every record the host reported as failed,
+	// whether or not it has a channel. A failed request usually has none, so a channel row's
+	// failed count is normally zero and the failure rate is
+	// FailedRequests / (Resolved + Unresolved).
 	FailedRequests int64 `json:"failed_requests"`
-	Fallbacks      int64 `json:"fallback_requests"`
-	Channels       int   `json:"channels"`
+	// Fallbacks counts the resolved records whose gateway needed more than one provider
+	// attempt. It is zero before the channel log is switched on.
+	Fallbacks int64 `json:"fallback_requests"`
+	// Channels counts the real channels the window landed on (len(Providers)).
+	Channels int `json:"channels"`
 
 	TTFTP50Ms    float64 `json:"ttft_p50_ms"`
 	TTFTP90Ms    float64 `json:"ttft_p90_ms"`
@@ -115,14 +156,20 @@ type Summary struct {
 	CachedTokens int64   `json:"cached_tokens"`
 	CostUSD      float64 `json:"cost_usd"`
 
-	Providers []ProviderStat `json:"providers"`
-	Models    []ModelStat    `json:"models"`
-	Hours     []HourPoint    `json:"hours"`
+	Providers    []ProviderStat `json:"providers"`
+	CPAProviders []ProviderStat `json:"cpa_providers"`
+	Models       []ModelStat    `json:"models"`
+	Hours        []HourPoint    `json:"hours"`
 
 	Health Health `json:"health"`
 }
 
-// Summary aggregates the buckets inside the window.
+// Summary aggregates the window's records.
+//
+// The records are read from the store on every call, and the facts are read on every call with
+// them: the gateway channel of the newest requests arrives seconds after the record does, and
+// a summary that cached either half would report a stale answer for as long as the process
+// runs. The window is at most seven days of one line per request, which is cheap to read.
 func (r *Recorder) Summary(window Window) Summary {
 	if r == nil {
 		return Summary{Window: string(window)}
@@ -138,77 +185,104 @@ func (r *Recorder) Summary(window Window) Summary {
 		Health:      r.Health(),
 	}
 
-	r.mu.Lock()
-	selected := r.agg.between(from, now)
-	r.mu.Unlock()
+	records, errLoad := r.RecordsSince(window)
+	if errLoad != nil && summary.Health.LastError == "" {
+		summary.Health.LastError = errLoad.Error()
+	}
 
-	providers := map[string]*ProviderStat{}
+	join := r.openJoin()
+	channels := newProviderAccumulator()
+	credentials := newProviderAccumulator()
 	models := map[string]*ModelStat{}
-	hours := map[int64]*HourPoint{}
-	providerTTFT := map[string][]int64{}
-	providerTPS := map[string][]float64{}
 	modelTTFT := map[string][]int64{}
 	modelTPS := map[string][]float64{}
+	hours := map[int64]*hourAccumulator{}
 	var ttfts []int64
 	var speeds []float64
 
-	for _, bucket := range selected {
-		hour := bucket.hour
-		point := hours[hour.Unix()]
-		if point == nil {
-			// The bucket key is an absolute hour; the label is rendered in the location of the
-			// window bounds, like the empty points below. Labelled in UTC instead, a bucket that
-			// holds data would print a different hour from the empty point of the same instant
-			// and the timeline would list that hour twice.
-			point = &HourPoint{Hour: hour.In(from.Location())}
-			hours[hour.Unix()] = point
+	for _, stored := range records {
+		record := stored
+		fact, matched := join.match(stored)
+		if matched {
+			// The copy is what the view reads; the stored record is never given a channel.
+			record = stored.withChannel(fact)
+			summary.Resolved++
+		} else {
+			summary.Unresolved++
 		}
-		point.Requests += bucket.requests
-		point.OffBaseline += bucket.off
-		point.Failed += bucket.failed
-		point.Fallbacks += bucket.fallback
-		point.CostUSD += bucket.cost
-		point.TTFTP50Ms = median(bucket.ttft, 0.5)
-		point.DecodeP50 = median(bucket.tps, 0.5)
+		channel := record.GatewayChannel()
+		off := channel != "" && summary.Baseline != "" && !strings.EqualFold(channel, summary.Baseline)
+		if off {
+			summary.OffBaseline++
+		}
+		if record.Failed {
+			summary.FailedRequests++
+		}
+		fallback := matched && record.GatewayAttempts > 1
+		if fallback {
+			summary.Fallbacks++
+		}
+		cost := record.CostUSD + record.GatewayCost
+		summary.InputTokens += record.InputTokens
+		summary.OutputTokens += record.OutputTokens
+		summary.CachedTokens += record.CachedTokens
+		summary.CostUSD += cost
+		ttfts = appendSample(ttfts, record.TTFTMs)
+		speeds = appendSample(speeds, record.TPS)
 
-		summary.Resolved += bucket.requests
-		summary.OffBaseline += bucket.off
-		summary.FailedRequests += bucket.failed
-		summary.Fallbacks += bucket.fallback
-		summary.InputTokens += bucket.input
-		summary.OutputTokens += bucket.output
-		summary.CachedTokens += bucket.cached
-		summary.CostUSD += bucket.cost
-		ttfts = mergeSamples(ttfts, bucket.ttft)
-		speeds = mergeSamples(speeds, bucket.tps)
+		// The credential row is filled for every record that named one, joined or not: the
+		// credential is a fact of the usage hook, and the dimension is the one that keeps
+		// working while the channel log is switched off.
+		credentials.add(record.CPProvider, record, false, cost)
+		// The channel row exists only for a joined record, which is why the channel table has
+		// no row for a failure.
+		channels.add(record.GatewayProvider, record, off, cost)
 
-		for name, entry := range bucket.providers {
-			target := providers[name]
-			if target == nil {
-				target = &ProviderStat{Provider: name}
-				providers[name] = target
-			}
-			target.Requests += entry.requests
-			target.OffBaseline += entry.off
-			target.Failed += entry.failed
-			target.InputTokens += entry.input
-			target.OutputTokens += entry.output
-			target.CachedTokens += entry.cached
-			target.CostUSD += entry.cost
-			providerTTFT[name] = mergeSamples(providerTTFT[name], entry.ttft)
-			providerTPS[name] = mergeSamples(providerTPS[name], entry.tps)
+		model := record.Model
+		if model == "" {
+			model = record.UpstreamModel
 		}
-		for name, entry := range bucket.models {
-			target := models[name]
-			if target == nil {
-				target = &ModelStat{Model: name, CanonicalSlug: entry.slug}
-				models[name] = target
+		if model != "" {
+			row := models[model]
+			if row == nil {
+				row = &ModelStat{Model: model, CanonicalSlug: record.CanonicalSlug}
+				models[model] = row
 			}
-			target.Requests += entry.requests
-			target.OffBaseline += entry.off
-			modelTTFT[name] = mergeSamples(modelTTFT[name], entry.ttft)
-			modelTPS[name] = mergeSamples(modelTPS[name], entry.tps)
+			row.Requests++
+			if off {
+				row.OffBaseline++
+			}
+			modelTTFT[model] = appendSample(modelTTFT[model], record.TTFTMs)
+			modelTPS[model] = appendSample(modelTPS[model], record.TPS)
 		}
+
+		hour := record.Time.UTC().Truncate(time.Hour)
+		slot := hours[hour.Unix()]
+		if slot == nil {
+			// The key is the absolute hour; the label is rendered in the location of the
+			// window bounds, like the empty points below. Labelled in UTC instead, an hour
+			// that holds data would print a different hour from the empty point of the same
+			// instant and the timeline would list that hour twice.
+			slot = &hourAccumulator{}
+			slot.point.Hour = hour.In(from.Location())
+			hours[hour.Unix()] = slot
+		}
+		slot.point.Requests++
+		if !matched {
+			slot.point.Unresolved++
+		}
+		if record.Failed {
+			slot.point.Failed++
+		}
+		if fallback {
+			slot.point.Fallbacks++
+		}
+		if off {
+			slot.point.OffBaseline++
+		}
+		slot.point.CostUSD += cost
+		slot.ttft = appendSample(slot.ttft, record.TTFTMs)
+		slot.tps = appendSample(slot.tps, record.TPS)
 	}
 
 	summary.TTFTP50Ms = median(ttfts, 0.5)
@@ -217,28 +291,14 @@ func (r *Recorder) Summary(window Window) Summary {
 	if summary.Resolved > 0 {
 		summary.OffRatio = float64(summary.OffBaseline) / float64(summary.Resolved)
 	}
-
-	for name, entry := range providers {
-		if summary.Resolved > 0 {
-			entry.Ratio = float64(entry.Requests) / float64(summary.Resolved)
-		}
-		entry.TTFTP50Ms = median(providerTTFT[name], 0.5)
-		entry.TTFTP90Ms = median(providerTTFT[name], 0.9)
-		entry.DecodeP50 = median(providerTPS[name], 0.5)
-		summary.Providers = append(summary.Providers, *entry)
-	}
-	sort.Slice(summary.Providers, func(first, second int) bool {
-		if summary.Providers[first].Requests == summary.Providers[second].Requests {
-			return summary.Providers[first].Provider < summary.Providers[second].Provider
-		}
-		return summary.Providers[first].Requests > summary.Providers[second].Requests
-	})
+	summary.Providers = channels.list()
+	summary.CPAProviders = credentials.list()
 	summary.Channels = len(summary.Providers)
 
-	for _, entry := range models {
-		entry.TTFTP50Ms = median(modelTTFT[entry.Model], 0.5)
-		entry.DecodeP50 = median(modelTPS[entry.Model], 0.5)
-		summary.Models = append(summary.Models, *entry)
+	for _, row := range models {
+		row.TTFTP50Ms = median(modelTTFT[row.Model], 0.5)
+		row.DecodeP50 = median(modelTPS[row.Model], 0.5)
+		summary.Models = append(summary.Models, *row)
 	}
 	sort.Slice(summary.Models, func(first, second int) bool {
 		if summary.Models[first].Requests == summary.Models[second].Requests {
@@ -250,189 +310,99 @@ func (r *Recorder) Summary(window Window) Summary {
 	// Every hour of the window gets a point, so a quiet hour shows as a gap rather than
 	// moving the neighbouring bars.
 	for cursor := from; !cursor.After(now); cursor = cursor.Add(time.Hour) {
-		point := hours[cursor.Unix()]
-		if point == nil {
-			point = &HourPoint{Hour: cursor}
+		slot := hours[cursor.Unix()]
+		if slot == nil {
+			summary.Hours = append(summary.Hours, HourPoint{Hour: cursor})
+			continue
 		}
-		summary.Hours = append(summary.Hours, *point)
+		point := slot.point
+		point.TTFTP50Ms = median(slot.ttft, 0.5)
+		point.DecodeP50 = median(slot.tps, 0.5)
+		summary.Hours = append(summary.Hours, point)
 	}
 	return summary
 }
 
-// mergeSamples folds one bucket's samples into a running set, honouring the same cap as the
-// buckets themselves. The cap bounds the union too, so a seven-day window costs no more
-// memory than a one-hour one.
-func mergeSamples[T int64 | float64](into, from []T) []T {
-	for _, sample := range from {
-		into = appendSample(into, sample)
-	}
-	return into
+// providerAccumulator collects one provider dimension: the rows, their latency samples, and
+// the denominator their ratios are computed over. Both dimensions use it, which is what keeps
+// the two tables the same shape.
+type providerAccumulator struct {
+	rows  map[string]*ProviderStat
+	ttft  map[string][]int64
+	tps   map[string][]float64
+	total int64
 }
 
-// aggregate is a ring of hourly buckets. A bucket that falls out of the ring is discarded,
-// which is what keeps memory bounded for a process that runs for months.
-type aggregate struct {
-	mu      sync.Mutex
-	buckets [bucketSlots]*bucket
-}
-
-type bucket struct {
-	hour     time.Time
-	requests int64
-	off      int64
-	failed   int64
-	fallback int64
-	input    int64
-	output   int64
-	cached   int64
-	cost     float64
-	ttft     []int64
-	tps      []float64
-
-	providers map[string]*providerAgg
-	models    map[string]*modelAgg
-}
-
-type providerAgg struct {
-	requests int64
-	off      int64
-	failed   int64
-	input    int64
-	output   int64
-	cached   int64
-	cost     float64
-	ttft     []int64
-	tps      []float64
-}
-
-type modelAgg struct {
-	requests int64
-	off      int64
-	slug     string
-	ttft     []int64
-	tps      []float64
-}
-
-func newAggregate() *aggregate {
-	return &aggregate{}
-}
-
-func newBucket(hour time.Time) *bucket {
-	return &bucket{
-		hour:      hour,
-		providers: map[string]*providerAgg{},
-		models:    map[string]*modelAgg{},
+func newProviderAccumulator() *providerAccumulator {
+	return &providerAccumulator{
+		rows: map[string]*ProviderStat{},
+		ttft: map[string][]int64{},
+		tps:  map[string][]float64{},
 	}
 }
 
-// add folds one record into its hour. The aggregate lock is separate from the recorder
-// lock so a query never waits behind the writer.
-func (a *aggregate) add(record Record, baseline string) {
-	if a == nil {
+// add folds one record into the row of name. An empty name is not a row: a record whose
+// credential the host did not report, and a record with no known channel, each stay out of
+// their dimension instead of being collected under an empty name.
+func (a *providerAccumulator) add(name string, record Record, off bool, cost float64) {
+	if a == nil || name == "" {
 		return
 	}
-	hour := record.Time.UTC().Truncate(time.Hour)
-	slot := int(hour.Unix()/3600) % bucketSlots
-	if slot < 0 {
-		slot += bucketSlots
+	row := a.rows[name]
+	if row == nil {
+		row = &ProviderStat{Provider: name}
+		a.rows[name] = row
 	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	current := a.buckets[slot]
-	if current == nil || !current.hour.Equal(hour) {
-		current = newBucket(hour)
-		a.buckets[slot] = current
+	a.total++
+	row.Requests++
+	if off {
+		row.OffBaseline++
 	}
-
-	provider := record.FinalProvider
-	if provider == "" {
-		// A v1 line can carry only the resolved side; a v2 record sets both from the
-		// credential the host reported.
-		provider = record.ResolvedProvider
-	}
-	off := int64(0)
-	if provider != "" && baseline != "" && !strings.EqualFold(provider, baseline) {
-		off = 1
-	}
-
-	failed := int64(0)
 	if record.Failed {
-		failed = 1
+		row.Failed++
 	}
-
-	current.requests++
-	current.off += off
-	current.failed += failed
-	// The fallback counters came from the gateway routing block, which the usage payload does
-	// not carry: they stay zero instead of being guessed at.
-	if record.Attempts > 1 || record.ModelAttempts > 1 {
-		current.fallback++
-	}
-	current.input += record.InputTokens
-	current.output += record.OutputTokens
-	current.cached += record.CachedTokens
-	current.cost += record.CostUSD
-	current.ttft = appendSample(current.ttft, record.TTFTMs)
-	current.tps = appendSample(current.tps, record.TPS)
-
-	if provider != "" {
-		entry := current.providers[provider]
-		if entry == nil {
-			entry = &providerAgg{}
-			current.providers[provider] = entry
-		}
-		entry.requests++
-		entry.off += off
-		entry.failed += failed
-		entry.input += record.InputTokens
-		entry.output += record.OutputTokens
-		entry.cached += record.CachedTokens
-		entry.cost += record.CostUSD
-		entry.ttft = appendSample(entry.ttft, record.TTFTMs)
-		entry.tps = appendSample(entry.tps, record.TPS)
-	}
-
-	model := record.Model
-	if model == "" {
-		model = record.UpstreamModel
-	}
-	if model != "" {
-		entry := current.models[model]
-		if entry == nil {
-			entry = &modelAgg{slug: record.CanonicalSlug}
-			current.models[model] = entry
-		}
-		entry.requests++
-		entry.off += off
-		entry.ttft = appendSample(entry.ttft, record.TTFTMs)
-		entry.tps = appendSample(entry.tps, record.TPS)
-	}
+	row.InputTokens += record.InputTokens
+	row.OutputTokens += record.OutputTokens
+	row.CachedTokens += record.CachedTokens
+	row.CostUSD += cost
+	a.ttft[name] = appendSample(a.ttft[name], record.TTFTMs)
+	a.tps[name] = appendSample(a.tps[name], record.TPS)
 }
 
-// between returns the buckets inside the range, oldest first.
-func (a *aggregate) between(from, to time.Time) []*bucket {
+// list returns the rows, most requests first, with the ratio and the percentiles filled in.
+func (a *providerAccumulator) list() []ProviderStat {
 	if a == nil {
 		return nil
 	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	out := make([]*bucket, 0, 32)
-	for _, bucket := range a.buckets {
-		if bucket == nil {
-			continue
+	out := make([]ProviderStat, 0, len(a.rows))
+	for name, row := range a.rows {
+		entry := *row
+		if a.total > 0 {
+			entry.Ratio = float64(entry.Requests) / float64(a.total)
 		}
-		if bucket.hour.Before(from.Truncate(time.Hour)) || bucket.hour.After(to) {
-			continue
-		}
-		out = append(out, bucket)
+		entry.TTFTP50Ms = median(a.ttft[name], 0.5)
+		entry.TTFTP90Ms = median(a.ttft[name], 0.9)
+		entry.DecodeP50 = median(a.tps[name], 0.5)
+		out = append(out, entry)
 	}
 	sort.Slice(out, func(first, second int) bool {
-		return out[first].hour.Before(out[second].hour)
+		if out[first].Requests == out[second].Requests {
+			return out[first].Provider < out[second].Provider
+		}
+		return out[first].Requests > out[second].Requests
 	})
 	return out
 }
 
-// appendSample keeps the newest sampleCap values. A last-N window is a honest description
+// hourAccumulator collects one hour of the timeline: the counts, the cost, and the samples its
+// two percentiles are computed from.
+type hourAccumulator struct {
+	point HourPoint
+	ttft  []int64
+	tps   []float64
+}
+
+// appendSample keeps the newest sampleCap values. A last-N window is an honest description
 // of "the recent distribution" and bounds the memory of a long-running process.
 func appendSample[T int64 | float64](samples []T, value T) []T {
 	if value == 0 {

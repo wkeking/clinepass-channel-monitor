@@ -9,6 +9,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 
+	"github.com/wkeking/clinepass-channel-monitor/internal/channellog"
 	"github.com/wkeking/clinepass-channel-monitor/internal/observation"
 	"github.com/wkeking/clinepass-channel-monitor/internal/plan"
 	"github.com/wkeking/clinepass-channel-monitor/internal/state"
@@ -19,6 +20,11 @@ import (
 // acceptance check asks for.
 const channelRecordLimit = 20
 
+// channelLogFactLimit is how many parsed request-log facts the payload carries. A fact is a
+// candidate for the record it belongs to, so the page only ever needs the newest few, and the
+// full history stays in the JSONL store.
+const channelLogFactLimit = 20
+
 // channelView is the payload of the 「渠道」 view: the answer for the selected window, the
 // newest raw records behind that answer, and the collector's health.
 type channelView struct {
@@ -27,7 +33,11 @@ type channelView struct {
 	Enabled bool                `json:"enabled"`
 	Summary observation.Summary `json:"summary"`
 	// Records is the newest first, capped at channelRecordLimit; RecordsTotal is how many
-	// records the window holds, so the page can say what the cap hides.
+	// records the window holds, so the page can say what the cap hides. Each row carries both
+	// halves of the request: cpa_provider is the CPA credential the host reported, and the
+	// gateway channel (gateway_provider / final_provider, channel_source) is joined in from
+	// the CPA request log. A row with an empty channel_source has no known channel — it is not
+	// on the baseline, it is unknown.
 	Records      []observation.Record `json:"records"`
 	RecordsTotal int                  `json:"records_total"`
 	Health       observation.Health   `json:"health"`
@@ -45,6 +55,67 @@ type channelView struct {
 	// timestamp, last fetch, last error). The page uses it to say how far back the official
 	// records reach instead of presenting a partial window as a total.
 	OfficialUsage plan.UsageState `json:"official_usage"`
+	// ChannelLog is the CPA request-log scanner: whether it runs, what it has read, and the
+	// newest facts it parsed. Those facts are the gateway channel the usage records cannot see,
+	// and each one carries the session header and arrival timestamp the join is made on.
+	ChannelLog channelLogView `json:"channel_log"`
+}
+
+// channelLogView is the CPA request-log scanner as a payload. Every field is present on every
+// path — including the disabled one — and the fact list is a list, never null, so the page can
+// render the state without branching on the shape.
+type channelLogView struct {
+	Enabled bool `json:"enabled"`
+	// DeleteAfterRead and MinAgeSeconds are echoed because they explain what an operator sees:
+	// why a file is still on disk, and why one has not been parsed yet.
+	DeleteAfterRead bool              `json:"delete_after_read"`
+	MinAgeSeconds   int               `json:"min_age_seconds"`
+	Health          channellog.Health `json:"health"`
+	// Facts is the newest first, capped at channelLogFactLimit; FactsTotal is how many the
+	// scanner holds, so the page can say what the cap hides.
+	Facts      []channellog.Fact `json:"facts"`
+	FactsTotal int               `json:"facts_total"`
+}
+
+// channelLogSnapshot reads the scanner out of the published state. A scanner that is switched
+// off produces the same shape as one that is on with nothing to report: only the values differ.
+func channelLogSnapshot() channelLogView {
+	cfg := state.Config()
+	view := channelLogView{
+		Enabled:         cfg.ChannelLogEnabled,
+		DeleteAfterRead: cfg.ChannelLogDeleteAfterRead,
+		MinAgeSeconds:   cfg.ChannelLogMinAgeSeconds,
+		Health:          channellog.Health{Enabled: cfg.ChannelLogEnabled, Directory: cfg.ChannelLogDir},
+		Facts:           []channellog.Fact{},
+	}
+	scanner := state.ChannelLog()
+	if scanner == nil {
+		if cfg.ChannelLogEnabled {
+			// Switched on with nothing reading: an operator looking at an empty page needs to
+			// be told it is a wiring state, not a quiet directory.
+			view.Health.LastError = "scanner is not running"
+		}
+		return view
+	}
+	// The running scanner's own options are what actually govern it, which is why they are
+	// reported in preference to the configuration block.
+	options := scanner.Options()
+	health := scanner.Health()
+	health.Enabled = true
+	view.Enabled = true
+	view.DeleteAfterRead = options.DeleteAfterRead
+	view.MinAgeSeconds = int(options.MinAge / time.Second)
+	view.Health = health
+	facts := scanner.Facts()
+	view.FactsTotal = len(facts)
+	if len(facts) > channelLogFactLimit {
+		facts = facts[:channelLogFactLimit]
+	}
+	if facts == nil {
+		facts = []channellog.Fact{}
+	}
+	view.Facts = facts
+	return view
 }
 
 // officialChannelView reads the official-usage dimension out of the plan poller. Both halves
@@ -71,6 +142,7 @@ func buildChannelView(req *pluginapi.ManagementRequest) pluginapi.ManagementResp
 		return errorResponse(http.StatusBadRequest, "invalid_window", "window must be 1h, 24h or 7d")
 	}
 	officialChannels, officialUsage := officialChannelView()
+	channelLog := channelLogSnapshot()
 	recorder := state.Observation()
 	if recorder == nil {
 		cfg := state.Config()
@@ -80,10 +152,11 @@ func buildChannelView(req *pluginapi.ManagementRequest) pluginapi.ManagementResp
 			Health:           observation.Health{Directory: cfg.ChannelStoreDir},
 			OfficialChannels: officialChannels,
 			OfficialUsage:    officialUsage,
+			ChannelLog:       channelLog,
 		})
 	}
 	summary := recorder.Summary(window)
-	records, _ := recorder.RecordsSince(window)
+	records, _ := recorder.ChannelRecordsSince(window)
 	total := len(records)
 	if total > channelRecordLimit {
 		records = records[:channelRecordLimit]
@@ -99,6 +172,7 @@ func buildChannelView(req *pluginapi.ManagementRequest) pluginapi.ManagementResp
 		Health:           summary.Health,
 		OfficialChannels: officialChannels,
 		OfficialUsage:    officialUsage,
+		ChannelLog:       channelLog,
 	})
 }
 

@@ -1,9 +1,19 @@
 // Package observation records, for every request the host completes, which upstream channel
 // served it.
 //
-// The source is the usage plugin hook (`usage.handle`). The host calls it once per request,
-// whatever wire protocol the client spoke, and the payload names the CPA credential the
-// request was routed to in Provider — which is the fact the channel ratio is computed from.
+// The record has two dimensions, and they come from two different sources:
+//
+//   - cpa_provider is the CPA-side credential the usage hook reports (usageWire.Provider,
+//     e.g. "openai-compatible-cline1"). The host calls usage.handle once per request, whatever
+//     wire protocol the client spoke. This is what the JSONL store holds.
+//   - the gateway channel (finalProvider / resolvedProvider / canonicalSlug / the attempt
+//     counts / the gateway cost) belongs to the Cline gateway, and only the upstream chat
+//     response names it. CPA writes that response into its per-request debug log and drops the
+//     routing block when it translates the response for the client, so the channel is read out
+//     of the log by internal/channellog and joined onto the record when a view is rendered
+//     (join.go). A request whose log carries no channel — a failure, a client that sends no
+//     Session_id header, a fact that has not been parsed yet — stays unjoined, with empty
+//     channel fields. Guessing one would be indistinguishable from measuring it.
 //
 // It replaces an earlier design that sniffed provider_metadata.gateway.routing out of the
 // streamed SSE frames. That block only ever existed on OpenAI /v1/chat/completions traffic,
@@ -17,7 +27,8 @@
 //     path is fail-open: an undecodable payload, a full queue or an unwritable directory
 //     leaves the host's request handling untouched.
 //   - The per-request work is one JSON decode and one record build. No response byte is ever
-//     read, so the cost does not depend on how much the client streams.
+//     read, so the cost does not depend on how much the client streams. The join runs on the
+//     read path, over a record set that is read back from the store.
 package observation
 
 import (
@@ -34,9 +45,17 @@ import (
 const MethodUsage = "usage.handle"
 
 // schemaVersion is written into every record so a later version can tell the shapes apart.
-// v2 is the usage-hook shape; v1 lines written by the retired stream-sniffing source still
-// read back, they simply lack the fields this source adds.
-const schemaVersion = 2
+//
+//	v1  the retired stream-sniffing source
+//	v2  the usage-hook source; named the CPA credential final_provider / resolved_provider
+//	v3  the usage-hook source with the credential renamed cpa_provider and the gateway channel
+//	    joined in at read time
+//
+// A v1 or v2 line still reads back: Record.UnmarshalJSON maps its final_provider /
+// resolved_provider onto cpa_provider, and leaves the gateway fields empty, because a line
+// written before the join existed cannot carry a channel. The page and the export therefore
+// show those rows with a credential and no channel, which is what they are.
+const schemaVersion = 3
 
 // usageWire mirrors the payload the host hands to usage.handle. The SDK structs carry no
 // json tags, so the field names below are the wire contract; the tags repeat them verbatim
@@ -146,7 +165,12 @@ func Active() *Recorder {
 	return recorder
 }
 
-// Record is one observed request, as appended to the JSONL store.
+// Record is one observed request.
+//
+// It is written to the JSONL store with the credential the usage hook reported and nothing
+// else. The gateway half of the struct is filled by the join when the record is read for the
+// /channel view or the CSV export (join.go): the stored line never carries it, which is what
+// keeps "what the host said" and "what the channel log said" separable on disk.
 //
 // Every key the retired stream-sniffing source fed stays in the struct so a v1 line on disk
 // still reads back; the keys this build has no source for are documented as such and are
@@ -157,21 +181,52 @@ type Record struct {
 
 	RequestID string `json:"request_id,omitempty"`
 	SessionID string `json:"session_id,omitempty"`
-	// GenerationID came from the gateway routing block; never set for a v2 record.
+	// GenerationID came from the gateway routing block; it is not one of the fields the join
+	// fills, so this build never sets it.
 	GenerationID string `json:"generation_id,omitempty"`
 
 	Model         string `json:"model,omitempty"`
 	Alias         string `json:"alias,omitempty"`
 	UpstreamModel string `json:"upstream_model,omitempty"`
 	CanonicalSlug string `json:"canonical_slug,omitempty"`
-	// OriginalModel came from the gateway routing block; never set for a v2 record.
+	// OriginalModel came from the gateway routing block; it is not one of the fields the join
+	// fills, so this build never sets it.
 	OriginalModel string `json:"original_model_id,omitempty"`
 
-	// FinalProvider and ResolvedProvider are both the credential the host reported
-	// (usageWire.Provider): the channel a request landed on.
+	// CPProvider is the CPA-side credential the host reported (usageWire.Provider): the key
+	// the request was served with, e.g. "openai-compatible-cline1". It is a fact about this
+	// deployment, not about the Cline gateway. A v1/v2 line that named it final_provider or
+	// resolved_provider reads back here (Record.UnmarshalJSON).
+	CPProvider string `json:"cpa_provider,omitempty"`
+
+	// The gateway channel, as the request log knew it. These four keys and channel_source are
+	// the channel the page has always claimed to show; they are empty on every record this
+	// build stores, and are filled only on the copy a view or the export reads.
+	//
+	//   - GatewayProvider is finalProvider: the channel that actually answered.
+	//   - GatewayResolvedProvider is resolvedProvider: what the gateway resolved the request
+	//     to, which differs from finalProvider when a fallback happened.
+	//   - GatewaySlug is canonicalSlug, GatewayAttempts is totalProviderAttemptCount, and
+	//     GatewayCost is the gateway's own cost figure.
+	//   - ChannelSource says where the four came from: "log" when a fact was joined, empty when
+	//     nothing was, which is the case for a failure and for a client that sent no session.
+	//
+	// Empty is the answer for a request that failed: it has no routing block at all, and a
+	// guessed "deepseek" would be indistinguishable from a measured one.
+	GatewayProvider         string  `json:"gateway_provider,omitempty"`
+	GatewayResolvedProvider string  `json:"gateway_resolved_provider,omitempty"`
+	GatewaySlug             string  `json:"gateway_slug,omitempty"`
+	GatewayAttempts         int     `json:"gateway_attempts,omitempty"`
+	GatewayCost             float64 `json:"gateway_cost,omitempty"`
+	ChannelSource           string  `json:"channel_source,omitempty"`
+
+	// FinalProvider and ResolvedProvider are the same two gateway values under the names the
+	// page and the export have always used. The names belong to the real channel now: they are
+	// written together with gateway_provider / gateway_resolved_provider from one fact, so the
+	// old names and the new ones can never disagree.
 	FinalProvider    string `json:"final_provider,omitempty"`
 	ResolvedProvider string `json:"resolved_provider,omitempty"`
-	// AuthID, AuthIndex and AuthType identify the credential behind the channel name.
+	// AuthID, AuthIndex and AuthType identify the credential behind the CPA credential name.
 	AuthID    string `json:"auth_id,omitempty"`
 	AuthIndex string `json:"auth_index,omitempty"`
 	AuthType  string `json:"auth_type,omitempty"`
@@ -182,7 +237,8 @@ type Record struct {
 
 	// PinnedProvider, AffinityOutcome, UpstreamRequestID, Fallbacks, ModelAttempts and
 	// Attempts described the gateway's own routing decisions. The usage payload carries no
-	// such thing, so a v2 record leaves them empty; the keys stay for v1 lines.
+	// such thing, so this build leaves them empty; the keys stay for v1 lines. The join fills
+	// the separate gateway_* keys instead, so an old line and a joined one never share a key.
 	PinnedProvider    string   `json:"pinned_provider,omitempty"`
 	AffinityOutcome   string   `json:"affinity,omitempty"`
 	UpstreamRequestID string   `json:"upstream_request_id,omitempty"`
@@ -190,8 +246,8 @@ type Record struct {
 	ModelAttempts     int      `json:"model_attempt_count,omitempty"`
 	Attempts          int      `json:"total_provider_attempt_count,omitempty"`
 
-	// Protocol came from the client protocol the stream was read in; never set for a v2
-	// record, because the usage hook is protocol independent.
+	// Protocol came from the client protocol the stream was read in; never set by this build,
+	// because the usage hook is protocol independent.
 	Protocol string `json:"protocol,omitempty"`
 	Stream   bool   `json:"stream"`
 	// Failed is the host's own verdict on the request.
@@ -205,7 +261,8 @@ type Record struct {
 	DurationMs int64   `json:"duration_ms"`
 	DecodeMs   int64   `json:"decode_ms,omitempty"`
 	TPS        float64 `json:"tokens_per_second,omitempty"`
-	// Frames counted the chunks of a stream; never set for a v2 record.
+	// Frames counted the chunks of a stream; never set by this build. The join does not fill
+	// it either: the fact's frame count describes the log section, not the client's stream.
 	Frames int `json:"frames,omitempty"`
 
 	InputTokens     int64 `json:"input_tokens,omitempty"`
@@ -217,7 +274,9 @@ type Record struct {
 	CacheReadTokens     int64 `json:"cache_read_tokens,omitempty"`
 	CacheCreationTokens int64 `json:"cache_creation_tokens,omitempty"`
 	TotalTokens         int64 `json:"total_tokens,omitempty"`
-	// CostUSD and BYOK came from the gateway usage block; never set for a v2 record.
+	// CostUSD and BYOK came from the gateway usage block; never set by this build. The
+	// gateway's own cost of a joined request is GatewayCost, which is a different figure from
+	// a different source.
 	CostUSD float64 `json:"cost_usd,omitempty"`
 	BYOK    bool    `json:"is_byok,omitempty"`
 
@@ -229,13 +288,48 @@ type Record struct {
 	SourceFormat      string `json:"source_format,omitempty"`
 }
 
+// UnmarshalJSON reads one stored line into the current shape.
+//
+// A v1 or v2 line named the CPA credential final_provider / resolved_provider, which v3 gives
+// to the gateway channel. Reading such a line without this mapping would file a credential as
+// a channel and make an old window look like it had joined something. So: the old names are
+// read as the credential, and the gateway fields are cleared afterwards — a line written
+// before the join existed cannot carry a channel, whatever else it says.
+func (record *Record) UnmarshalJSON(data []byte) error {
+	// The alias keeps the decoder off this method, which would otherwise recurse.
+	type storedRecord Record
+	var decoded storedRecord
+	if errUnmarshal := json.Unmarshal(data, &decoded); errUnmarshal != nil {
+		return errUnmarshal
+	}
+	*record = Record(decoded)
+	if record.Schema >= schemaVersion {
+		return nil
+	}
+	if record.CPProvider == "" {
+		// final_provider is the primary old name; resolved_provider carried the same value.
+		record.CPProvider = firstNonEmpty(record.FinalProvider, record.ResolvedProvider)
+	}
+	record.FinalProvider = ""
+	record.ResolvedProvider = ""
+	record.GatewayProvider = ""
+	record.GatewayResolvedProvider = ""
+	record.GatewaySlug = ""
+	record.GatewayAttempts = 0
+	record.GatewayCost = 0
+	record.ChannelSource = ""
+	return nil
+}
+
 // Recorder accumulates observations and appends them to the JSONL store.
 type Recorder struct {
 	options Options
+	// facts is where the gateway channel comes from (join.go). It may be nil: a deployment
+	// with the request-log scanner switched off then reads every record as unjoined.
+	facts FactSource
 
 	mu      sync.Mutex
 	started bool
-	agg     *aggregate
 	stats   Health
 
 	queue  chan Record
@@ -253,13 +347,21 @@ type Options struct {
 	RetentionDays int
 	MaxSizeMB     int
 	Baseline      string
+	// Facts is the CPA request-log scanner the gateway channel is read from. Nil is a valid
+	// configuration: every record then reads as unjoined, with an empty channel.
+	//
+	// It is an interface, not a cached list, because the facts are read again on every query.
+	// A fact reaches the scanner seconds after the request it belongs to (the scanner only
+	// reads a log file once it has stopped growing), so a list read once at startup would
+	// leave every later request unjoined.
+	Facts FactSource
 }
 
 // New builds a recorder. It does not touch the filesystem yet: Start does.
 func New(options Options) *Recorder {
 	return &Recorder{
 		options: options,
-		agg:     newAggregate(),
+		facts:   options.Facts,
 		queue:   make(chan Record, queueCapacity),
 		syncCh:  make(chan chan struct{}),
 		nowFn:   time.Now,
@@ -315,9 +417,9 @@ func (r *Recorder) Stop() {
 // ObserveUsage is the single ingestion entry point: one call per completed request, whatever
 // wire protocol the client spoke.
 //
-// It is the hot path, and it is cheap: one record built from the payload, one aggregate
-// update, one queue send. It never blocks on I/O and never blocks on a full queue — a
-// collector that slowed the proxy down would be worse than a missing row.
+// It is the hot path, and it is cheap: one record built from the payload and one queue send.
+// It never blocks on I/O and never blocks on a full queue — a collector that slowed the proxy
+// down would be worse than a missing row.
 func (r *Recorder) ObserveUsage(wire *usageWire) {
 	if r == nil || wire == nil {
 		return
@@ -331,7 +433,6 @@ func (r *Recorder) ObserveUsage(wire *usageWire) {
 	record := buildRecord(wire, r.now())
 
 	r.mu.Lock()
-	r.agg.add(record, r.options.Baseline)
 	r.stats.Events++
 	if record.Failed {
 		r.stats.FailedEvents++
@@ -367,8 +468,7 @@ func buildRecord(wire *usageWire, now time.Time) Record {
 		Alias:               wire.Alias,
 		UpstreamModel:       wire.ResponseModel,
 		CanonicalSlug:       wire.ResponseModel,
-		FinalProvider:       wire.Provider,
-		ResolvedProvider:    wire.Provider,
+		CPProvider:          wire.Provider,
 		AuthID:              wire.AuthID,
 		AuthIndex:           wire.AuthIndex,
 		AuthType:            wire.AuthType,
@@ -569,16 +669,15 @@ func (r *Recorder) cleanLoop() {
 	}
 }
 
-// warmUp rebuilds the in-memory aggregates from the records still on disk, so a plugin
-// reload does not blank the page for the length of the window. v1 lines load here too: the
-// reader ignores the keys a v2 record no longer fills.
+// warmUp reads the last day of records once so health can report how much history a freshly
+// loaded plugin can see. Nothing is cached from it: every query reads the store itself, which
+// is what lets a v1 line, a v2 line and a v3 line be read under the same rules. v1 and v2
+// lines load here too — UnmarshalJSON maps their credential onto cpa_provider.
 func (r *Recorder) warmUp() {
 	if r.store == nil {
 		return
 	}
-	loaded, truncated, errLoad := r.store.loadRecent(24*time.Hour, warmupByteCap, func(record Record) {
-		r.agg.add(record, r.options.Baseline)
-	})
+	loaded, truncated, errLoad := r.store.loadRecent(24*time.Hour, warmupByteCap, func(Record) {})
 	r.mu.Lock()
 	r.stats.Warmup = Warmup{Records: loaded, Truncated: truncated}
 	if errLoad != nil {
@@ -643,8 +742,10 @@ func (r *Recorder) Health() Health {
 	return health
 }
 
-// RecordsSince returns the stored records whose time is inside the window, newest first,
-// read from the on-disk store so a query always sees the same history a reload would.
+// RecordsSince returns the stored records whose time is inside the window, newest first, read
+// from the on-disk store so a query always sees the same history a reload would. The records
+// are exactly what was written: the gateway channel is not joined in here, which is what makes
+// it the honest view of what the usage hook reported. ChannelRecordsSince is the joined one.
 func (r *Recorder) RecordsSince(window Window) ([]Record, error) {
 	if r == nil || r.store == nil {
 		return nil, nil
@@ -663,6 +764,28 @@ func (r *Recorder) RecordsSince(window Window) ([]Record, error) {
 	return records, nil
 }
 
+// ChannelRecordsSince returns the window's records as the 「渠道」 view reads them: the same
+// records with the gateway channel joined in from the request-log facts. A record no fact
+// matched is returned unchanged — empty channel fields, empty channel_source — so the page can
+// tell "this request has no known channel" apart from "this request was on the baseline".
+//
+// The facts are read again on this call rather than cached: the newest request's log file has
+// usually not been parsed yet when the record lands, and a cached list would keep reporting
+// that gap for as long as the process runs.
+func (r *Recorder) ChannelRecordsSince(window Window) ([]Record, error) {
+	records, errLoad := r.RecordsSince(window)
+	if errLoad != nil || len(records) == 0 {
+		return records, errLoad
+	}
+	join := r.openJoin()
+	for index, record := range records {
+		if fact, matched := join.match(record); matched {
+			records[index] = record.withChannel(fact)
+		}
+	}
+	return records, nil
+}
+
 // --- limits ---------------------------------------------------------------------
 
 const (
@@ -674,9 +797,7 @@ const (
 	// flushInterval is how long a written record may sit in the writer buffer before it
 	// reaches the file: the page's records table is never more than this far behind.
 	flushInterval = 2 * time.Second
-	// bucketSlots is how many hourly buckets are kept: a week, the longest window.
-	bucketSlots = 24 * 7
-	// sampleCap bounds the per-bucket, per-provider latency samples percentiles are
-	// computed from: the newest ones win.
+	// sampleCap bounds the per-hour, per-provider latency samples a percentile is computed
+	// from: the newest ones win, which bounds the memory of a long-running process.
 	sampleCap = 240
 )

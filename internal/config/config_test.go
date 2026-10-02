@@ -59,3 +59,78 @@ func TestParseIgnoresRemovedKeys(t *testing.T) {
 		t.Errorf("plan_usage_refresh = %s, want 15m", got)
 	}
 }
+
+// TestChannelLogDefaults pins the four request-log scanner knobs. The switch being off is
+// behaviour, not a preference: the files the scanner reads carry the client's plaintext
+// prompt, and CPA only writes them while its own request-log flag is on.
+func TestChannelLogDefaults(t *testing.T) {
+	cfg := Default()
+	if cfg.ChannelLogEnabled {
+		t.Error("channel_log_enabled must default to false")
+	}
+	if cfg.ChannelLogDir != DefaultChannelLogDir {
+		t.Errorf("channel_log_dir default = %q, want %q", cfg.ChannelLogDir, DefaultChannelLogDir)
+	}
+	if !cfg.ChannelLogDeleteAfterRead {
+		t.Error("channel_log_delete_after_read must default to true")
+	}
+	if cfg.ChannelLogMinAgeSeconds != DefaultChannelLogMinAgeSeconds {
+		t.Errorf("channel_log_min_age_seconds default = %d, want %d",
+			cfg.ChannelLogMinAgeSeconds, DefaultChannelLogMinAgeSeconds)
+	}
+}
+
+// TestParseChannelLogKeys covers both directions of the block: the keys a deployment sets, and
+// the defaults an older block keeps.
+func TestParseChannelLogKeys(t *testing.T) {
+	cfg, errParse := Parse([]byte("channel_log_enabled: true\nchannel_log_dir: /tmp/cpa-logs\n" +
+		"channel_log_delete_after_read: false\nchannel_log_min_age_seconds: 30\n"))
+	if errParse != nil {
+		t.Fatalf("Parse(): %v", errParse)
+	}
+	if !cfg.ChannelLogEnabled {
+		t.Error("channel_log_enabled = false, want the block's true")
+	}
+	if cfg.ChannelLogDir != "/tmp/cpa-logs" {
+		t.Errorf("channel_log_dir = %q, want /tmp/cpa-logs", cfg.ChannelLogDir)
+	}
+	if cfg.ChannelLogDeleteAfterRead {
+		t.Error("an explicit false must override the default true")
+	}
+	if cfg.ChannelLogMinAgeSeconds != 30 {
+		t.Errorf("channel_log_min_age_seconds = %d, want 30", cfg.ChannelLogMinAgeSeconds)
+	}
+
+	// A block that predates the feature: everything keeps its default.
+	older, errParse := Parse([]byte("timezone: UTC\nchannel_observe_enabled: true\n"))
+	if errParse != nil {
+		t.Fatalf("Parse() with an older block: %v", errParse)
+	}
+	if older.ChannelLogEnabled || older.ChannelLogDir != DefaultChannelLogDir ||
+		!older.ChannelLogDeleteAfterRead || older.ChannelLogMinAgeSeconds != DefaultChannelLogMinAgeSeconds {
+		t.Errorf("an older block must keep every scanner default: %+v", older)
+	}
+
+	// Values that cannot work are replaced by ones that can, instead of disabling the scanner
+	// silently: an empty directory and a negative age.
+	normalized, errParse := Parse([]byte("channel_log_dir: \"   \"\nchannel_log_min_age_seconds: -3\n"))
+	if errParse != nil {
+		t.Fatalf("Parse(): %v", errParse)
+	}
+	if normalized.ChannelLogDir != DefaultChannelLogDir {
+		t.Errorf("channel_log_dir = %q, want the default for a blank value", normalized.ChannelLogDir)
+	}
+	if normalized.ChannelLogMinAgeSeconds != DefaultChannelLogMinAgeSeconds {
+		t.Errorf("channel_log_min_age_seconds = %d, want the default for a negative value",
+			normalized.ChannelLogMinAgeSeconds)
+	}
+
+	// Zero is a value, not a missing one: it means "read the file as soon as it appears".
+	immediate, errParse := Parse([]byte("channel_log_min_age_seconds: 0\n"))
+	if errParse != nil {
+		t.Fatalf("Parse(): %v", errParse)
+	}
+	if immediate.ChannelLogMinAgeSeconds != 0 {
+		t.Errorf("channel_log_min_age_seconds = %d, want the explicit 0", immediate.ChannelLogMinAgeSeconds)
+	}
+}

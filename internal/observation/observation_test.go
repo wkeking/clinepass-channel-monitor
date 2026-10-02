@@ -2,6 +2,7 @@ package observation
 
 import (
 	"bytes"
+	"encoding/csv"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -18,11 +19,13 @@ import (
 // response stream at all.
 
 const (
-	// providerFixture is the CPA credential the fixture request landed on, i.e. the channel.
+	// providerFixture is the CPA credential the fixture request was served with. It is what the
+	// record stores as cpa_provider, and it is NOT a gateway channel.
 	providerFixture = "openai-compatible-cline1"
 	// providerBaseline is the channel the recorder is configured to treat as the official one.
 	providerBaseline = "deepseek"
-	// providerOther is the channel of a request that left the baseline.
+	// providerOther is the credential of a second request, and the baseline of the tests that
+	// flip the question around.
 	providerOther = "alibaba"
 )
 
@@ -53,6 +56,8 @@ func (c *testClock) advance(d time.Duration) {
 	c.mu.Unlock()
 }
 
+// newRecorder builds a recorder with no fact source: every record it stores is unjoined, which
+// is the deployment with the request-log scanner switched off.
 func newRecorder(t *testing.T) (*Recorder, *testClock) {
 	t.Helper()
 	return newRecorderWithBaseline(t, providerBaseline)
@@ -60,18 +65,7 @@ func newRecorder(t *testing.T) (*Recorder, *testClock) {
 
 func newRecorderWithBaseline(t *testing.T, baseline string) (*Recorder, *testClock) {
 	t.Helper()
-	clock := &testClock{at: fixtureNow}
-	recorder := New(Options{
-		Enabled:       true,
-		Directory:     t.TempDir(),
-		RetentionDays: 3,
-		MaxSizeMB:     16,
-		Baseline:      baseline,
-	})
-	recorder.nowFn = clock.now
-	recorder.Start()
-	t.Cleanup(recorder.Stop)
-	return recorder, clock
+	return newRecorderWithFacts(t, baseline, nil)
 }
 
 // usageFixture is one payload in the shape the host sends, with every field these tests read
@@ -182,8 +176,7 @@ func TestHandleUsageStoresTheMappedRecord(t *testing.T) {
 		{"alias", record.Alias, "deepseek-flash-2"},
 		{"upstream_model", record.UpstreamModel, "deepseek/deepseek-v4.1-flash"},
 		{"canonical_slug", record.CanonicalSlug, "deepseek/deepseek-v4.1-flash"},
-		{"final_provider", record.FinalProvider, providerFixture},
-		{"resolved_provider", record.ResolvedProvider, providerFixture},
+		{"cpa_provider", record.CPProvider, providerFixture},
 		{"auth_id", record.AuthID, "openai-compatibility:cline1:7cb99c3ced51"},
 		{"auth_index", record.AuthIndex, "b6c17a2d5d0c3862"},
 		{"auth_type", record.AuthType, "apikey"},
@@ -212,12 +205,13 @@ func TestHandleUsageStoresTheMappedRecord(t *testing.T) {
 		t.Errorf("tokens_per_second = %v, want %v", record.TPS, want)
 	}
 
-	// The keys the usage payload cannot fill must be absent, not zero-filled: a v2 record
-	// that carried "frames":0 would make an old reader believe a stream had no chunk.
+	// The keys the usage payload cannot fill must be absent, not zero-filled: a v3 record that
+	// carried "frames":0 would make an old reader believe a stream had no chunk, and one that
+	// carried the gateway keys would make a reader believe a channel had been measured.
 	raw := storedLine(t, recorder, record.RequestID)
-	for _, gone := range []string{"frames", "cost_usd", "is_byok", "protocol", "source_format", "user_agent", "claude_code_version", "client_app", "generation_id", "affinity", "fallbacks_available", "model_attempt_count", "total_provider_attempt_count", "upstream_request_id"} {
+	for _, gone := range []string{"frames", "cost_usd", "is_byok", "protocol", "source_format", "user_agent", "claude_code_version", "client_app", "generation_id", "affinity", "fallbacks_available", "model_attempt_count", "total_provider_attempt_count", "upstream_request_id", "final_provider", "resolved_provider", "gateway_provider", "gateway_resolved_provider", "gateway_slug", "gateway_attempts", "gateway_cost", "channel_source"} {
 		if strings.Contains(raw, `"`+gone+`"`) {
-			t.Errorf("a v2 record carries the retired key %q: %s", gone, raw)
+			t.Errorf("a v3 record carries the key %q: %s", gone, raw)
 		}
 	}
 	// The payload carries credential hashes (APIKey, Source); the record must never persist
@@ -264,8 +258,11 @@ func TestHandleUsageStoresAFailedRecord(t *testing.T) {
 	if record.StatusCode != 503 {
 		t.Errorf("status_code = %d, want the host's own 503", record.StatusCode)
 	}
-	if record.FinalProvider != providerOther {
-		t.Errorf("final_provider = %q, want %q", record.FinalProvider, providerOther)
+	if record.CPProvider != providerOther {
+		t.Errorf("cpa_provider = %q, want %q", record.CPProvider, providerOther)
+	}
+	if record.FinalProvider != "" || record.ChannelSource != "" {
+		t.Errorf("record = %+v, want no gateway channel: this record has no fact, and a failure never gets one", record)
 	}
 	health := recorder.Health()
 	if health.Events != 1 || health.FailedEvents != 1 {
@@ -278,15 +275,27 @@ func TestHandleUsageStoresAFailedRecord(t *testing.T) {
 	if summary.FailedRequests != 1 {
 		t.Errorf("summary.failed_requests = %d, want 1", summary.FailedRequests)
 	}
-	if summary.Resolved != 1 {
-		t.Errorf("summary.resolved_requests = %d, want 1", summary.Resolved)
+	// The failure is countable but not attributable: it has no channel block, so it is not in
+	// a channel row — it is one of the unresolved requests, and it must never be recorded as
+	// the baseline channel.
+	if summary.Resolved != 0 || summary.Unresolved != 1 {
+		t.Errorf("resolved/unresolved = %d/%d, want 0/1 for a record with no fact",
+			summary.Resolved, summary.Unresolved)
 	}
-	providers := map[string]int64{}
-	for _, row := range summary.Providers {
-		providers[row.Provider] = row.Failed
+	if len(summary.Providers) != 0 {
+		t.Errorf("providers = %+v, want no channel row for a failure", summary.Providers)
 	}
-	if providers[providerOther] != 1 {
-		t.Errorf("provider failed counts = %+v, want %s:1", providers, providerOther)
+	if summary.OffBaseline != 0 {
+		t.Errorf("off_baseline = %d, want 0: an unknown channel is not an off-baseline request", summary.OffBaseline)
+	}
+	// The credential dimension still counts it: the host reported which key carried the
+	// failure, which is exactly how a bad key is found.
+	credentials := map[string]int64{}
+	for _, row := range summary.CPAProviders {
+		credentials[row.Provider] = row.Failed
+	}
+	if credentials[providerOther] != 1 {
+		t.Errorf("cpa_providers failed counts = %+v, want %s:1", credentials, providerOther)
 	}
 	hourFailed := int64(0)
 	for _, point := range summary.Hours {
@@ -356,9 +365,10 @@ func TestObserveUsageFallsBackOnMissingFields(t *testing.T) {
 	}
 }
 
-// TestStoreRoundTripAndHourlySummary keeps the store and aggregate tests: what was fed comes
-// back through RecordsSince, and the hourly summary adds up per provider and against the
-// baseline.
+// TestStoreRoundTripAndHourlySummary keeps the store and window tests: what was fed comes back
+// through RecordsSince, and the window adds up per credential even when there is no channel
+// source at all. The channel dimension is covered where there are facts to join; here nothing
+// is joined, which is the deployment with the request-log scanner switched off.
 func TestStoreRoundTripAndHourlySummary(t *testing.T) {
 	recorder, _ := newRecorder(t)
 	first := usageFixture(providerBaseline, fixtureNow.Add(-90*time.Minute))
@@ -380,27 +390,32 @@ func TestStoreRoundTripAndHourlySummary(t *testing.T) {
 	}
 
 	summary := recorder.Summary(mustWindow(t, "24h"))
-	if summary.Resolved != 2 {
-		t.Errorf("resolved_requests = %d, want 2", summary.Resolved)
+	if summary.Resolved != 0 || summary.Unresolved != 2 {
+		t.Errorf("resolved/unresolved = %d/%d, want 0/2: without a channel source nothing joins",
+			summary.Resolved, summary.Unresolved)
 	}
-	if summary.OffBaseline != 1 || summary.OffRatio != 0.5 {
-		t.Errorf("off_baseline = %d (ratio %v), want 1 at 0.5", summary.OffBaseline, summary.OffRatio)
+	if summary.OffBaseline != 0 || summary.OffRatio != 0 {
+		t.Errorf("off_baseline = %d (ratio %v), want 0: the question is asked of the real channel only",
+			summary.OffBaseline, summary.OffRatio)
 	}
 	if summary.Baseline != providerBaseline {
 		t.Errorf("baseline_provider = %q, want %q", summary.Baseline, providerBaseline)
 	}
-	if summary.Channels != 2 {
-		t.Errorf("channels = %d, want 2", summary.Channels)
+	if summary.Channels != 0 || len(summary.Providers) != 0 {
+		t.Errorf("channels = %d with rows %+v, want no channel dimension", summary.Channels, summary.Providers)
 	}
 	seen := map[string]ProviderStat{}
-	for _, provider := range summary.Providers {
+	for _, provider := range summary.CPAProviders {
 		seen[provider.Provider] = provider
 	}
-	if got := seen[providerBaseline]; got.Requests != 1 || got.OffBaseline != 0 || got.Ratio != 0.5 {
-		t.Errorf("%s provider row = %+v, want 1 request on baseline at ratio 0.5", providerBaseline, got)
+	if len(seen) != 2 {
+		t.Fatalf("cpa_providers = %+v, want one row per credential", summary.CPAProviders)
 	}
-	if got := seen[providerOther]; got.Requests != 1 || got.OffBaseline != 1 {
-		t.Errorf("%s provider row = %+v, want 1 request off baseline", providerOther, got)
+	if got := seen[providerBaseline]; got.Requests != 1 || got.Ratio != 0.5 {
+		t.Errorf("%s credential row = %+v, want 1 request at ratio 0.5", providerBaseline, got)
+	}
+	if got := seen[providerOther]; got.Requests != 1 || got.Ratio != 0.5 {
+		t.Errorf("%s credential row = %+v, want 1 request at ratio 0.5", providerOther, got)
 	}
 	// The timeline covers the window hour by hour, not only the hours that saw traffic.
 	if len(summary.Hours) != 25 {
@@ -411,42 +426,29 @@ func TestStoreRoundTripAndHourlySummary(t *testing.T) {
 		t.Errorf("timeline runs %v..%v, want %v..%v", firstHour.Hour, lastHour.Hour,
 			summary.From.Truncate(time.Hour), summary.To.Truncate(time.Hour))
 	}
-}
-
-// TestSummaryFlipsWithTheBaseline pins that off-baseline is a property of the question, not
-// of the record: the same two requests give the opposite answer under the other baseline.
-func TestSummaryFlipsWithTheBaseline(t *testing.T) {
-	flipped, _ := newRecorderWithBaseline(t, providerOther)
-	onBaseline := usageFixture(providerBaseline, fixtureNow.Add(-90*time.Minute))
-	offBaseline := usageFixture(providerOther, fixtureNow.Add(-10*time.Minute))
-	feedUsage(t, flipped, onBaseline)
-	feedUsage(t, flipped, offBaseline)
-
-	summary := flipped.Summary(mustWindow(t, "24h"))
-	if summary.Resolved != 2 || summary.OffBaseline != 1 {
-		t.Fatalf("summary resolved=%d off_baseline=%d, want 2/1", summary.Resolved, summary.OffBaseline)
+	unresolved := int64(0)
+	for _, point := range summary.Hours {
+		unresolved += point.Unresolved
 	}
-	seen := map[string]ProviderStat{}
-	for _, provider := range summary.Providers {
-		seen[provider.Provider] = provider
-	}
-	if got := seen[providerBaseline]; got.OffBaseline != 1 {
-		t.Errorf("%s row = %+v, want it off the flipped baseline", providerBaseline, got)
-	}
-	if got := seen[providerOther]; got.OffBaseline != 0 {
-		t.Errorf("%s row = %+v, want it on the flipped baseline", providerOther, got)
+	if unresolved != 2 {
+		t.Errorf("the timeline's unresolved total = %d, want both records: every hour has to say how much of it is unknown", unresolved)
 	}
 }
 
-// TestWriteCSVCarriesTheNewColumns keeps the export useful: the usage-hook columns are there,
-// the retired ones are gone, and off_baseline is still evaluated against the baseline at read
-// time and case-insensitively.
+// TestWriteCSVCarriesTheNewColumns keeps the export useful: the credential column is
+// cpa_provider, the real channel has its own columns, off_baseline is decided on the channel,
+// and the columns that only ever held a credential under a channel's name are gone.
 func TestWriteCSVCarriesTheNewColumns(t *testing.T) {
-	recorder, _ := newRecorder(t)
-	wire := usageFixture(providerOther, fixtureNow.Add(-time.Minute))
+	source := &factSet{}
+	recorder, clock := newRecorderWithFacts(t, providerBaseline, source)
+	at := clock.at.Add(-time.Minute)
+	wire := usageFixture(providerFixture, at)
+	wire.SessionID = joinRecordSession
 	wire.Detail.CacheReadTokens = 512
 	wire.Detail.CacheCreationTokens = 64
+	stampUsage(&wire, at)
 	feedUsage(t, recorder, wire)
+	source.set(gatewayFact(at.Add(joinArrivalGap), joinSessionUUID, joinGatewayOther))
 
 	lines := csvLines(t, recorder)
 	header := strings.Split(lines[0], ",")
@@ -459,8 +461,9 @@ func TestWriteCSVCarriesTheNewColumns(t *testing.T) {
 		column[name] = row[index]
 	}
 	for _, name := range []string{
-		"final_provider", "resolved_provider", "pinned_provider", "canonical_slug", "off_baseline",
-		"auth_id", "auth_index", "auth_type", "alias", "failed", "cache_read_tokens",
+		"cpa_provider", "gateway_provider", "gateway_resolved_provider", "gateway_slug",
+		"gateway_attempts", "gateway_cost", "channel_source", "pinned_provider", "canonical_slug",
+		"off_baseline", "auth_id", "auth_index", "auth_type", "alias", "failed", "cache_read_tokens",
 		"cache_creation_tokens", "executor_type", "reasoning_effort", "service_tier",
 	} {
 		if _, ok := column[name]; !ok {
@@ -468,27 +471,32 @@ func TestWriteCSVCarriesTheNewColumns(t *testing.T) {
 		}
 	}
 	for _, gone := range []string{
-		"frames", "cost_usd", "is_byok", "affinity", "fallbacks_available",
-		"model_attempts", "provider_attempts", "user_agent", "claude_code_version",
+		"final_provider", "resolved_provider", "frames", "cost_usd", "is_byok", "affinity",
+		"fallbacks_available", "model_attempts", "provider_attempts", "user_agent", "claude_code_version",
 	} {
 		if _, ok := column[gone]; ok {
 			t.Errorf("the export still carries the retired column %s", gone)
 		}
 	}
 	for name, want := range map[string]string{
-		"final_provider":        providerOther,
-		"resolved_provider":     providerOther,
-		"alias":                 "deepseek-flash-2",
-		"auth_type":             "apikey",
-		"executor_type":         "OpenAICompatExecutor",
-		"reasoning_effort":      "high",
-		"service_tier":          "auto",
-		"failed":                "false",
-		"cache_read_tokens":     "512",
-		"cache_creation_tokens": "64",
-		"status_code":           "200",
-		"off_baseline":          "yes",
-		"tokens_per_second":     "35.24",
+		"cpa_provider":              providerFixture,
+		"gateway_provider":          joinGatewayOther,
+		"gateway_resolved_provider": joinGatewayOther,
+		"gateway_slug":              joinGatewayOther + "/deepseek-v4.1-flash",
+		"gateway_attempts":          "1",
+		"gateway_cost":              "0.00001515",
+		"channel_source":            ChannelSourceLog,
+		"alias":                     "deepseek-flash-2",
+		"auth_type":                 "apikey",
+		"executor_type":             "OpenAICompatExecutor",
+		"reasoning_effort":          "high",
+		"service_tier":              "auto",
+		"failed":                    "false",
+		"cache_read_tokens":         "512",
+		"cache_creation_tokens":     "64",
+		"status_code":               "200",
+		"off_baseline":              "yes",
+		"tokens_per_second":         "35.24",
 	} {
 		if column[name] != want {
 			t.Errorf("csv %s = %q, want %q", name, column[name], want)
@@ -497,15 +505,49 @@ func TestWriteCSVCarriesTheNewColumns(t *testing.T) {
 
 	// The same row against the other baseline: the column is computed when it is written, so
 	// the answer follows the question. The comparison is case-insensitive.
-	recorder.options.Baseline = strings.ToUpper(providerOther)
+	recorder.options.Baseline = strings.ToUpper(joinGatewayOther)
 	if got := csvColumn(t, recorder, "off_baseline"); got != "" {
 		t.Errorf("off_baseline = %q for a row on the flipped baseline, want it empty", got)
+	}
+	// The credential column is not the off-baseline column: it keeps its value either way.
+	if got := csvColumn(t, recorder, "cpa_provider"); got != providerFixture {
+		t.Errorf("cpa_provider = %q, want the credential %q", got, providerFixture)
+	}
+}
+
+// TestWriteCSVLeavesTheChannelEmptyWithoutAFact keeps the export from answering a question it
+// has no data for: a record with no fact exports its credential and empty channel columns, and
+// the two numeric channel columns stay at zero rather than being filled with a guess.
+func TestWriteCSVLeavesTheChannelEmptyWithoutAFact(t *testing.T) {
+	recorder, clock := newRecorder(t)
+	at := clock.at.Add(-time.Minute)
+	wire := usageFixture(providerFixture, at)
+	stampUsage(&wire, at)
+	feedUsage(t, recorder, wire)
+
+	header, rows := csvExport(t, recorder)
+	if len(rows) != 1 {
+		t.Fatalf("want 1 exported row, got %d", len(rows))
+	}
+	columns := csvColumnIndex(header)
+	for name, want := range map[string]string{
+		"cpa_provider":     providerFixture,
+		"gateway_provider": "",
+		"gateway_slug":     "",
+		"channel_source":   "",
+		"off_baseline":     "",
+		"gateway_attempts": "0",
+		"gateway_cost":     "0.00000000",
+	} {
+		if got := rows[0][columns[name]]; got != want {
+			t.Errorf("csv %s = %q, want %q", name, got, want)
+		}
 	}
 }
 
 // TestWarmupReadsV1Lines keeps the old on-disk schema readable: a line written by the retired
-// stream-sniffing source has keys a v2 record no longer fills, and it must load without
-// disturbing the collector.
+// stream-sniffing source names its channel with keys this build does not fill, and its
+// final_provider is a CPA credential, so it has to load without being read as a real channel.
 func TestWarmupReadsV1Lines(t *testing.T) {
 	directory := t.TempDir()
 	now := time.Now().UTC()
@@ -544,11 +586,16 @@ func TestWarmupReadsV1Lines(t *testing.T) {
 	if record.Schema != 1 || record.RequestID != "legacy-request" {
 		t.Errorf("record = %+v, want the v1 line unchanged", record)
 	}
-	if record.FinalProvider != providerBaseline || record.PinnedProvider != providerBaseline || record.CostUSD != 0.0012 {
+	if record.CPProvider != providerBaseline || record.PinnedProvider != providerBaseline || record.CostUSD != 0.0012 {
 		t.Errorf("the v1 keys did not survive the round trip: %+v", record)
 	}
-	if summary := recorder.Summary(mustWindow(t, "24h")); summary.Resolved != 1 {
-		t.Errorf("summary resolved = %d, want the v1 line counted", summary.Resolved)
+	// The v1 source named the CPA credential with the names v3 gives to the gateway channel.
+	if record.FinalProvider != "" || record.ResolvedProvider != "" || record.GatewayProvider != "" {
+		t.Errorf("record = %+v, want the v1 final_provider read as the credential, not as a channel", record)
+	}
+	if summary := recorder.Summary(mustWindow(t, "24h")); summary.Unresolved != 1 || summary.Resolved != 0 {
+		t.Errorf("summary resolved/unresolved = %d/%d, want 0/1: a v1 line has no channel",
+			summary.Resolved, summary.Unresolved)
 	}
 }
 
@@ -613,7 +660,9 @@ func TestHandleUsageAlwaysKeepsAndNeverFails(t *testing.T) {
 }
 
 // TestRecorderSurvivesAnUnwritableStore keeps the failure containment: a store that cannot be
-// written still counts the request, still feeds the aggregate, and still answers the host.
+// written still counts the request, still reports the reason, and still answers the host. The
+// window is empty afterwards, and that is the honest answer — the record IS the store, so a
+// request the store refused is a request no view can report.
 func TestRecorderSurvivesAnUnwritableStore(t *testing.T) {
 	directory := filepath.Join(t.TempDir(), "not-a-directory")
 	if errWrite := os.WriteFile(directory, []byte("occupied"), 0o644); errWrite != nil {
@@ -646,8 +695,11 @@ func TestRecorderSurvivesAnUnwritableStore(t *testing.T) {
 		t.Errorf("events = %d, want 1: the request was still observed", health.Events)
 	}
 	summary := recorder.Summary(mustWindow(t, "24h"))
-	if summary.Resolved != 1 || summary.OffBaseline != 0 {
-		t.Errorf("summary = %+v, want the in-memory aggregate to keep working", summary)
+	if summary.Resolved != 0 || summary.Unresolved != 0 {
+		t.Errorf("summary = %+v, want an empty window: nothing reached the store", summary)
+	}
+	if summary.Health.LastError == "" {
+		t.Errorf("summary.health carries no reason for the empty window: %+v", summary.Health)
 	}
 }
 
@@ -769,6 +821,41 @@ func csvColumn(t *testing.T, recorder *Recorder, name string) string {
 	}
 	t.Fatalf("the export has no %s column: %v", name, header)
 	return ""
+}
+
+// csvExport exports the 24h window and returns the header and every data row, so a test can
+// assert on a window with more than one record.
+func csvExport(t *testing.T, recorder *Recorder) ([]string, [][]string) {
+	t.Helper()
+	recorder.Flush()
+	buffer := &bytes.Buffer{}
+	if _, errWrite := recorder.WriteCSV(mustWindow(t, "24h"), buffer); errWrite != nil {
+		t.Fatalf("WriteCSV: %v", errWrite)
+	}
+	reader := csv.NewReader(strings.NewReader(buffer.String()))
+	rows, errRead := reader.ReadAll()
+	if errRead != nil {
+		t.Fatalf("the export must parse as CSV: %v (%q)", errRead, buffer.String())
+	}
+	if len(rows) == 0 {
+		t.Fatalf("the export carries no header: %q", buffer.String())
+	}
+	header := rows[0]
+	for index, row := range rows[1:] {
+		if len(row) != len(header) {
+			t.Fatalf("data row %d has %d fields, the header has %d", index, len(row), len(header))
+		}
+	}
+	return header, rows[1:]
+}
+
+// csvColumnIndex maps the header to the position of each column.
+func csvColumnIndex(header []string) map[string]int {
+	columns := make(map[string]int, len(header))
+	for index, name := range header {
+		columns[name] = index
+	}
+	return columns
 }
 
 // storedLine returns the raw JSONL line of one stored record, so a test can assert on the keys

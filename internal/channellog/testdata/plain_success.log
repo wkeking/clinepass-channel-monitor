@@ -1,0 +1,41 @@
+=== REQUEST INFO ===
+Version: v8.0.8
+URL: /v1/chat/completions
+Method: POST
+Downstream Transport: http
+Upstream Transport: http
+Timestamp: 2026-10-02T22:18:45.585796303+08:00
+
+=== HEADERS ===
+Accept-Encoding: identity
+Accept: text/event-stream
+X-App: cline-cli
+Content-Length: 183
+Authorization: Bearer sk-REDACTED-fixture-only
+Content-Type: application/json
+User-Agent: claude-cli/2.1.0 (external, cli)
+Connection: close
+
+=== REQUEST BODY ===
+{"fixture":"request body redacted for the test"}
+
+=== API REQUEST 1 ===
+Timestamp: 2026-10-02T22:18:45.588384077+08:00
+Upstream URL: https://api.cline.bot/api/v1/chat/completions
+HTTP Method: POST
+Auth: provider=openai-compatible-cline1, auth_id=openai-compatibility:cline1:7cb99c3ced51, label=Cline1, type=api_key value=sk_a...b6ee
+Headers:
+Accept: text/event-stream
+Authorization: Bearer sk_a...b6ee
+Cache-Control: no-cache
+
+=== API RESPONSE 1 ===
+data: {"id":"gen_01M3YFPP549JB6EP8D4RCXD6EH","object":"chat.completion.chunk","created":1790950726,"model":"deepseek/deepseek-v4.1-flash","choices":[{"index":0,"delta":{"role":"assistant"},"logprobs":null,"finish_reason":null}],"system_fingerprint":"fp_jgawxng80g"}
+data: {"choices":[{"delta":{"provider_metadata":{"deepseek":{"choiceIndex":0,"messageRole":"assistant","promptCacheHitTokens":0,"promptCacheMissTokens":37,"responseObject":"chat.completion.chunk","systemFingerprint":"aeb56401ca74e127821c4f9126dcb669"},"gateway":{"cost":"0.00001515","gatewayCost":"0.00001515","generationId":"gen_01M3YFPP549JB6EP8D4RCXD6EH","inferenceCost":"0.00001515","inputInferenceCost":"0.00000555","marketCost":"0.00001515","outputInferenceCost":"0.0000096","routing":{"affinity":{"outcome":"confirmed","pinnedProvider":"deepseek"},"canonicalSlug":"deepseek/deepseek-v4.1-flash","clientSessionId":"sess-ed01ce273d78b615f19287b8325e4aee","clientSessionIdSource":"explicit","fallbacksAvailable":[],"finalProvider":"deepseek","modelAttemptCount":1,"modelAttempts":[{"canonicalSlug":"deepseek/deepseek-v4.1-flash","providerAttemptCount":1,"providerAttempts":[{"credentialType":"system","endTime":1790950726481,"provider":"deepseek","providerRequestId":"4ae0eeb4ebc6bcc03390f31ec70cc26a","providerResponseId":"00b1015b-004f-4132-9223-649fed188560","startTime":1790950725813,"statusCode":200,"success":true}],"success":true}],"originalModelId":"deepseek/deepseek-v4.1-flash","planningReasoning":"Provider set restricted to: deepseek. System credentials planned for: deepseek. Total execution order: deepseek(system)","resolvedProvider":"deepseek","totalProviderAttemptCount":1},"surchargeCost":"0"}}},"finish_reason":"length","index":0,"logprobs":null}],"created":1790950726,"generationId":"gen_01M3YFPP549JB6EP8D4RCXD6EH","id":"gen_01M3YFPP549JB6EP8D4RCXD6EH","model":"deepseek/deepseek-v4.1-flash","object":"chat.completion.chunk","system_fingerprint":"fp_jgawxng80g","usage":{"cache_creation_input_tokens":0,"completion_tokens":16,"completion_tokens_details":{"image_tokens":0,"reasoning_tokens":16},"cost":0.00001515,"cost_details":null,"gateway_cost":0.00001515,"is_byok":false,"market_cost":0.00001515,"prompt_tokens":37,"prompt_tokens_details":{"audio_tokens":0,"cached_tokens":0,"video_tokens":0},"total_tokens":53}}
+data: [DONE]
+
+=== RESPONSE ===
+Status: 200
+Access-Control-Expose-Headers: X-CPA-TRACE-ID, X-CPA-VERSION, X-CPA-COMMIT, X-CPA-BUILD-DATE, X-CPA-SUPPORT-PLUGIN, X-CPA-HOME-VERSION, X-CPA-HOME-BUILD-DATE, X-SERVER-VERSION, X-SERVER-BUILD-DATE, Lo
+Content-Type: text/event-stream
+

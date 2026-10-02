@@ -27,6 +27,14 @@ const (
 	// channel". ClinePass answers "deepseek" today; it is configuration, not a constant,
 	// because the expected channel is a property of the subscription, not of Cline.
 	DefaultChannelBaselineProvider = "deepseek"
+	// DefaultChannelLogDir is where CPA writes its per-request debug logs: /opt/cpa/logs on the
+	// host, mounted at this path inside the container. It is the directory the plugin's own
+	// store lives in a SUBDIRECTORY of, which is why the scanner never recurses.
+	DefaultChannelLogDir = "/CLIProxyAPI/logs"
+	// DefaultChannelLogMinAgeSeconds is how long a log file must have been untouched before the
+	// scanner reads it. CPA appends to a file while the request is running, and a file read
+	// half-way yields a fact that describes no request.
+	DefaultChannelLogMinAgeSeconds = 5
 	// DefaultChannelRetentionDays and DefaultChannelMaxSizeMB bound the on-disk history.
 	// Retention is the primary limit; the size cap is the safety net for a traffic burst
 	// that makes a day of records far larger than usual.
@@ -96,6 +104,22 @@ type Config struct {
 	ChannelMaxSizeMB     int `yaml:"channel_max_size_mb"`
 	// ChannelBaselineProvider is the provider the "off-channel" ratio is measured against.
 	ChannelBaselineProvider string `yaml:"channel_baseline_provider"`
+
+	// ---- CPA 请求日志渠道补全 ----
+	// ChannelLogEnabled switches the CPA request-log scanner on. It is off by default, and the
+	// default matters: CPA only writes those files while observability.logs.request-log is on
+	// AND server.commercial-mode is off, they carry the client's plaintext prompt, and the
+	// scanner can only replace what the usage hook is missing — the gateway channel block on
+	// Responses traffic, which the translation step drops.
+	ChannelLogEnabled bool `yaml:"channel_log_enabled"`
+	// ChannelLogDir is the directory CPA writes the request logs into, and the directory the
+	// scanner lists: one level only, `.log` files only, never main.log.
+	ChannelLogDir string `yaml:"channel_log_dir"`
+	// ChannelLogDeleteAfterRead unlinks a log file once its fact has been stored. It is on by
+	// default: the files hold a plaintext prompt, and the fact is what the plugin keeps.
+	ChannelLogDeleteAfterRead bool `yaml:"channel_log_delete_after_read"`
+	// ChannelLogMinAgeSeconds is how old a file must be before it is read.
+	ChannelLogMinAgeSeconds int `yaml:"channel_log_min_age_seconds"`
 }
 
 // Duration accepts both Go duration strings ("5s", "1m30s") and plain numbers,
@@ -152,6 +176,11 @@ func Default() Config {
 		ChannelRetentionDays:    DefaultChannelRetentionDays,
 		ChannelMaxSizeMB:        DefaultChannelMaxSizeMB,
 		ChannelBaselineProvider: DefaultChannelBaselineProvider,
+
+		ChannelLogEnabled:         false,
+		ChannelLogDir:             DefaultChannelLogDir,
+		ChannelLogDeleteAfterRead: true,
+		ChannelLogMinAgeSeconds:   DefaultChannelLogMinAgeSeconds,
 	}
 }
 
@@ -249,6 +278,14 @@ func normalize(cfg *Config) {
 		cfg.ChannelBaselineProvider = DefaultChannelBaselineProvider
 	}
 	cfg.ChannelBaselineProvider = strings.ToLower(strings.TrimSpace(cfg.ChannelBaselineProvider))
+	if strings.TrimSpace(cfg.ChannelLogDir) == "" {
+		cfg.ChannelLogDir = DefaultChannelLogDir
+	}
+	if cfg.ChannelLogMinAgeSeconds < 0 {
+		// A negative age would mean "read a file before it exists"; zero is allowed and means
+		// "read it as soon as it appears", which is what a short-lived debug window wants.
+		cfg.ChannelLogMinAgeSeconds = DefaultChannelLogMinAgeSeconds
+	}
 }
 
 // HostMatched reports whether a Cline entry's base_url host is one of the configured hosts.

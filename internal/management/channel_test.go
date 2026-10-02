@@ -9,48 +9,110 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wkeking/clinepass-channel-monitor/internal/channellog"
 	"github.com/wkeking/clinepass-channel-monitor/internal/observation"
 	"github.com/wkeking/clinepass-channel-monitor/internal/state"
 )
 
 // The 「渠道」 view is three things that have to agree: the page's static skeleton, the JSON
 // behind it (/channel) and the export beside it (/channel.csv). One completed request is fed
-// through a real recorder over the same usage.handle path a deployment uses, and the fixture
-// lands on the baseline channel, which is what makes the off_baseline column checkable.
+// through a real recorder over the same usage.handle path a deployment uses, and a parsed
+// request-log fact is put beside it, because the view answers with both halves: the CPA
+// credential the usage hook reported and the gateway channel only the log knows.
 
 const (
 	// channelFixtureBaseline is the provider the recorder is configured to treat as the
-	// official channel. The fixture reports it, so the fed request is on baseline.
+	// official channel, and it is also the CPA credential the fixture request reports. Both
+	// dimensions carry the same name here on purpose: the join test below then makes the fact
+	// name a different channel, which is what shows the two tables answer different questions.
 	channelFixtureBaseline = "deepseek"
 	// channelFixtureRequestID identifies the one request every test here feeds.
 	channelFixtureRequestID = "req-channel-fixture-1"
 	// channelFixtureModel is the model the client asked for.
 	channelFixtureModel = "deepseek-flash-1"
+	// channelFixtureSessionUUID is the uuid behind the "Session_id: session-<uuid>" header. A
+	// client that sends the header gets it recorded as "codex:session-<uuid>", which is what
+	// the join matches the fact on; the fixtures that do not send one can never be joined.
+	channelFixtureSessionUUID = "5e4d3c2b1a09"
+	// channelFixtureGateway is the real channel the fixture fact names, which is deliberately
+	// not the credential: the gateway answered on this one.
+	channelFixtureGateway = "moonshot"
+	// channelFixtureGatewayCost is the gateway's own cost figure for that request.
+	channelFixtureGatewayCost = 0.00001515
+	// channelFixtureArrivalGap is how far the log's arrival timestamp sits from the
+	// usage-reported time; live traffic measures 72-218 ms.
+	channelFixtureArrivalGap = 120 * time.Millisecond
 )
 
 // channelUsagePayload renders the usage.handle payload of one completed request. Provider is
-// the credential the request was routed to — the channel the view answers with — and
-// RequestedAt is stamped at call time so the record falls inside the window the handlers
-// query. Both timings are zero on purpose: such a record carries no measured decode speed,
-// which is what makes the "no tokens_per_second key" assertion below meaningful.
+// the CPA credential the request was routed to, which is what the record stores as
+// cpa_provider; RequestedAt is stamped at call time so the record falls inside the window the
+// handlers query. Both timings are zero on purpose: such a record carries no measured decode
+// speed, which is what makes the "no tokens_per_second key" assertion below meaningful.
 func channelUsagePayload() []byte {
+	return channelUsagePayloadAt("sess-channel-fixture", time.Now().UTC())
+}
+
+// channelUsagePayloadAt renders the same payload with a session header the test chooses and a
+// timestamp it controls, so a fact can be placed relative to the record to the millisecond.
+func channelUsagePayloadAt(sessionID string, at time.Time) []byte {
 	return []byte(`{"Provider":"` + channelFixtureBaseline + `","BaseURL":"https://api.cline.bot",` +
 		`"ExecutorType":"OpenAICompatExecutor","Model":"` + channelFixtureModel + `","Alias":"deepseek-flash-2",` +
 		`"APIKey":"sk_channel_fixture","RequestID":"` + channelFixtureRequestID + `","TraceID":"` + channelFixtureRequestID + `",` +
-		`"SessionID":"sess-channel-fixture","ParentSessionID":"","AuthID":"openai-compatibility:cline1:fixture",` +
+		`"SessionID":"` + sessionID + `","ParentSessionID":"","AuthID":"openai-compatibility:cline1:fixture",` +
 		`"AuthIndex":"fixture-index","AuthType":"apikey","Source":"sk_channel_fixture","ReasoningEffort":"high",` +
 		`"ServiceTier":"auto","ResponseServiceTier":"","ResponseModel":"deepseek/deepseek-v4.1-flash",` +
 		`"Generate":true,"Stream":true,"Failed":false,"Failure":{"StatusCode":0,"Body":""},` +
 		`"Detail":{"InputTokens":800,"OutputTokens":200,"ReasoningTokens":200,"CachedTokens":512,` +
 		`"CacheReadTokens":0,"CacheCreationTokens":0,"TotalTokens":1000},` +
-		`"RequestedAt":"` + time.Now().UTC().Format(time.RFC3339) + `","Latency":0,"TTFT":0}`)
+		`"RequestedAt":"` + at.UTC().Format(time.RFC3339) + `","Latency":0,"TTFT":0}`)
 }
+
+// channelFixtureFact is the parsed request log of the fixture request: the same session, an
+// arrival timestamp 120 ms after the record's, and the gateway channel the request really
+// landed on.
+func channelFixtureFact(at time.Time) channellog.Fact {
+	return channellog.Fact{
+		Time:                      at,
+		Path:                      "/v1/responses",
+		Method:                    "POST",
+		SessionID:                 "session-" + channelFixtureSessionUUID,
+		SessionUUID:               channelFixtureSessionUUID,
+		HasSession:                true,
+		FinalProvider:             channelFixtureGateway,
+		ResolvedProvider:          channelFixtureGateway,
+		CanonicalSlug:             channelFixtureGateway + "/deepseek-v4.1-flash",
+		OriginalModelID:           channelFixtureGateway + "/deepseek-v4.1-flash",
+		PinnedProvider:            channelFixtureGateway,
+		AffinityOutcome:           "confirmed",
+		ModelAttemptCount:         1,
+		TotalProviderAttemptCount: 1,
+		GatewayCost:               channelFixtureGatewayCost,
+		Frames:                    5,
+		AttemptsSeen:              1,
+		SourceFile:                "v1_responses-fixture.log",
+		ParsedAt:                  at,
+	}
+}
+
+// fixtureFacts is a FactSource the test fills in: the recorder reads it on every query, which
+// is how a fact that arrives after the record it belongs to is still picked up.
+type fixtureFacts []channellog.Fact
+
+func (facts fixtureFacts) Facts() []channellog.Fact { return facts }
 
 // startChannelRecorder publishes a started collector and points both entry points at it:
 // the handlers read state.Observation(), the usage entry point reads observation.Active().
 // The directory is returned because /health and the view both report it. Both are package
 // state, so the cleanup unsets them: a leak here would decide the next test's answer.
 func startChannelRecorder(t *testing.T) (*observation.Recorder, string) {
+	t.Helper()
+	return startChannelRecorderWithFacts(t, nil)
+}
+
+// startChannelRecorderWithFacts is startChannelRecorder with the gateway half wired in. A nil
+// source is the deployment whose request-log scanner is switched off: nothing joins.
+func startChannelRecorderWithFacts(t *testing.T, facts observation.FactSource) (*observation.Recorder, string) {
 	t.Helper()
 	loadTestConfig(defaultConfigBytes())
 	directory := t.TempDir()
@@ -60,6 +122,7 @@ func startChannelRecorder(t *testing.T) (*observation.Recorder, string) {
 		RetentionDays: 3,
 		MaxSizeMB:     16,
 		Baseline:      channelFixtureBaseline,
+		Facts:         facts,
 	})
 	recorder.Start()
 	t.Cleanup(func() {
@@ -77,7 +140,13 @@ func startChannelRecorder(t *testing.T) (*observation.Recorder, string) {
 // view reads its records back from the store.
 func feedChannelRequest(t *testing.T, recorder *observation.Recorder) {
 	t.Helper()
-	if _, errHandle := observation.HandleUsage(channelUsagePayload()); errHandle != nil {
+	feedChannelPayload(t, recorder, channelUsagePayload())
+}
+
+// feedChannelPayload replays one payload chosen by the test.
+func feedChannelPayload(t *testing.T, recorder *observation.Recorder, payload []byte) {
+	t.Helper()
+	if _, errHandle := observation.HandleUsage(payload); errHandle != nil {
 		t.Fatalf("HandleUsage: %v", errHandle)
 	}
 	recorder.Flush()
@@ -174,9 +243,19 @@ func TestChannelViewPayload(t *testing.T) {
 	envelope := decodeObject(t, response.Body, "the /channel payload")
 	requireKeys(t, "the /channel payload", envelope, "enabled", "summary", "records", "records_total", "health")
 	requireKeys(t, "summary", decodeObject(t, envelope["summary"], "summary"),
-		"resolved_requests", "off_baseline_requests", "baseline_provider", "hours")
+		"resolved_requests", "unresolved_requests", "off_baseline_requests", "baseline_provider",
+		"providers", "cpa_providers", "hours")
 	recordKeys := decodeObject(t, firstElement(t, envelope["records"], "records"), "records[0]")
-	requireKeys(t, "records[0]", recordKeys, "final_provider", "resolved_provider", "ttft_ms")
+	requireKeys(t, "records[0]", recordKeys, "cpa_provider", "ttft_ms")
+	// No fact source is wired here, so the record has no gateway channel. The key must be
+	// absent rather than empty: a page that reads final_provider as a channel has to be able
+	// to tell "unknown" from "on the baseline".
+	for _, absent := range []string{"final_provider", "resolved_provider", "gateway_provider", "channel_source"} {
+		if _, present := recordKeys[absent]; present {
+			t.Errorf("records[0] carries %s = %s with no fact source wired, want the key omitted",
+				absent, recordKeys[absent])
+		}
+	}
 
 	var payload struct {
 		Enabled      bool                 `json:"enabled"`
@@ -191,11 +270,18 @@ func TestChannelViewPayload(t *testing.T) {
 	if !payload.Enabled {
 		t.Error("enabled = false, want true while a recorder is published")
 	}
-	if payload.Summary.Resolved != 1 {
-		t.Errorf("resolved_requests = %d, want 1 for the one fed request", payload.Summary.Resolved)
+	// The window has one record and no channel for it: the honest split is 0 resolved, 1
+	// unresolved, and neither number is allowed to be a baseline hit.
+	if payload.Summary.Resolved != 0 || payload.Summary.Unresolved != 1 {
+		t.Errorf("resolved/unresolved = %d/%d, want 0/1 without a fact source",
+			payload.Summary.Resolved, payload.Summary.Unresolved)
+	}
+	if len(payload.Summary.Providers) != 0 || len(payload.Summary.CPAProviders) != 1 {
+		t.Errorf("providers = %+v with cpa_providers = %+v, want only the credential row",
+			payload.Summary.Providers, payload.Summary.CPAProviders)
 	}
 	if payload.Summary.OffBaseline != 0 {
-		t.Errorf("off_baseline_requests = %d, want 0: the fixture landed on the baseline channel", payload.Summary.OffBaseline)
+		t.Errorf("off_baseline_requests = %d, want 0: an unknown channel is not off baseline", payload.Summary.OffBaseline)
 	}
 	if payload.Summary.Baseline != channelFixtureBaseline {
 		t.Errorf("baseline_provider = %q, want %q", payload.Summary.Baseline, channelFixtureBaseline)
@@ -225,9 +311,12 @@ func TestChannelViewPayload(t *testing.T) {
 	if record.RequestID != channelFixtureRequestID {
 		t.Errorf("request_id = %q, want %q", record.RequestID, channelFixtureRequestID)
 	}
-	if record.FinalProvider != channelFixtureBaseline || record.ResolvedProvider != channelFixtureBaseline {
-		t.Errorf("channel = %q/%q, want %q/%q", record.FinalProvider, record.ResolvedProvider,
-			channelFixtureBaseline, channelFixtureBaseline)
+	if record.CPProvider != channelFixtureBaseline {
+		t.Errorf("cpa_provider = %q, want the credential %q the payload reported",
+			record.CPProvider, channelFixtureBaseline)
+	}
+	if record.FinalProvider != "" || record.GatewayProvider != "" || record.ChannelSource != "" {
+		t.Errorf("record = %+v, want no gateway channel: no fact source is wired into this recorder", record)
 	}
 	if record.TTFTMs != 0 {
 		t.Errorf("ttft_ms = %d, want 0: the fixture payload reports no TTFT", record.TTFTMs)
@@ -249,15 +338,19 @@ func TestChannelViewPayload(t *testing.T) {
 			recordKeys["tokens_per_second"])
 	}
 	encoded, errMarshal := json.Marshal(observation.Record{
-		FinalProvider:    channelFixtureBaseline,
-		ResolvedProvider: channelFixtureBaseline,
-		TTFTMs:           42,
-		TPS:              1234.5,
+		CPProvider:      channelFixtureBaseline,
+		FinalProvider:   channelFixtureGateway,
+		GatewayProvider: channelFixtureGateway,
+		ChannelSource:   observation.ChannelSourceLog,
+		TTFTMs:          42,
+		TPS:             1234.5,
 	})
 	if errMarshal != nil {
 		t.Fatalf("a record must marshal: %v", errMarshal)
 	}
-	for _, key := range []string{"final_provider", "resolved_provider", "ttft_ms", "tokens_per_second"} {
+	for _, key := range []string{
+		"cpa_provider", "final_provider", "gateway_provider", "channel_source", "ttft_ms", "tokens_per_second",
+	} {
 		if !strings.Contains(string(encoded), `"`+key+`"`) {
 			t.Errorf("the record the view marshals is missing the %s key: %s", key, encoded)
 		}
@@ -292,8 +385,9 @@ func TestChannelInvalidWindow(t *testing.T) {
 }
 
 // TestChannelCSVExport asserts the export is a real attachment with the channel columns and
-// one row per stored record. The row of the fed request is on the baseline channel, so its
-// off_baseline cell has to be empty rather than "no": the column marks deviation.
+// one row per stored record. This recorder has no fact source, so the row carries the
+// credential and empty channel columns: off_baseline has to be empty rather than "no", because
+// the column marks deviation and this row has nothing to deviate from.
 func TestChannelCSVExport(t *testing.T) {
 	recorder, _ := startChannelRecorder(t)
 	feedChannelRequest(t, recorder)
@@ -325,21 +419,128 @@ func TestChannelCSVExport(t *testing.T) {
 	for position, name := range header {
 		column[name] = position
 	}
-	for _, name := range []string{"final_provider", "resolved_provider", "pinned_provider", "canonical_slug", "off_baseline"} {
+	for _, name := range []string{
+		"cpa_provider", "gateway_provider", "gateway_resolved_provider", "gateway_slug",
+		"gateway_attempts", "gateway_cost", "channel_source",
+		"pinned_provider", "canonical_slug", "off_baseline",
+	} {
 		if _, ok := column[name]; !ok {
 			t.Fatalf("the export has no %s column: %v", name, header)
 		}
 	}
-	if got := row[column["final_provider"]]; got != channelFixtureBaseline {
-		t.Errorf("final_provider = %q, want %q", got, channelFixtureBaseline)
+	for _, gone := range []string{"final_provider", "resolved_provider"} {
+		if _, ok := column[gone]; ok {
+			t.Errorf("the export still carries the %s column, which used to hold the credential", gone)
+		}
 	}
-	if got := row[column["resolved_provider"]]; got != channelFixtureBaseline {
-		t.Errorf("resolved_provider = %q, want %q", got, channelFixtureBaseline)
+	if got := row[column["cpa_provider"]]; got != channelFixtureBaseline {
+		t.Errorf("cpa_provider = %q, want %q", got, channelFixtureBaseline)
+	}
+	for _, name := range []string{"gateway_provider", "gateway_resolved_provider", "gateway_slug", "channel_source"} {
+		if got := row[column[name]]; got != "" {
+			t.Errorf("%s = %q, want it empty: this record has no fact", name, got)
+		}
 	}
 	if got := row[column["off_baseline"]]; got != "" {
-		t.Errorf("off_baseline = %q for a row on the baseline channel, want it empty", got)
+		t.Errorf("off_baseline = %q for a row with no known channel, want it empty", got)
 	}
 	if got, want := response.Headers.Get("X-Record-Count"), strconv.Itoa(len(rows)-1); got != want {
 		t.Errorf("X-Record-Count = %q, want %q", got, want)
+	}
+}
+
+// TestChannelViewJoinsTheGatewayChannel drives the whole path through the handlers: a usage
+// payload the host reported, a fact the request-log scanner parsed, and the two dimensions
+// they produce in the view and in the export.
+func TestChannelViewJoinsTheGatewayChannel(t *testing.T) {
+	at := time.Now().UTC().Truncate(time.Second).Add(-time.Minute)
+	recorder, _ := startChannelRecorderWithFacts(t, fixtureFacts{
+		channelFixtureFact(at.Add(channelFixtureArrivalGap)),
+	})
+	// The record and the fact share the session uuid; only the fact knows the channel.
+	feedChannelPayload(t, recorder, channelUsagePayloadAt("codex:session-"+channelFixtureSessionUUID, at))
+
+	request := pluginAPIRequest(BasePath + "/channel?window=24h")
+	response := route(&request)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("GET /channel: status = %d", response.StatusCode)
+	}
+	envelope := decodeObject(t, response.Body, "the /channel payload")
+	recordKeys := decodeObject(t, firstElement(t, envelope["records"], "records"), "records[0]")
+	requireKeys(t, "records[0]", recordKeys,
+		"cpa_provider", "final_provider", "resolved_provider", "gateway_provider",
+		"gateway_resolved_provider", "gateway_slug", "gateway_attempts", "gateway_cost", "channel_source")
+	for key, want := range map[string]string{
+		"cpa_provider":              `"` + channelFixtureBaseline + `"`,
+		"final_provider":            `"` + channelFixtureGateway + `"`,
+		"resolved_provider":         `"` + channelFixtureGateway + `"`,
+		"gateway_provider":          `"` + channelFixtureGateway + `"`,
+		"gateway_resolved_provider": `"` + channelFixtureGateway + `"`,
+		"gateway_slug":              `"` + channelFixtureGateway + `/deepseek-v4.1-flash"`,
+		"gateway_attempts":          "1",
+		"gateway_cost":              "0.00001515",
+		"channel_source":            `"` + observation.ChannelSourceLog + `"`,
+	} {
+		if got := string(recordKeys[key]); got != want {
+			t.Errorf("records[0].%s = %s, want %s", key, got, want)
+		}
+	}
+
+	var payload struct {
+		Summary observation.Summary `json:"summary"`
+	}
+	if errUnmarshal := json.Unmarshal(response.Body, &payload); errUnmarshal != nil {
+		t.Fatalf("the /channel payload must decode into the view shape: %v", errUnmarshal)
+	}
+	summary := payload.Summary
+	if summary.Resolved != 1 || summary.Unresolved != 0 {
+		t.Errorf("resolved/unresolved = %d/%d, want 1/0 for a joined record", summary.Resolved, summary.Unresolved)
+	}
+	if summary.OffBaseline != 1 || summary.OffRatio != 1 {
+		t.Errorf("off_baseline = %d (ratio %v), want 1 at 1: the real channel is %q, not the baseline",
+			summary.OffBaseline, summary.OffRatio, channelFixtureGateway)
+	}
+	if len(summary.Providers) != 1 || summary.Providers[0].Provider != channelFixtureGateway {
+		t.Fatalf("providers = %+v, want the real channel %q", summary.Providers, channelFixtureGateway)
+	}
+	if summary.Providers[0].OffBaseline != 1 {
+		t.Errorf("the channel row = %+v, want it off the baseline", summary.Providers[0])
+	}
+	// The credential dimension is the one that was there before the channel log: same
+	// request, the other half of it.
+	if len(summary.CPAProviders) != 1 || summary.CPAProviders[0].Provider != channelFixtureBaseline {
+		t.Fatalf("cpa_providers = %+v, want the credential %q", summary.CPAProviders, channelFixtureBaseline)
+	}
+	if summary.CPAProviders[0].OffBaseline != 0 {
+		t.Errorf("the credential row = %+v, want off_baseline 0 in the credential dimension", summary.CPAProviders[0])
+	}
+
+	// The export tells the same story as the view: the credential under cpa_provider, the
+	// channel under gateway_provider, and off_baseline decided on the channel.
+	csvRequest := pluginAPIRequest(BasePath + "/channel.csv?window=24h")
+	csvResponse := route(&csvRequest)
+	rows, errRead := csv.NewReader(strings.NewReader(string(csvResponse.Body))).ReadAll()
+	if errRead != nil {
+		t.Fatalf("the export must parse as CSV: %v", errRead)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("the export has %d rows, want a header and one data row", len(rows))
+	}
+	column := map[string]int{}
+	for position, name := range rows[0] {
+		column[name] = position
+	}
+	for name, want := range map[string]string{
+		"cpa_provider":              channelFixtureBaseline,
+		"gateway_provider":          channelFixtureGateway,
+		"gateway_resolved_provider": channelFixtureGateway,
+		"gateway_slug":              channelFixtureGateway + "/deepseek-v4.1-flash",
+		"gateway_attempts":          "1",
+		"channel_source":            observation.ChannelSourceLog,
+		"off_baseline":              "yes",
+	} {
+		if got := rows[1][column[name]]; got != want {
+			t.Errorf("csv %s = %q, want %q", name, got, want)
+		}
 	}
 }

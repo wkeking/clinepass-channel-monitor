@@ -128,6 +128,11 @@ type healthResponse struct {
 	// streamed responses it resolved a channel for, how many it had to drop, and when it
 	// last wrote a record. A deployment with no new rows on the 「渠道」 view starts here.
 	ChannelObservation observation.Health `json:"channel_observation"`
+	// ChannelLog is the CPA request-log scanner, exposed beside ChannelObservation because the
+	// two answer different halves of the same question: the collector reports the credential CPA
+	// routed to, and the scanner reports the gateway channel the upstream response named. A
+	// deployment whose 「渠道」 rows show a credential but no gateway channel starts here.
+	ChannelLog channelLogView `json:"channel_log"`
 	// RequestHeaderNames and RequestBearerLen describe the last request seen on the request
 	// path. This build declares no request capability, so they stay empty; they are kept
 	// because they never contain a credential value, only header names and a length.
@@ -174,6 +179,7 @@ func buildHealthResponse() healthResponse {
 		RequestHeaderNames: headerNames,
 		RequestBearerLen:   bearerLen,
 		ChannelObservation: observationHealth(),
+		ChannelLog:         channelLogSnapshot(),
 	}
 	resp.PlanUsage = plan.UsageState{Enabled: cfg.PlanUsageEnabled}
 	if poller := state.Plan(); poller != nil {

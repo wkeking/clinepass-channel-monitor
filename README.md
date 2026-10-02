@@ -348,11 +348,22 @@ make install INSTALL_DIR=/opt/cpa/plugins/<goos>/<goarch>
 
 1. `make build` 构建本机架构的 `.so`；
 2. `make install INSTALL_DIR=/opt/cpa/plugins/<goos>/<goarch>` 把它拷进插件目录（`<goos>`/`<goarch>` 例如 `linux/amd64`）。用户级安装是默认值 `/opt/cpa/plugins/$(GOOS)/$(GOARCH)`；
-3. **删掉上一版本的 `.so`**：文件名带版本号时（形如 `clinepass-channel-monitor-v<版本>.so`）新旧会同时被扫描到，先移走旧的再装新的，别让两个版本共存；
-4. **重载插件**：对插件配置做一次 `PATCH` 把 `enabled` 关掉再打开（`false` → 停 → `true`），让 CPA 重新注册这个插件。**配置 `PUT` 里值没变不会触发重载**，改配置值也算；
-5. 确认：`GET /v0/management/plugins` 里本插件 `registered: true`、`effective_enabled: true`、版本是 `0.3.0`。
+3. **重载插件**：对插件配置做一次 `PATCH` 把 `enabled` 关掉再打开（`false` → 停 → `true`），让 CPA 重新注册这个插件。**配置 `PUT` 里值没变不会触发重载**，改配置值也算；
+4. 确认：`GET /v0/management/plugins` 里本插件 `registered: true`、`effective_enabled: true`、版本是 `0.3.0`；
+5. **最后**才删掉上一版本的 `.so`。文件名带版本号时（形如 `clinepass-channel-monitor-v<版本>.so`）新旧会同时被扫描到，但**不要在装新版本之前删掉正在运行的那个 `.so`**：实测先 `rm` 掉活动版本、再装新版本并 `PATCH enabled`，宿主会停在
+   `registered:false, enabled:true, effective_enabled:false`（页面与 `/health` 一起 404，`main.log` 里连 `pluginhost:` 行都没有），连续 7 次 `enabled:true` 都救不回来，只有 `sudo docker restart cpa` 才恢复。
+   正常流程下宿主自己会退休旧版本，`main.log` 会打印 `plugin hot reloaded … retired_version=<旧版本> retired_path=<旧文件>`，看到这行再删旧文件最稳。
 
-**`{"status":"ok"}` 不代表加载成功**（实测踩过）：两次连续的 `enabled` PATCH 撞上配置重载时，第二次可能被内存态回写覆盖，插件停在 `registered:false`，页面与 `/health` 直接 404，而 `main.log` 里只有 200 的 PATCH 记录、**没有** `pluginhost: plugin loaded`。所以别信 PATCH 的回执，回读列表，是 `false` 就再发一次 `enabled:true`；成功时 `main.log` 会打印 `pluginhost: plugin loaded / registered / hot reloaded … version=<新版本>`。
+**`{"status":"ok"}` 不代表加载成功**（实测踩过两次）：两次连续的 `enabled` PATCH 撞上配置重载时，第二次可能被内存态回写覆盖，插件停在 `registered:false`，页面与 `/health` 直接 404，而 `main.log` 里只有 200 的 PATCH 记录、**没有** `pluginhost: plugin loaded`。所以别信 PATCH 的回执，回读列表，是 `false` 就再发一次 `enabled:true`；热重载成功时 `main.log` 会打印 `pluginhost: plugin loaded / registered / hot reloaded … version=<新版本>`（进程启动时的那次加载不写这些行，判据一律以回读列表为准）。
+
+**卡住了就重启容器**：上面那些 `registered:false` 的场景里，重复 PATCH 无效时用 `sudo docker restart cpa`（约 3 s 端口恢复）。重启后不需要再 PATCH，`plugins.configs.<id>.enabled: true` 会让宿主在启动时按目录重新扫描并加载。
+
+**怎么确认部署的 `.so` 就是当前源码构建的**：两边跑同一条命令再比哈希，注意 `sort` 必须钉住 locale，否则 BSD `sort`（macOS）与 glibc `sort`（服务器）的排序不同，会得到假的不一致：
+
+```bash
+find internal cmd -type f \( -name '*.go' -o -name '*.html' \) | LC_ALL=C sort | xargs sha256sum | sha256sum
+# 编译输入一致即可认定同一个 .so；整树比对还要排掉本地新改、尚未同步的文件，例如 docs/、README.md
+```
 
 ```bash
 export CPA_MANAGEMENT_KEY='<your-management-key>'

@@ -101,34 +101,6 @@ td.num,th.num{text-align:right}
     </div>
   </section>
 
-  <section id="channel-section">
-    <h2 style="display:flex;align-items:center;gap:10px">渠道<span class="info" id="channel-info" tabindex="0" aria-describedby="channel-info-tip" aria-label="渠道口径说明">!<span class="tip" id="channel-info-tip" role="tooltip"></span></span><button id="channel-csv" style="margin-left:auto;padding:4px 10px;font-size:12px;font-weight:600;letter-spacing:0;text-transform:none">导出 CSV</button></h2>
-    <div class="msg hidden" id="channel-off"></div>
-    <div class="msg hidden" id="channel-msg"></div>
-    <div id="channel-data" class="hidden">
-      <div class="sub" id="channel-headline" style="margin:-4px 0 10px"></div>
-      <div class="sub" id="channel-note" style="margin:-4px 0 12px"></div>
-      <div class="cards" id="channel-cards"></div>
-      <div class="sub" id="channel-providers-note" style="margin:18px 0 8px;font-weight:600">渠道分布</div>
-      <div class="wrap"><table id="channel-providers"><thead>
-        <tr><th>渠道</th><th class="num">请求</th><th class="num">占比</th><th class="num">偏离</th><th class="num">TTFT p50</th><th class="num">TTFT p90</th><th class="num">解码 p50</th><th class="num">输入</th><th class="num">输出</th><th class="num">缓存</th><th class="num">成本</th></tr>
-      </thead><tbody></tbody></table></div>
-      <div class="sub" id="channel-models-note" style="margin:18px 0 8px;font-weight:600">按模型</div>
-      <div class="wrap"><table id="channel-models"><thead>
-        <tr><th>模型</th><th class="num">请求</th><th class="num">偏离</th><th class="num">TTFT p50</th><th class="num">解码 p50</th></tr>
-      </thead><tbody></tbody></table></div>
-      <div class="sub" id="channel-timeline-note" style="margin:18px 0 8px;font-weight:600">时间线（每小时）</div>
-      <div class="cards" id="channel-timeline"></div>
-      <div class="wrap" style="margin-top:14px"><table id="channel-hours"><thead>
-        <tr><th>时间</th><th class="num">请求</th><th class="num">偏离</th><th class="num">回退</th><th class="num">TTFT p50</th><th class="num">解码 p50</th><th class="num">成本</th></tr>
-      </thead><tbody></tbody></table></div>
-      <div class="sub" id="channel-records-note" style="margin:18px 0 8px;font-weight:600">原始记录</div>
-      <div class="wrap"><table id="channel-records"><thead>
-        <tr><th>时间</th><th>模型</th><th>渠道</th><th>绑定</th><th class="num">尝试</th><th class="num">TTFT</th><th class="num">解码 t/s</th><th class="num">输入/输出/缓存</th><th class="num">状态</th><th>会话</th></tr>
-      </thead><tbody></tbody></table></div>
-    </div>
-  </section>
-
   <section id="plan-section">
     <h2>Cline 套餐用量（官方接口）</h2>
     <div class="plan-head">
@@ -157,6 +129,34 @@ td.num,th.num{text-align:right}
       <tr><th>模型</th><th class="num">请求</th><th class="num">输入 / 输出</th><th class="num">缓存命中率</th><th class="num">参考成本</th><th class="num">扣 credits</th></tr>
     </thead><tbody></tbody></table></div>
     <div class="msg hidden" id="models-msg"></div>
+  </section>
+
+  <section id="channel-section">
+    <h2 style="display:flex;align-items:center;gap:10px">渠道<span class="info" id="channel-info" tabindex="0" aria-describedby="channel-info-tip" aria-label="渠道口径说明">!<span class="tip" id="channel-info-tip" role="tooltip"></span></span><button id="channel-csv" style="margin-left:auto;padding:4px 10px;font-size:12px;font-weight:600;letter-spacing:0;text-transform:none">导出 CSV</button></h2>
+    <div class="msg hidden" id="channel-off"></div>
+    <div class="msg hidden" id="channel-msg"></div>
+    <div id="channel-data" class="hidden">
+      <div class="sub" id="channel-headline" style="margin:-4px 0 10px"></div>
+      <div class="sub" id="channel-note" style="margin:-4px 0 12px"></div>
+      <div class="cards" id="channel-cards"></div>
+      <div class="sub" id="channel-providers-note" style="margin:18px 0 8px;font-weight:600">渠道分布</div>
+      <div class="wrap"><table id="channel-providers"><thead>
+        <tr><th>渠道</th><th class="num">请求</th><th class="num">占比</th><th class="num">偏离</th><th class="num">TTFT p50</th><th class="num">TTFT p90</th><th class="num">解码 p50</th><th class="num">输入</th><th class="num">输出</th><th class="num">缓存</th><th class="num">成本</th></tr>
+      </thead><tbody></tbody></table></div>
+      <div class="sub" id="channel-models-note" style="margin:18px 0 8px;font-weight:600">按模型</div>
+      <div class="wrap"><table id="channel-models"><thead>
+        <tr><th>模型</th><th class="num">请求</th><th class="num">偏离</th><th class="num">TTFT p50</th><th class="num">解码 p50</th></tr>
+      </thead><tbody></tbody></table></div>
+      <div class="sub" id="channel-timeline-note" style="margin:18px 0 8px;font-weight:600">时间线（每小时）</div>
+      <div class="cards" id="channel-timeline"></div>
+      <div class="wrap" style="margin-top:14px"><table id="channel-hours"><thead>
+        <tr><th>时间（新 → 旧）</th><th class="num">请求</th><th class="num">偏离</th><th class="num">回退</th><th class="num">TTFT p50</th><th class="num">解码 p50</th><th class="num">成本</th></tr>
+      </thead><tbody></tbody></table></div>
+      <div class="sub" id="channel-records-note" style="margin:18px 0 8px;font-weight:600">原始记录</div>
+      <div class="wrap"><table id="channel-records"><thead>
+        <tr><th>时间</th><th>模型</th><th>渠道</th><th>绑定</th><th class="num">尝试</th><th class="num">TTFT</th><th class="num">解码 t/s</th><th class="num">输入/输出/缓存</th><th class="num">状态</th><th>会话</th></tr>
+      </thead><tbody></tbody></table></div>
+    </div>
   </section>
 </main>
 <script>
@@ -652,7 +652,10 @@ function renderChannelHours(summary){
     body.innerHTML='<tr class="empty-row"><td colspan="7">该窗口没有小时数据。</td></tr>';
     return;
   }
-  body.innerHTML=hours.map(function(point){
+  // 最新的一小时排在最上面：25 个整点刻度从窗口末端往回列，用户先看到「刚刚过去的一小时」。
+  // 用 slice() 复制后再 reverse，避免把 summary.hours 原地倒过来影响同一份 summary 的其它渲染
+  // （上面三张 sparkline 卡片仍按时间正序画，左旧右新，图表趋势方向不变）。
+  body.innerHTML=hours.slice().reverse().map(function(point){
     const off=n(point.off_baseline);
     return "<tr>"+
       "<td>"+esc(fmtHour(point.hour))+"</td>"+

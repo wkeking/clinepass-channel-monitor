@@ -188,6 +188,10 @@ v8 的嵌套键是 `observability.logs.request-log`（映射表 `internal/config
   - 小时表保留窗口内**每个**整点刻度（含空小时，显示 0，不插值）。因为窗口起点落在小时中间，
     24 小时窗口会有 **25 个刻度**（首尾各覆盖部分小时）；桶本身是整点桶，所以「过去 24 小时」在旧边缘最多含
     1 小时的桶级余量。
+  - 小时表**从近到远排**：最新的整点在最上面，向下回溯历史（表头写着「时间（新 → 旧）」）。
+    上方三张 sparkline 卡片不受影响，仍按时间正序画（左旧右新），趋势方向不变。
+  - 页面区块顺序固定为 **Cline 套餐用量（官方接口） → 概览 → 官方用量明细 → 渠道**：官方口径在前，
+    渠道观测在后。渠道区内部依次是概览卡片、渠道分布、按模型、时间线（卡片 + 小时表）、原始记录。
   - 「偏离官渠」= `final_provider`（缺失时退回 `resolved_provider`）与 `channel_baseline_provider` 不区分大小写地不等。
     页面上的基线名取自 payload 的 `baseline_provider`，**页面里不硬编码渠道名**。
   - **TTFT 是代理侧口径**：起点是 CPA 开始把上游响应转成流的那一刻（分片拦截器的首片），
@@ -297,6 +301,16 @@ A/B 期间 `/health` 出现 `parse_failures: 4`、`pending_streams: 18`、
   因此每次换 `.so` 后必须回读 `GET /v0/management/plugins`（返回 `{"plugins_enabled":…,"plugins_dir":…,"plugins":[…]}`，
   要读 `plugins[0].registered` 与 `effective_enabled`），为 false 就重发 `enabled:true`；
   成功时 `main.log` 会出现 `pluginhost: plugin loaded/registered/hot reloaded … version=<new>`。
+- **别先删掉正在运行的 `.so`**（实测教训，比上一条更硬）：先 `rm` 活动版本、再装新版本并 `PATCH enabled`，
+  宿主会停在 `registered:false / enabled:true / effective_enabled:false`，`/health`、`/channel`、资源页一起 404，
+  `main.log` 里连 `pluginhost:` 行都没有；连续 7 次 `enabled:true` 都无效，**只有 `sudo docker restart cpa` 才恢复**
+  （重启后不需要再 PATCH，`plugins.configs.<id>.enabled: true` 会在启动扫描时加载）。正确顺序：装新 `.so` → 重载 → 回读确认 →
+  看到 `plugin hot reloaded … retired_version=<旧版本>` 之后再删旧文件。
+  注意进程启动时那次加载**不写** `pluginhost:` 行，判据一律以回读列表为准。
+- **比对「部署的 .so 就是当前源码构建的」**：两边跑同一条命令比哈希，`sort` 必须钉 locale，
+  否则 BSD `sort`（macOS）与 glibc `sort`（服务器）排序不同会得到假不一致（本项目的 §6 双证就是这么踩过的）：
+  `find internal cmd -type f \( -name '*.go' -o -name '*.html' \) | LC_ALL=C sort | xargs sha256sum | sha256sum`。
+  整树比对还要排掉本地新改、未同步的文件（如 `docs/`、`README.md`）。
 - 验收（Step 2）：面板能回答 24h 的偏离条数与比例；抽查 3 条原始记录与原始响应帧对上；CSV 含渠道字段；
   关掉观测（`channel_observe_enabled=false`）后请求转发照旧；磁盘/写入失败（把记录目录指向不可写路径）时转发照旧。
 - 回滚：恢复原 `.so` + 把 `channel_observe_enabled` 置 false（或删除新增配置键）→ 重载 → 确认

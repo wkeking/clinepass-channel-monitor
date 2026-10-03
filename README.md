@@ -207,7 +207,7 @@ v0.1.x 的统计专用键（`require_routing_marker`、`unmatched_host_samples`�
 
 **第二个来源（默认关闭）：CPA 请求日志。** 网关级的最终上游渠道（`provider_metadata.gateway.routing.finalProvider` / `resolvedProvider` / 尝试次数 / 网关成本）在**上游** `chat/completions` 响应里有，但 CPA 把它翻译成 Responses 事件时丢掉了，所以 usage 载荷里没有；唯一还留着它的地方是 **CPA 自己的请求日志**。把 `channel_log_enabled` 设为 `true` 后，插件在旁路每 2 s 轮询 `channel_log_dir`（只扫顶层 `*.log`、跳过 `main.log`）、逐帧 JSON 解码（**不做文本匹配**，正文里出现 `provider_metadata` 字样只会得到空渠道）、把结论写成 fact 追加到 `channel-log-<UTC 日期>.jsonl`，并在 fact 落盘后 unlink 源日志（`channel_log_delete_after_read`，默认 `true`——源文件含**明文 prompt**）。这条来源要求 CPA 侧同时打开请求日志（`observability.logs.request-log: true` 且 `server.commercial-mode: false`，**改完要重启容器**，reload 不够），代价见 [docs/channel-observation.md](docs/channel-observation.md) §4.2 / §4.3。
 
-**边界（必须一起理解）**：页面上的「渠道」是 **CPA 侧凭据**——`Provider` 给出的渠道/凭据名（例如 `openai-compatible-cline2`）加上 `AuthID` / `AuthIndex` / `AuthType` 指向的那份凭据；记录里的 `final_provider` 目前就是它，**不是网关渠道**。网关级的 `finalProvider`（用来判断一条 cline-pass 请求是否回退到 `alibaba` / `particle` 而不是 `deepseek`）只在上一条说的 `channel_log` fact 里，**还没有合并进记录、也没有画到页面上**；记录与 fact 之间的 join key 是日志的 `Session_id: session-<uuid>` 与记录的 `session_id: codex:session-<uuid>`（同一个 uuid，配合 2 秒时间窗，实测 12 条对上 10 条）。不发 `Session_id` 头的客户端（记录形如 `lcp:v1:<hex>`）目前没有渠道 fact。
+**两个维度（必须一起理解）**：页面把两者分列，不能互相替代——「CPA 凭据」是 `Provider` 给出的凭据名（例如 `openai-compatible-cline2`）加 `AuthID` / `AuthIndex` / `AuthType`（记录键 `cpa_provider`）；「真实渠道」是 Cline 网关实际服务的渠道 `finalProvider`（记录键 `final_provider` / `gateway_resolved_provider` / `gateway_slug` / `gateway_attempts`，`channel_source: "log"` 标明来自请求日志）。记录与 fact 的 join 有两条路：先按日志 `Session_id: session-<uuid>` 与记录 `session_id` 里的同一个 uuid（配合 2 秒窗口）；没有该头时回退到「2 秒窗口 + `prompt_tokens`/`completion_tokens` 精确相等 + 候选唯一」，两条都匹配不上就留空（页面显示「无渠道块」，不计入偏离比例）。
 
 ### 数据存在哪、留多久
 
@@ -262,7 +262,7 @@ time_utc,request_id,session_id,generation_id,model,alias,upstream_model,canonica
 
 其中 `generation_id`、`original_model_id`、`pinned_provider`、`upstream_request_id`、`protocol` 是 v1 列的存留；`off_baseline` 取值是 `yes` 或空，按**读时**的当前基准算。
 
-> 面板页面把这些数字画在**最后一个**区块「渠道」里：区块顺序固定为 `Cline 套餐用量（官方接口）` → `概览` → `官方用量明细` → `渠道`。渠道区内部依次是概览卡片、`渠道分布` 表（CPA 凭据，含 失败 列）、`上游推理渠道（官方 usage）` 表、`按模型` 表、时间线（卡片 + 小时表；小时表行序是**新 → 旧**，表头写着「时间（新 → 旧）」，含 失败 列）、`原始记录` 表。成本列与成本卡片已随之移除；原始记录表显示 时间 / 模型 / 渠道 / 凭据（认证 ID + 索引）/ 失败 / TTFT / 解码 t/s / 输入-输出-缓存读 / 状态 / 会话。右上角是「导出 CSV」按钮。
+> 面板页面把这些数字画在**最后一个**区块「渠道」里：区块顺序固定为 `Cline 套餐用量（官方接口）` → `概览` → `官方用量明细` → `渠道`。渠道区内部依次是概览卡片、`真实渠道` 表（网关 `finalProvider`）、`上游推理渠道（官方 usage）` 表、时间线（卡片 + 小时表；小时表行序是**新 → 旧**，表头写着「时间（新 → 旧）」，含 失败 列）、`原始记录` 表。成本列与成本卡片已随之移除；原始记录表显示 时间 / 模型 / 渠道 / 凭据（认证 ID + 索引）/ 失败 / TTFT / 解码 t/s / 输入-输出-缓存读 / 状态 / 会话。右上角是「导出 CSV」按钮。
 
 ## 适配你自己的 Cline 条目
 
@@ -326,7 +326,7 @@ curl -s -H "Authorization: Bearer $CPA_MANAGEMENT_KEY" \
 | GET | `/v0/management/plugins/clinepass-channel-monitor/channel?window=1h\|24h\|7d` | 渠道视图（v0.3.0）：偏离基准渠道的条数与比例、按渠道 / 按模型 / 按小时的拆分、最新 20 条原始记录。`window` 非法返回 400 + `invalid_window` |
 | GET | `/v0/management/plugins/clinepass-channel-monitor/channel.csv?window=1h\|24h\|7d` | 同一窗口的 CSV 导出（v0.3.0）：一行一条记录、含 `off_baseline` 列，附件下载，`X-Record-Count` 报行数 |
 
-页面里除了套餐区还有「渠道」区，且**排在最后**（顺序：`Cline 套餐用量（官方接口）` → `概览` → `官方用量明细` → `渠道`）；渠道区内部依次是概览卡片、`渠道分布` 表（CPA 凭据，含失败列）、`上游推理渠道（官方 usage）` 表、`按模型` 表、时间线（卡片 + 小时表，小时表新 → 旧，含失败列）、`原始记录` 表和「导出 CSV」按钮。
+页面里除了套餐区还有「渠道」区，且**排在最后**（顺序：`Cline 套餐用量（官方接口）` → `概览` → `官方用量明细` → `渠道`）；渠道区内部依次是概览卡片、`真实渠道` 表、`上游推理渠道（官方 usage）` 表、时间线（卡片 + 小时表，小时表新 → 旧，含失败列）、`原始记录` 表和「导出 CSV」按钮。
 
 v0.1.x 的 `/stats`、`/events`、`/export` 三条路由已移除，请求它们返回 404（属预期）。注意**插件只声明 `/health`、`/channel`、`/channel.csv`**：CPA 只转发已声明的路径，所以一个旧版本生成的页面 / 接口清单里不会有后两条，请求它们就是 404（见「排障」）。
 

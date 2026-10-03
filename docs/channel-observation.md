@@ -149,7 +149,7 @@ reload 确认 `request-log: false -> true` → 打一条真实流式请求（37 
 **join key（实测，12 条里对上 10 条）**：日志 `HEADERS` 里的 `Session_id` 头是 `session-<uuid>`；
 usage 记录的 `session_id` 是 `codex:session-<uuid>`（同一个 uuid）。匹配规则：该 uuid 出现在记录的 `session_id` 里
 **且** `|log.Timestamp − record.time| ≤ 2s`；实测偏移 **72–218 ms**（记录的时间是 usage 上报的 `RequestedAt`，
-晚于日志的到达时间戳）。**不发 `Session_id` 头的客户端**（其记录形如 `lcp:v1:<hex>`）只能靠 token/时间兜底，
+晚于日志的到达时间戳）。**不发 `Session_id` 头的客户端**（其记录形如 `lcp:v1:<hex>`）走 token/时间兜底（2026-10-03 已实现：fact 新增 `prompt_tokens`/`completion_tokens`，要求 2 秒窗口 + 两个计数器精确相等 + 候选唯一），
 这条路**还没实现**（§6「仍未做」）。
 
 ### 2.3 P3：响应侧拦截器 —— 曾选定，已退役（因果已更正）
@@ -286,7 +286,7 @@ usage 记录的 `session_id` 是 `codex:session-<uuid>`（同一个 uuid）。�
   - 小时表**从近到远排**：最新的整点在最上面，表头写着「时间（新 → 旧）」；上方三张 sparkline 卡片不受影响，
     仍按时间正序画（左旧右新）。
   - 页面区块顺序固定为 **Cline 套餐用量（官方接口） → 概览 → 官方用量明细 → 渠道**，渠道在最后。渠道区内部依次是
-    概览卡片、`渠道分布`、`按模型`、时间线（卡片 + 小时表）、`原始记录` 表。成本列与成本卡片已随成本字段一起移除；
+    概览卡片、`真实渠道` 表、`上游推理渠道（官方 usage）` 表、时间线（卡片 + 小时表）、`原始记录` 表。成本列与成本卡片已随成本字段一起移除；`按模型` 表已删除（2026-10-03，两张渠道表已回答它要回答的问题）；
     `原始记录` 表显示 时间 / 模型 / 渠道 / 凭据（认证 ID + 索引）/ 失败 / TTFT / 解码 t/s / 输入-输出-缓存读 / 状态 / 会话。
     **P2 的 fact 与 `channel_log` 目前不在页面里**（页面还没有渲染这一块，Phase 4 未做）。
   - 「偏离基准渠道」= `final_provider` 与 `channel_baseline_provider` 不区分大小写地不等，**读时**判定
@@ -626,8 +626,7 @@ last_error_at, pending_files`
 
 **仍未做（本轮明确未完成）**
 
-- [ ] **不带 `Session_id` 的客户端（记录形如 `lcp:v1:<hex>`）的 token/时间兜底 join**：未实现，
-      这些请求目前没有渠道 fact。
+- [x] **不带 `Session_id` 的客户端（记录形如 `lcp:v1:<hex>`）的 token/时间兜底 join**：2026-10-03 已实现并上线（`0.3.0-dev.183`）。实测动因：生产上当时的流量**全部**没有 `Session_id` 头（当天 187 条 fact 里 118 条 `has_session=false`），1 小时窗口只能判定 8/134 条；回退上线后同一窗口 72/221。规则：fact 带 `prompt_tokens`/`completion_tokens`，记录带 token 时按「2 秒窗口 + 两计数器精确相等 + 候选恰好 1 条」匹配，两条都匹配不上就留空。**限制**：磁盘上早于该构建的 fact 行没有这两个键，回退只对新解析的 fact 生效（随 3 天留存滚动）。
 - [x] **合并与页面（Phase 3 / Phase 4）**：构建 `0.3.0-dev.182` 已完成——schema 升 v3，凭据改名 `cpa_provider`，
       网关值占用 `final_provider`/`resolved_provider`（另有 `gateway_slug`/`gateway_attempts`/`gateway_cost`/`channel_source`），
       新增 `summary.unresolved_requests` 与 `summary.cpa_providers[]`，CSV 同步；页面的「真实渠道」表按网关维度、原始记录表

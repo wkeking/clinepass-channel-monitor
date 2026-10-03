@@ -27,11 +27,11 @@ v0.3.0 重新打开的口子不是那个逐帧钩子，而是 CPA 的 **usage �
 
 - 管理页展示：套餐名与月费、套餐说明与权益清单、订阅周期与取消状态、5 小时 / 每周 / 每月限额进度与重置时间、近 31 天官方 Token 总量（输入/输出）、参考成本、余额、官方计费条目数；
 - 概览卡片（官方口径）：近 1 小时 / 近 24 小时的官方计费请求数、总 Token 数、缓存命中率，以及近 7 天的官方逐日汇总（只有 token 与成本）；官方记录覆盖不到窗口起点时页面会标注「官方数值偏低」；
-- 官方用量明细：按模型拆开当前窗口（请求数、输入/输出 token、缓存命中率、参考成本、扣减 credits），并给出流式 / BYOK 条数；这份拆分来自已经拉到的记录，不产生额外上游调用；
+- 官方用量明细（**页面已移除，数据仍在接口里**）：`/health` 的 `plan.windows[1h\|24h\|7d].models` 仍按模型拆开当前窗口（请求数、输入/输出 token、缓存命中率、参考成本、扣减 credits），并给出流式 / BYOK 条数；这份拆分来自已经拉到的记录，不产生额外上游调用；
 - 多凭据分别轮询：一个 CPA 里配置多个 Cline 条目或多把 key 时，每把 key 一个账号卡，页面顶部出现账号下拉（≥2 个凭据时）；
 - 凭据自动发现：读 CPA 自己的 `config.yaml`，通常不需要手填任何 key；key 只留在内存，不落盘、不打日志、不返回给页面；
 - 自诊断：`/health` 暴露 `plan`（完整套餐快照）、`plan_usage`（官方逐条用量的采集状态）、`plan_accounts`（每个凭据的来源、账号、可用性与错误）；
-- **渠道观测（v0.3.0 新增）**：过去 1 小时 / 近 24 小时 / 近 7 天窗口里，clinepass 请求有多少条、多大比例没有落在基准渠道（默认 `deepseek`），并给出这些请求的 TTFT 与解码速度；「渠道」是 **CPA 为这条请求选中的凭据**（`Provider` + `AuthID` / `AuthIndex` / `AuthType`），由宿主每请求一次 usage 回调给出，因此对**所有客户端协议**都成立（含 `POST /v1/responses`）；页面有「渠道」区，可导出 CSV。注意当前生产上渠道名是 `openai-compatible-cline*`、基准仍是 `deepseek`，于是每条都算偏离——基准语义**未决**，见下文「渠道观测 → 两个口径」；网关级渠道另由 `channel_log_enabled`（默认关闭）从 CPA 请求日志取，并与记录**读时合并**：页面的「真实渠道」表按网关维度、原始记录表分列「真实渠道 / 尝试 / CPA 凭据」，`off_baseline` 只对真渠道判定（没有渠道块的请求记「无渠道块」，不计入比例）；
+- **渠道观测（v0.3.0 新增）**：过去 1 小时 / 近 24 小时 / 近 7 天窗口里，clinepass 请求有多少条、多大比例没有落在基准渠道（默认 `deepseek`），并给出这些请求的 TTFT 与解码速度；「渠道」是 **CPA 为这条请求选中的凭据**（`Provider` + `AuthID` / `AuthIndex` / `AuthType`），由宿主每请求一次 usage 回调给出，因此对**所有客户端协议**都成立（含 `POST /v1/responses`）；页面有「渠道」区，可导出 CSV。注意当前生产上渠道名是 `openai-compatible-cline*`、基准仍是 `deepseek`，于是每条都算偏离——基准语义**未决**，见下文「渠道观测 → 两个口径」；网关级渠道另由 `channel_log_enabled`（默认关闭）从 CPA 请求日志取，并与记录**读时合并**：页面的「真实渠道」表按网关维度、原始记录表分列「真实渠道 / 尝试 / CPA 凭据」，`off_baseline` 只对真渠道判定（没有渠道块的请求记「无渠道块」，不计入比例）。官方 usage 的「上游推理渠道」表与按模型明细**页面已移除**，但 `/channel` 的 `official_channels` / `official_usage` 与 `/health` 的 `plan.windows[].models` 仍在返回；
 - **请求路径零成本开关**：除 `ManagementAPI` 外只声明 `usage_plugin`，且**只在 `channel_observe_enabled: true` 时声明**；关闭时能力为 nil，宿主不注册 usage 适配层，请求路径上没有任何插件代码在跑（不拦分片、不走 ABI、不做探针）；
 - **不改写、不阻塞任何请求**：不声明任何 translator / normalizer / 请求侧或响应侧拦截能力，不 clone、不改写请求或响应，不干预上游路由与固定；对每次 usage 回调只回一个「不改变」信封 `{"ok":true,"result":{}}`，回调发生在请求**结束之后**，与请求处理无关；
 - **fail-open**：配置解析失败时回落到默认值，插件照常加载并照常提供套餐视图；观测层自身的错误（载荷解不开、队列满、目录不可写）也只在插件内部消化，宿主请求流程完全不受影响。
@@ -251,18 +251,18 @@ v0.1.x 的统计专用键（`require_routing_marker`、`unmatched_host_samples`�
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/v0/management/plugins/clinepass-channel-monitor/channel?window=1h\|24h\|7d` | 渠道视图 JSON：`enabled` 开关、`summary`（窗口 `from`/`to`、`baseline_provider`、窗口内请求数 `resolved_requests`、偏离数 `off_baseline_requests` 与比例 `off_baseline_ratio`、渠道数、TTFT p50/p90、解码 p50 tps、token 合计、按渠道 / 按模型 / 按小时的拆分 `providers` / `models` / `hours`），最新 20 条原始记录（`records`，另有 `records_total`）、官方上游渠道维度 `official_channels` / `official_usage`，以及 CPA 请求日志扫描器 `channel_log`（`enabled`、`delete_after_read`、`min_age_seconds`、`health`、最新 20 条事实 `facts` 与 `facts_total`）和 `health`。`window` 非法返回 **400 + `invalid_window`** |
+| GET | `/v0/management/plugins/clinepass-channel-monitor/channel?window=1h\|24h\|7d[&records=1..200][&offset=N]` | 渠道视图 JSON：`enabled` 开关、`summary`（窗口 `from`/`to`、`baseline_provider`、窗口内请求数 `resolved_requests`、偏离数 `off_baseline_requests` 与比例 `off_baseline_ratio`、渠道数、TTFT p50/p90、解码 p50 tps、token 合计、按渠道 / 按模型 / 按小时的拆分 `providers` / `models` / `hours`），原始记录**分页**（`records` 是最新优先的一页，`records_limit` 默认 20、上限 200，`records_offset` 是这页跳过多少条，`records_total` 是窗口总条数）、官方上游渠道维度 `official_channels` / `official_usage`（**页面已不再画**，数据仍在返回），以及 CPA 请求日志扫描器 `channel_log`（`enabled`、`delete_after_read`、`min_age_seconds`、`health`、最新 20 条事实 `facts` 与 `facts_total`）和 `health`。`window` 非法返回 **400 + `invalid_window`**；`records` / `offset` 非法分别返回 **400 + `invalid_records` / `invalid_offset`**，`offset` 超出末尾返回空页而不是错误 |
 | GET | `/v0/management/plugins/clinepass-channel-monitor/channel.csv?window=1h\|24h\|7d` | 同一窗口的 CSV 导出：一行一条记录，列序固定（见下），以附件形式下载（`Content-Disposition: attachment`），响应头 `X-Record-Count` 报行数，表头行恒在 |
 
 CSV 表头（v2 记录填不满的列留空）：
 
 ```
-time_utc,request_id,session_id,generation_id,model,alias,upstream_model,canonical_slug,original_model_id,final_provider,resolved_provider,pinned_provider,auth_id,auth_index,auth_type,executor_type,reasoning_effort,service_tier,upstream_request_id,off_baseline,status_code,failed,protocol,ttft_ms,duration_ms,decode_ms,tokens_per_second,input_tokens,output_tokens,reasoning_tokens,cached_tokens,cache_read_tokens,cache_creation_tokens,total_tokens
+time_utc,request_id,session_id,generation_id,model,alias,upstream_model,canonical_slug,original_model_id,cpa_provider,gateway_provider,gateway_resolved_provider,gateway_slug,gateway_attempts,gateway_cost,channel_source,pinned_provider,auth_id,auth_index,auth_type,executor_type,reasoning_effort,service_tier,upstream_request_id,off_baseline,status_code,failed,protocol,ttft_ms,duration_ms,decode_ms,tokens_per_second,input_tokens,output_tokens,reasoning_tokens,cached_tokens,cache_read_tokens,cache_creation_tokens,total_tokens
 ```
 
 其中 `generation_id`、`original_model_id`、`pinned_provider`、`upstream_request_id`、`protocol` 是 v1 列的存留；`off_baseline` 取值是 `yes` 或空，按**读时**的当前基准算。
 
-> 面板页面把这些数字画在**最后一个**区块「渠道」里：区块顺序固定为 `Cline 套餐用量（官方接口）` → `概览` → `官方用量明细` → `渠道`。渠道区内部依次是概览卡片、`真实渠道` 表（网关 `finalProvider`）、`上游推理渠道（官方 usage）` 表、时间线（卡片 + 小时表；小时表行序是**新 → 旧**，表头写着「时间（新 → 旧）」，含 失败 列）、`原始记录` 表。成本列与成本卡片已随之移除；原始记录表显示 时间 / 模型 / 渠道 / 凭据（认证 ID + 索引）/ 失败 / TTFT / 解码 t/s / 输入-输出-缓存读 / 状态 / 会话。右上角是「导出 CSV」按钮。
+> 面板页面把这些数字画在**最后一个**区块「渠道」里：区块顺序固定为 `Cline 套餐用量（官方接口）` → `概览` → `渠道`（`官方用量明细` 整节与渠道区里的 `上游推理渠道（官方 usage）` 表已按需求移除，接口仍返回它们的数据）。渠道区内部依次是概览卡片、`真实渠道` 表（网关 `finalProvider`）、时间线（卡片 + 小时表，**只覆盖最近 10 个小时**；小时表行序是**新 → 旧**，表头写着「时间（新 → 旧）」，含 失败 列）、`原始记录` 表与它下面的翻页脚注。成本列与成本卡片已随之移除；原始记录表显示 时间 / 模型 / 渠道 / 凭据（认证 ID + 索引）/ 失败 / TTFT / 解码 t/s / 输入-输出-缓存读 / 状态 / 会话，**每页 20 条**：滑到脚注（或点「加载更多」）继续取下一页，脚注写着还有多少条，表头行写着「已显示 N / 共 M 条（导出 CSV 是完整窗口）」。右上角是「导出 CSV」按钮。
 
 ## 适配你自己的 Cline 条目
 
@@ -323,10 +323,10 @@ curl -s -H "Authorization: Bearer $CPA_MANAGEMENT_KEY" \
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/v0/management/plugins/clinepass-channel-monitor/health` | 完整套餐快照 `plan`（账号、限额、31 天汇总、官方窗口），`plan_usage`（官方逐条用量的采集状态），`plan_accounts`（每个 Cline 凭据的标签、账号、可用性与错误），以及 `channel_observation`（渠道采集的健康度与计数） |
-| GET | `/v0/management/plugins/clinepass-channel-monitor/channel?window=1h\|24h\|7d` | 渠道视图（v0.3.0）：偏离基准渠道的条数与比例、按渠道 / 按模型 / 按小时的拆分、最新 20 条原始记录。`window` 非法返回 400 + `invalid_window` |
+| GET | `/v0/management/plugins/clinepass-channel-monitor/channel?window=1h\|24h\|7d[&records=1..200][&offset=N]` | 渠道视图（v0.3.0）：偏离基准渠道的条数与比例、按渠道 / 按模型 / 按小时的拆分、原始记录分页（`records` 一页、`records_offset` / `records_limit` / `records_total`）。`window` 非法返回 400 + `invalid_window`；`records` / `offset` 非法返回 400 + `invalid_records` / `invalid_offset` |
 | GET | `/v0/management/plugins/clinepass-channel-monitor/channel.csv?window=1h\|24h\|7d` | 同一窗口的 CSV 导出（v0.3.0）：一行一条记录、含 `off_baseline` 列，附件下载，`X-Record-Count` 报行数 |
 
-页面里除了套餐区还有「渠道」区，且**排在最后**（顺序：`Cline 套餐用量（官方接口）` → `概览` → `官方用量明细` → `渠道`）；渠道区内部依次是概览卡片、`真实渠道` 表、`上游推理渠道（官方 usage）` 表、时间线（卡片 + 小时表，小时表新 → 旧，含失败列）、`原始记录` 表和「导出 CSV」按钮。
+页面里除了套餐区还有「渠道」区，且**排在最后**（顺序：`Cline 套餐用量（官方接口）` → `概览` → `渠道`；`官方用量明细` 整节与渠道区里的 `上游推理渠道（官方 usage）` 表已按需求从页面移除，接口仍返回它们的数据）；渠道区内部依次是概览卡片、`真实渠道` 表、时间线（卡片 + 小时表，**只覆盖最近 10 个小时**，小时表新 → 旧，含失败列）、`原始记录` 表（每页 20 条，滑到底部或点「加载更多」取下一页）和「导出 CSV」按钮。
 
 v0.1.x 的 `/stats`、`/events`、`/export` 三条路由已移除，请求它们返回 404（属预期）。注意**插件只声明 `/health`、`/channel`、`/channel.csv`**：CPA 只转发已声明的路径，所以一个旧版本生成的页面 / 接口清单里不会有后两条，请求它们就是 404（见「排障」）。
 
@@ -368,7 +368,7 @@ v0.1.x 的 `/stats`、`/events`、`/export` 三条路由已移除，请求它们
 | 目录不可写 / 记录数不涨 | 看 `/health` 的 `channel_observation.last_error` 与 `write_failures`：目录权限、挂载或磁盘满都会记在这里。这时插件照常回包、照常在内存里聚合，只是不落盘；修好目录后（或换 `channel_store_dir`）新记录会继续写，但内存聚合在插件重启后会丢失 |
 | 窗口内**所有**请求都算偏离（页面偏离比例接近 100%） | 基准名与渠道名对不上：`channel_baseline_provider` 默认 `deepseek`，而 CPA 侧的渠道名是 `openai-compatible-cline1/2/3`，不区分大小写也不可能相等（验收时 1 小时窗口 6 条记录全部 `off_baseline=yes`）。这是配置语义问题、不是采集故障；基准该怎么定（改基准名、还是按 `upstream_model` 重新定义「官渠」）**尚未决定** |
 | 记录里 `tokens_per_second` 为 0 | 解码窗口短于 50 ms 时不记速度（宿主对短回答批量投递，量出来的是投递不是生成）；这类记录不进解码速度百分位。`ttft_ms` 为 0 表示宿主这次没有报首 token 时间（例如非流式请求或请求失败） |
-| 「上游推理渠道（官方 usage）」表为空 | 官方 per-request usage 还没取到：采集器每次刷新才填这张表，插件刚重启或官方接口回 429 时会是空的（页面写「官方用量记录还没有到」，不是 0）。看 `/health` 的 `plan.usage.failures` / `plan.usage.error`；接口限流会退避重试 |
+| 想核对官方按模型的明细 | 页面上的「官方用量明细」表与渠道区「上游推理渠道（官方 usage）」表已按需求移除，数据仍在接口里：`GET /health` 的 `plan.windows[1h\|24h\|7d].models`（逐条口径，含请求数 / 缓存 / 成本）与 `plan.official_channels`。它按采集器**保留窗口**统计，官方接口限流（`plan.usage.failures` / `plan.usage.error`，实测 `upstream status 429`）时会不足；更长的历史区间要等采集器补齐或改用官方逐日汇总 |
 | 官方表的覆盖范围比窗口短 | 表按采集器**保留窗口**（26 小时）统计，且官方接口有限流：实测 `items=800`、`oldest=04:59Z` 时 `truncated=true`。这是上游限额，不是插件故障；历史更长的区间要等采集器补齐或改用官方逐日汇总 |
 | 上游返回 502，能否看出是哪个上游渠道 | **不能**。官方用量接口只记成功计费请求（实测 200 条里 0 条零 completion），失败不会出现在里面；CPA 的 usage 载荷里 `Failure.Body` 只有一句 `upstream stream returned an error payload`，不含上游渠道字样。上游错误原文（例如 `failed to generate stream from Vercel: … status 429 … Rate limit exceeded`）只在 CPA 自己的 `main.log` 里。渠道区只能按 CPA 凭据给出失败分布 |
 | `POST /v1/responses` 的请求能看到吗 | 能。渠道取自宿主每个请求结束后的 usage 回调，与客户端协议无关；旧的流式分片设计在这里才是盲区，已退役。**网关级渠道**（`finalProvider`）要看 `channel_log_enabled`：它在上游响应里，只有 CPA 请求日志能看到（CPA 翻译成 Responses 时丢了它，clinepass 上游也没有 `/responses` 端点） |

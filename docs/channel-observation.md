@@ -282,12 +282,16 @@ usage 记录的 `session_id` 是 `codex:session-<uuid>`（同一个 uuid）。�
   - **分母是窗口内的记录数**：每条完成的请求一条记录，与协议无关，没有「未识别」这一类（旧设计的
     `resolved` / `unresolved` / `parse_failures` / `needle_misses` / `pending_streams` 随分片探针一起移除）；
   - 小时表保留窗口内**每个**整点刻度（含空小时，显示 0，不插值）。窗口起点落在小时中间，所以 24 小时窗口有
-    **25 个刻度**（首尾各覆盖部分小时）。
+    **25 个刻度**（首尾各覆盖部分小时）；payload 仍然带全部刻度，页面从 **2026-10-03** 起只画**最近 10 个**
+    （卡片 sparkline 与小时表同一口径，标题写着「时间线（每小时 · 最近 10 小时）」）。
   - 小时表**从近到远排**：最新的整点在最上面，表头写着「时间（新 → 旧）」；上方三张 sparkline 卡片不受影响，
     仍按时间正序画（左旧右新）。
-  - 页面区块顺序固定为 **Cline 套餐用量（官方接口） → 概览 → 官方用量明细 → 渠道**，渠道在最后。渠道区内部依次是
-    概览卡片、`真实渠道` 表、`上游推理渠道（官方 usage）` 表、时间线（卡片 + 小时表）、`原始记录` 表。成本列与成本卡片已随成本字段一起移除；`按模型` 表已删除（2026-10-03，两张渠道表已回答它要回答的问题）；
-    `原始记录` 表显示 时间 / 模型 / 渠道 / 凭据（认证 ID + 索引）/ 失败 / TTFT / 解码 t/s / 输入-输出-缓存读 / 状态 / 会话。
+  - 页面区块顺序固定为 **Cline 套餐用量（官方接口） → 概览 → 渠道**，渠道在最后。`官方用量明细` 整节与渠道区里的
+    `上游推理渠道（官方 usage）` 表**已在 2026-10-03 按用户要求从页面移除**：接口照旧返回
+    `official_channels` / `official_usage` 与 `plan.windows[].models`，只是页面不再画。渠道区内部依次是
+    概览卡片、`真实渠道` 表、时间线（卡片 + 小时表）、`原始记录` 表与它下面的翻页脚注。成本列与成本卡片已随成本字段一起移除；`按模型` 表已删除（2026-10-03，两张渠道表已回答它要回答的问题）；
+    `原始记录` 表显示 时间 / 模型 / 渠道 / 凭据（认证 ID + 索引）/ 失败 / TTFT / 解码 t/s / 输入-输出-缓存读 / 状态 / 会话，
+    **每页 20 条**：滑到脚注（或点「加载更多」）取下一页，脚注写着还有多少条，表头行写着「已显示 N / 共 M 条（导出 CSV 是完整窗口）」。
     **P2 的 fact 与 `channel_log` 目前不在页面里**（页面还没有渲染这一块，Phase 4 未做）。
   - 「偏离基准渠道」= `final_provider` 与 `channel_baseline_provider` 不区分大小写地不等，**读时**判定
     （`aggregate.go` 里 `provider != "" && baseline != "" && !strings.EqualFold(provider, baseline)`，记录本身不落盘
@@ -318,9 +322,11 @@ usage 记录的 `session_id` 是 `codex:session-<uuid>`（同一个 uuid）。�
   `official_usage` 复用采集器已跟踪的 `oldest/items/truncated/failures/error`。这一维度按**采集器保留窗口**
   统计（不随页面 1h/24h/7d 切换），且官方接口本身会限流（实测 `truncated=true`、`failures=1`、
   `error="upstream status 429"`）。官方只记**成功计费**请求，失败不在其中，因此失败无法归因到上游推理渠道。
-- CSV：`GET /channel.csv?window=1h|24h|7d`，列序固定，含 `final_provider`、`resolved_provider`、`auth_id`、
-  `auth_index`、`auth_type`、`off_baseline` 等列；导出失败时把原因作为注释行追加进文件（仍返回 200），
-  `X-Record-Count` 头报行数。
+  页面从 2026-10-03 起不再画这一维度，接口（`/channel`、`/health.plan`）的数据保留。
+- CSV：`GET /channel.csv?window=1h|24h|7d`，列序固定，含 `cpa_provider`、`gateway_provider`、
+  `gateway_resolved_provider`、`gateway_slug`、`channel_source`、`auth_id`、`auth_index`、`auth_type`、
+  `off_baseline` 等列（`final_provider` / `resolved_provider` 两个旧列名已不再出现在表头）；导出失败时把原因作为
+  注释行追加进文件（仍返回 200），`X-Record-Count` 头报行数。
 
 ### 3.4 fail-open 与回归保护
 

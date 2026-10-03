@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
@@ -15,10 +16,15 @@ import (
 	"github.com/wkeking/clinepass-channel-monitor/internal/state"
 )
 
-// channelRecordLimit is how many raw records the view carries. They are the rows a number on
-// the page can be checked against without going to the file system, which is what the
-// acceptance check asks for.
+// channelRecordLimit is how many raw records one page of the view carries when the caller asks
+// for no size. They are the rows a number on the page can be checked against without going to
+// the file system, which is what the acceptance check asks for.
 const channelRecordLimit = 20
+
+// channelRecordMaxLimit bounds one page. The page loads 20 rows at a time and asks for the depth
+// it already showed when it refreshes; the cap keeps a single request from carrying the whole
+// window, which is what the CSV export is for.
+const channelRecordMaxLimit = 200
 
 // channelLogFactLimit is how many parsed request-log facts the payload carries. A fact is a
 // candidate for the record it belongs to, so the page only ever needs the newest few, and the
@@ -32,15 +38,20 @@ type channelView struct {
 	// both produce an empty window, and only the first is a configuration matter.
 	Enabled bool                `json:"enabled"`
 	Summary observation.Summary `json:"summary"`
-	// Records is the newest first, capped at channelRecordLimit; RecordsTotal is how many
-	// records the window holds, so the page can say what the cap hides. Each row carries both
-	// halves of the request: cpa_provider is the CPA credential the host reported, and the
-	// gateway channel (gateway_provider / final_provider, channel_source) is joined in from
-	// the CPA request log. A row with an empty channel_source has no known channel — it is not
-	// on the baseline, it is unknown.
+	// Records is the newest first, one page at a time; RecordsTotal is how many records the
+	// window holds, so the page can say how much a page hides. Each row carries both halves of
+	// the request: cpa_provider is the CPA credential the host reported, and the gateway
+	// channel (gateway_provider / final_provider, channel_source) is joined in from the CPA
+	// request log. A row with an empty channel_source has no known channel — it is not on the
+	// baseline, it is unknown.
 	Records      []observation.Record `json:"records"`
 	RecordsTotal int                  `json:"records_total"`
-	Health       observation.Health   `json:"health"`
+	// RecordsOffset is how many of the window's newest records this page skipped, and
+	// RecordsLimit is the page size it was cut with (the default when the caller asked for
+	// none). Together they let a caller that pages tell one page from another.
+	RecordsOffset int                `json:"records_offset"`
+	RecordsLimit  int                `json:"records_limit"`
+	Health        observation.Health `json:"health"`
 	// OfficialChannels is the official-source dimension beside the CPA-credential channel
 	// above: which upstream inference channel Cline reported for each record, crossed with
 	// the model that actually ran. It is always a list, never null, and it is keyed by the
@@ -141,6 +152,15 @@ func buildChannelView(req *pluginapi.ManagementRequest) pluginapi.ManagementResp
 	if !ok {
 		return errorResponse(http.StatusBadRequest, "invalid_window", "window must be 1h, 24h or 7d")
 	}
+	limit, ok := parseRecordLimit(req.Query.Get("records"))
+	if !ok {
+		return errorResponse(http.StatusBadRequest, "invalid_records",
+			fmt.Sprintf("records must be an integer between 1 and %d", channelRecordMaxLimit))
+	}
+	offset, ok := parseRecordOffset(req.Query.Get("offset"))
+	if !ok {
+		return errorResponse(http.StatusBadRequest, "invalid_offset", "offset must be a non-negative integer")
+	}
 	officialChannels, officialUsage := officialChannelView()
 	channelLog := channelLogSnapshot()
 	recorder := state.Observation()
@@ -149,6 +169,9 @@ func buildChannelView(req *pluginapi.ManagementRequest) pluginapi.ManagementResp
 		return jsonResponse(channelView{
 			Enabled:          false,
 			Summary:          observation.Summary{Window: string(window)},
+			Records:          []observation.Record{},
+			RecordsOffset:    offset,
+			RecordsLimit:     limit,
 			Health:           observation.Health{Directory: cfg.ChannelStoreDir},
 			OfficialChannels: officialChannels,
 			OfficialUsage:    officialUsage,
@@ -157,23 +180,59 @@ func buildChannelView(req *pluginapi.ManagementRequest) pluginapi.ManagementResp
 	}
 	summary := recorder.Summary(window)
 	records, _ := recorder.ChannelRecordsSince(window)
-	total := len(records)
-	if total > channelRecordLimit {
-		records = records[:channelRecordLimit]
-	}
-	if records == nil {
-		records = []observation.Record{}
-	}
 	return jsonResponse(channelView{
 		Enabled:          true,
 		Summary:          summary,
-		Records:          records,
-		RecordsTotal:     total,
+		Records:          recordPage(records, offset, limit),
+		RecordsTotal:     len(records),
+		RecordsOffset:    offset,
+		RecordsLimit:     limit,
 		Health:           summary.Health,
 		OfficialChannels: officialChannels,
 		OfficialUsage:    officialUsage,
 		ChannelLog:       channelLog,
 	})
+}
+
+// recordPage takes one page out of the newest-first window. An offset at or past the end is an
+// empty page rather than an error: the page asks for the next offset exactly as the list runs
+// out, and a window that shrank between two calls must not turn into a 400.
+func recordPage(records []observation.Record, offset, limit int) []observation.Record {
+	if offset >= len(records) {
+		return []observation.Record{}
+	}
+	end := offset + limit
+	if end > len(records) {
+		end = len(records)
+	}
+	return records[offset:end]
+}
+
+// parseRecordLimit reads the page size. An empty value means the default; anything else has to
+// be an integer inside the cap, because silently clamping would hide a caller's bug.
+func parseRecordLimit(raw string) (int, bool) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return channelRecordLimit, true
+	}
+	parsed, errParse := strconv.Atoi(value)
+	if errParse != nil || parsed < 1 || parsed > channelRecordMaxLimit {
+		return 0, false
+	}
+	return parsed, true
+}
+
+// parseRecordOffset reads how many of the window's newest records the caller skips.
+func parseRecordOffset(raw string) (int, bool) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return 0, true
+	}
+	parsed, errParse := strconv.Atoi(value)
+	if errParse != nil || parsed < 0 {
+		return 0, false
+	}
+	return parsed, true
 }
 
 // buildChannelCSV streams the same window as CSV. It is the export the acceptance check

@@ -58,11 +58,9 @@ input::placeholder{color:var(--muted)}
 .plan-head select{padding:5px 9px;font-size:12.5px;border-radius:9px;max-width:100%}
 .plan-warn{color:var(--warn)}
 .plan-err{color:var(--err)}
-/* 套餐详情：默认折叠，只有官方真给了说明或权益时才显示 */
-details.plan-detail{margin-top:14px;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:12px 16px}
-details.plan-detail summary{cursor:pointer;color:var(--muted);font-size:12.5px;font-weight:600;letter-spacing:.4px}
-details.plan-detail p{margin:10px 0 0;color:var(--fg);font-size:13px;line-height:1.7}
-details.plan-detail ul{margin:10px 0 0;padding-left:18px;color:var(--muted);font-size:12.5px;line-height:1.8}
+/* 原始记录的翻页脚注：按钮可以点，滑到可见时也会自动取下一页（见 loadMoreRecords） */
+.records-more{display:flex;flex-wrap:wrap;align-items:center;gap:12px;margin:12px 0 2px}
+.records-more button{padding:6px 14px;font-size:12.5px}
 .wrap{overflow-x:auto;border:1px solid var(--line);border-radius:14px;background:var(--card)}
 table{width:100%;border-collapse:separate;border-spacing:0}
 th,td{padding:10px 13px;text-align:left;white-space:nowrap;vertical-align:middle}
@@ -108,11 +106,6 @@ td.num,th.num{text-align:right}
       <span id="plan-head"></span>
     </div>
     <div class="plan" id="plan-cards"></div>
-    <details class="plan-detail hidden" id="plan-detail">
-      <summary id="plan-detail-summary">套餐详情</summary>
-      <p id="plan-desc" class="hidden"></p>
-      <ul id="plan-benefits" class="hidden"></ul>
-    </details>
     <div class="msg hidden" id="plan-msg"></div>
   </section>
 
@@ -120,15 +113,6 @@ td.num,th.num{text-align:right}
     <h2>概览<span class="info" id="overview-info" tabindex="0" aria-describedby="overview-info-tip" aria-label="概览口径说明">!<span class="tip" id="overview-info-tip" role="tooltip"></span></span></h2>
     <div class="sub hidden" id="overview-warn" style="margin:-4px 0 12px"></div>
     <div class="cards" id="cards"></div>
-  </section>
-
-  <section>
-    <h2>官方用量明细<span class="info" id="models-info" tabindex="0" aria-describedby="models-info-tip" aria-label="按模型明细口径说明">!<span class="tip" id="models-info-tip" role="tooltip"></span></span></h2>
-    <div class="sub hidden" id="models-note" style="margin:-4px 0 12px"></div>
-    <div class="wrap"><table id="models"><thead>
-      <tr><th>上游渠道</th><th>模型</th><th class="num">请求</th><th class="num">输入 / 输出</th><th class="num">缓存命中率</th><th class="num">参考成本</th><th class="num">扣 credits</th></tr>
-    </thead><tbody></tbody></table></div>
-    <div class="msg hidden" id="models-msg"></div>
   </section>
 
   <section id="channel-section">
@@ -143,12 +127,7 @@ td.num,th.num{text-align:right}
       <div class="wrap"><table id="channel-providers"><thead>
         <tr><th>真实渠道</th><th class="num">请求</th><th class="num">占比</th><th class="num">偏离</th><th class="num">失败</th><th class="num">TTFT p50</th><th class="num">TTFT p90</th><th class="num">解码 p50</th><th class="num">输入</th><th class="num">输出</th><th class="num">缓存</th></tr>
       </thead><tbody></tbody></table></div>
-      <div class="sub" id="official-channels-note" style="margin:18px 0 8px;font-weight:600">上游推理渠道（官方 usage）</div>
-      <div class="wrap"><table id="official-channels"><thead>
-        <tr><th>上游渠道</th><th>真实模型</th><th class="num">请求</th><th class="num">输入</th><th class="num">输出</th><th class="num">缓存</th><th class="num">成本(USD)</th></tr>
-      </thead><tbody></tbody></table></div>
-      <div class="sub" id="official-channels-caption" style="margin:8px 0 12px"></div>
-      <div class="sub" id="channel-timeline-note" style="margin:18px 0 8px;font-weight:600">时间线（每小时）</div>
+      <div class="sub" id="channel-timeline-note" style="margin:18px 0 8px;font-weight:600">时间线（每小时 · 最近 10 小时）</div>
       <div class="cards" id="channel-timeline"></div>
       <div class="wrap" style="margin-top:14px"><table id="channel-hours"><thead>
         <tr><th>时间（新 → 旧）</th><th class="num">请求</th><th class="num">偏离</th><th class="num">失败</th><th class="num">TTFT p50</th><th class="num">解码 p50</th></tr>
@@ -157,6 +136,10 @@ td.num,th.num{text-align:right}
       <div class="wrap"><table id="channel-records"><thead>
         <tr><th>时间</th><th>模型</th><th>真实渠道</th><th class="num">尝试</th><th>CPA 凭据</th><th class="num">失败</th><th class="num">TTFT</th><th class="num">解码 t/s</th><th class="num">输入/输出/缓存读</th><th class="num">状态</th><th>会话</th></tr>
       </thead><tbody></tbody></table></div>
+      <div class="records-more hidden" id="channel-records-more">
+        <button type="button" id="channel-records-load">加载更多</button>
+        <span class="sub" id="channel-records-more-text"></span>
+      </div>
     </div>
   </section>
 </main>
@@ -280,7 +263,6 @@ function renderPlan(plan){
   if(!view||view.available===false){
     cards.innerHTML="";
     head.innerHTML="";
-    renderPlanDetail(null);
     msg.classList.remove("hidden");
     msg.className="msg plan-err";
     const error=(view&&view.error)||(plan&&plan.error)||"";
@@ -313,7 +295,6 @@ function renderPlan(plan){
   if(view.tokens_error)bits.push('<span class="plan-warn">官方汇总未取到：'+esc(view.tokens_error)+"</span>");
   if(view.usage&&view.usage.error)bits.push('<span class="plan-warn">官方逐条用量刷新失败：'+esc(view.usage.error)+"</span>");
   head.innerHTML=bits.join(" · ");
-  renderPlanDetail(view);
 
   const blocks=(view.limits||[]).map(function(limit){
     const pct=n(limit.percent_used);
@@ -386,66 +367,8 @@ function renderOverviewNote(view){
   warn.classList.toggle("hidden",warns.length===0);
 }
 
-// 套餐详情来自同一个 /users/me/plan 响应：说明、权益列表、计费周期。官方没给就整块不显示。
-function renderPlanDetail(view){
-  const box=$("plan-detail"), desc=$("plan-desc"), benefits=$("plan-benefits"), summary=$("plan-detail-summary");
-  if(!box)return;
-  const text=(view&&view.plan_description)||"";
-  const items=(view&&view.plan_benefits)||[];
-  box.classList.toggle("hidden",!text&&!items.length);
-  desc.classList.toggle("hidden",!text);
-  desc.textContent=text;
-  benefits.classList.toggle("hidden",!items.length);
-  benefits.innerHTML=items.map(item=>"<li>"+esc(item)+"</li>").join("");
-  const bits=[];
-  if(view&&view.plan_interval)bits.push(view.plan_interval);
-  if(view&&view.plan_type)bits.push(view.plan_type);
-  summary.textContent="套餐详情"+(bits.length?"（"+bits.join(" · ")+"）":"");
-}
-
-// 官方用量明细：按模型拆开当前窗口。数据全部来自已经拉到的记录（逐条用量或逐日汇总），
-// 不产生任何额外请求。
-function renderModels(plan){
-  const view=officialView(plan), off=view.off;
-  const body=$("models").querySelector("tbody"), note=$("models-note"), tip=$("models-info-tip");
-  const rows=(off&&off.models)||[];
-  const detail=!!(off&&off.detail!==false);
-  if(!rows.length){
-    body.innerHTML='<tr class="empty-row"><td colspan="7">'+
-      esc(off?"该窗口官方没有分模型明细。":"该账号在这个窗口还没有官方数据。")+"</td></tr>";
-  }else{
-    body.innerHTML=rows.map(row=>"<tr>"+
-      '<td><span class="mono">'+esc(row.inference_provider||"—")+"</span></td>"+
-      '<td><span class="mono">'+esc(row.model||"—")+"</span></td>"+
-      '<td class="num">'+(detail?int(row.requests):"—")+"</td>"+
-      '<td class="num">'+scaled(row.input_tokens)+" / "+scaled(row.output_tokens)+"</td>"+
-      '<td class="num">'+(detail?fixed(n(row.cache_ratio)*100,2)+"%":"—")+"</td>"+
-      '<td class="num">'+(row.cost_usd?"$"+fixed(row.cost_usd,4):"—")+"</td>"+
-      '<td class="num">'+(row.credits_used?int(row.credits_used):"—")+"</td>"+
-      "</tr>").join("");
-  }
-  const bits=[];
-  if(detail){
-    bits.push("官方逐条 "+int(off.requests)+" 条");
-    bits.push("流式 "+int(off.stream_requests)+" 条");
-    if(n(off.byok_requests))bits.push("BYOK "+int(off.byok_requests)+" 条");
-    bits.push(off.credits_used?("扣 credits "+int(off.credits_used)):"未扣 credits（包月套餐）");
-  }else if(off){
-    bits.push("该窗口来自官方逐日汇总，只有 token 与成本");
-  }
-  note.textContent=bits.join(" · ");
-  note.classList.toggle("hidden",bits.length===0);
-  if(tip){
-    const notes=["按官方用量记录里的模型聚合；同一个账号下其他客户端（Cline IDE 等）的请求也在里面。"];
-    if(detail){
-      notes.push("模型名取记录里的 metadata.raw_model，也就是真正跑的那个模型。");
-      notes.push("上游渠道取记录里的 aiInferenceProviderName：同一个模型被不同渠道服务会拆成两行；没有该字段的记录显示为 —。");
-    }else notes.push("近 7 天窗口来自官方逐日汇总，官方只给路由名（带供应商前缀的那种），也拿不到请求数、缓存列与上游渠道。");
-    notes.push("官方记录只含成功计费请求，失败请求不在其中，所以这里没有失败数；官方也没有平均延时与解码速度。");
-    tip.textContent=notes.join("\n");
-  }
-}
-
+// 概览的三张官方口径卡片（请求数 / 总 Token 数 / 缓存命中率）。它与套餐卡分开渲染：
+// 套餐或限额调用失败的凭据仍可能有官方用量，而失败的账号不能把上一个账号的数字留在屏幕上。
 function renderCards(plan){
   const view=officialView(plan), off=view.off;
   const tok=view.account.tokens||{};
@@ -510,8 +433,6 @@ function pctText(ratio){return fixed(n(ratio)*100,2)+"%"}
 function msText(value){return n(value)>0?fixed(value,0)+" ms":"—"}
 
 function tpsText(value){return n(value)>0?fixed(value,1):"—"}
-
-function moneyText(value){return n(value)?"$"+fixed(value,4):"—"}
 
 // 小时点是 RFC3339，表格里只需要到小时。
 function fmtHour(value){
@@ -592,44 +513,19 @@ function renderChannelProviders(summary,baseline){
   }).join("");
 }
 
-// 上游推理渠道（官方 usage）：和上面的「渠道分布」并排的第二套口径。渠道分布回答「哪个
-// CPA 凭据服务了请求」（CPA 侧），这张表回答「Cline 把请求发到哪个上游推理渠道」（官方侧，
-// aiInferenceProviderName）。官方逐条用量只记录成功计费请求，失败（502）根本不在里面，
-// 所以失败只能按 CPA 凭据计数，这张表不编造每个失败请求的上游渠道。
-function renderOfficialChannels(view){
-  const body=$("official-channels").querySelector("tbody");
-  const caption=$("official-channels-caption");
-  const data=view||{};
-  const rows=data.official_channels||[];
-  const usage=data.official_usage||{};
-  if(caption){
-    const oldest=usage.oldest?fmtTime(usage.oldest):"";
-    caption.textContent="来自 Cline 官方 per-request usage；只含成功计费请求，失败(502)不在其中，因此失败只能按 CPA 凭据计数；"+
-      (oldest?("数据覆盖到 "+oldest+"。"):"官方记录尚未取到，覆盖范围未知。");
-  }
-  if(!rows.length){
-    body.innerHTML='<tr class="empty-row"><td colspan="7">'+
-      esc("官方用量记录还没有到：Cline 官方 per-request usage 尚未取到（不是 0，是没有数据）。")+
-      (usage.error?'<div class="sub" style="margin-top:4px">最近一次刷新失败：'+esc(usage.error)+"</div>":"")+"</td></tr>";
-    return;
-  }
-  body.innerHTML=rows.map(function(row){
-    return "<tr>"+
-      '<td><span class="mono">'+esc(row.inference_provider||"—")+"</span></td>"+
-      '<td><span class="mono">'+esc(row.model||"—")+"</span></td>"+
-      '<td class="num">'+int(row.requests)+"</td>"+
-      '<td class="num">'+scaled(row.input_tokens)+"</td>"+
-      '<td class="num">'+scaled(row.output_tokens)+"</td>"+
-      '<td class="num">'+scaled(row.cached_tokens)+"</td>"+
-      '<td class="num">'+moneyText(row.cost_usd)+"</td>"+
-      "</tr>";
-  }).join("");
-}
+// 时间线只覆盖最近 10 个小时：窗口（1h/24h/7d）仍然是上面所有汇总数字的范围，这一块
+// 只回答「刚刚过去的十个小时是什么样」，更早的小时去「真实渠道」表和 CSV 里看。
+const timelineHourLimit=10;
 
+// newestChannelHours 取窗口里最新的若干个小时点，顺序保持旧 → 新（sparkline 的方向不变）。
+function newestChannelHours(summary){
+  const hours=(summary&&summary.hours)||[];
+  return hours.length>timelineHourLimit?hours.slice(hours.length-timelineHourLimit):hours.slice();
+}
 
 function renderChannelTimeline(summary,baseline){
   const box=$("channel-timeline");
-  const hours=(summary&&summary.hours)||[];
+  const hours=newestChannelHours(summary);
   if(!hours.length){
     box.innerHTML='<div class="msg">该窗口没有小时数据。</div>';
     return;
@@ -645,9 +541,9 @@ function renderChannelTimeline(summary,baseline){
   hours.forEach(function(point){total+=n(point.requests);offTotal+=n(point.off_baseline)});
   box.innerHTML=[
     card({label:"每小时请求",icon:"⇄",tint:"#60a5fa",
-      tip:"按小时拆开的请求数，含窗口内全部小时；某个小时为 0 就是当时没有请求，不做插值。",
+      tip:"按小时拆开的请求数，只画最近 "+timelineHourLimit+" 个小时；某个小时为 0 就是当时没有请求，不做插值。",
       value:int(total),unit:"条",
-      sub:[hours.length+" 个小时点","偏离合计 "+int(offTotal)+" 条"],
+      sub:["最近 "+hours.length+" 个小时点","偏离合计 "+int(offTotal)+" 条"],
       spark:requests}),
     card({label:"每小时偏离基准渠道",icon:"!",tint:"#f87171",
       tip:"按小时拆开的偏离请求数；峰值小时是比例最高的那一个。",
@@ -659,12 +555,12 @@ function renderChannelTimeline(summary,baseline){
 
 function renderChannelHours(summary){
   const body=$("channel-hours").querySelector("tbody");
-  const hours=(summary&&summary.hours)||[];
+  const hours=newestChannelHours(summary);
   if(!hours.length){
     body.innerHTML='<tr class="empty-row"><td colspan="6">该窗口没有小时数据。</td></tr>';
     return;
   }
-  // 最新的一小时排在最上面：25 个整点刻度从窗口末端往回列，用户先看到「刚刚过去的一小时」。
+  // 最新的一小时排在最上面：最近 10 个整点刻度从窗口末端往回列，用户先看到「刚刚过去的一小时」。
   // 用 slice() 复制后再 reverse，避免把 summary.hours 原地倒过来影响同一份 summary 的其它渲染
   // （上面三张 sparkline 卡片仍按时间正序画，左旧右新，图表趋势方向不变）。
   body.innerHTML=hours.slice().reverse().map(function(point){
@@ -680,24 +576,26 @@ function renderChannelHours(summary){
   }).join("");
 }
 
-function renderChannelRecords(view,baseline){
-  const body=$("channel-records").querySelector("tbody");
-  const note=$("channel-records-note");
-  const rows=(view&&view.records)||[];
-  const total=n(view&&view.records_total);
-  if(note){
-    note.innerHTML="原始记录"+(rows.length<total
-      ?" · 显示最新 "+int(rows.length)+" / 共 "+int(total)+" 条（导出 CSV 是完整窗口）"
-      :" · 共 "+int(total)+" 条");
-  }
-  if(!rows.length){
-    body.innerHTML='<tr class="empty-row"><td colspan="11">该窗口没有原始记录。</td></tr>';
-    return;
-  }
-  body.innerHTML=rows.map(function(record){
+// 原始记录分页：每页 20 条，往下滑到脚注时自动取下一页；按钮走的是同一条路径，键盘和
+// 不支持 IntersectionObserver 的浏览器靠它。分页只覆盖这张表，CSV 仍然是完整窗口。
+const recordsPageSize=20;
+// recordsMaxDepth 对应后端的 channelRecordMaxLimit：60 秒自动刷新时最多按这个深度重取一页，
+// 免得把用户翻到的位置弹回第一页，也不会让一次请求变得过大。
+const recordsMaxDepth=200;
+let recordsState={window:"",baseline:"",rows:[],total:0,loading:false};
+let recordsObserver=null;
+
+function resetRecordsState(){
+  recordsState={window:$("window").value||"24h",baseline:"",rows:[],total:0,loading:false};
+}
+
+function recordsDepth(){
+  return Math.max(recordsPageSize,Math.min(recordsState.rows.length||recordsPageSize,recordsMaxDepth));
+}
+
+function recordRow(record,baseline){
     const provider=channelOfRecord(record);
     const off=channelIsOff(record,baseline);
-    const authID=String(record.auth_id||"");
     const authIndex=String(record.auth_index||"");
     const cpa=String(record.cpa_provider||"");
     const resolved=String(record.gateway_resolved_provider||"");
@@ -725,7 +623,92 @@ function renderChannelRecords(view,baseline){
         (record.stream===false?'<span class="sub" style="margin-left:6px">非流式</span>':"")+"</td>"+
       '<td title="'+esc(record.session_id||"")+'"><span class="mono">'+esc(shortID(record.session_id))+"</span></td>"+
       "</tr>";
-  }).join("");
+}
+
+function paintRecordsNote(){
+  const note=$("channel-records-note");
+  if(!note)return;
+  const shown=recordsState.rows.length,total=recordsState.total;
+  note.innerHTML="原始记录"+(shown<total
+    ?" · 已显示 "+int(shown)+" / 共 "+int(total)+" 条（导出 CSV 是完整窗口）"
+    :" · 共 "+int(total)+" 条");
+}
+
+function paintRecordsMore(){
+  const box=$("channel-records-more"),button=$("channel-records-load"),text=$("channel-records-more-text");
+  if(!box||!button||!text)return;
+  const remaining=recordsState.total-recordsState.rows.length;
+  box.classList.toggle("hidden",remaining<=0);
+  button.disabled=recordsState.loading;
+  button.textContent=recordsState.loading?"加载中…":"加载更多";
+  text.textContent=remaining>0?("还有 "+int(remaining)+" 条 · 滑到底部自动加载"):"";
+}
+
+function paintRecords(){
+  const body=$("channel-records").querySelector("tbody");
+  body.innerHTML=recordsState.rows.length
+    ? recordsState.rows.map(record=>recordRow(record,recordsState.baseline)).join("")
+    : '<tr class="empty-row"><td colspan="11">该窗口没有原始记录。</td></tr>';
+  paintRecordsNote();
+  paintRecordsMore();
+}
+
+function renderChannelRecords(view,baseline){
+  recordsState={
+    window:$("window").value||"24h",
+    baseline:baseline,
+    rows:((view&&view.records)||[]).slice(),
+    total:n(view&&view.records_total),
+    loading:false};
+  paintRecords();
+  observeRecordsMore();
+}
+
+// 脚注进入视口时取下一页：这就是「下滑翻页」。观察器只负责触发，取数、去重和按钮状态
+// 都在 loadMoreRecords 里；取完之后如果脚注被内容顶出视口，会等下一次滚动再触发。
+function observeRecordsMore(){
+  const box=$("channel-records-more");
+  if(!box||typeof IntersectionObserver!=="function")return;
+  if(recordsObserver)recordsObserver.disconnect();
+  recordsObserver=new IntersectionObserver(function(entries){
+    entries.forEach(function(entry){
+      if(!entry.isIntersecting)return;
+      if(recordsState.rows.length>=recordsState.total)return;
+      loadMoreRecords();
+    });
+  },{rootMargin:"160px 0px"});
+  recordsObserver.observe(box);
+}
+
+async function loadMoreRecords(){
+  if(recordsState.loading)return;
+  if(recordsState.rows.length>=recordsState.total)return;
+  const win=recordsState.window||$("window").value||"24h";
+  recordsState.loading=true;
+  paintRecordsMore();
+  try{
+    const data=await api("/channel?window="+encodeURIComponent(win)+"&records="+recordsPageSize+"&offset="+recordsState.rows.length);
+    // 期间切了窗口（或又刷新了一轮）就丢掉这一页：offset 属于上一份列表。
+    if(win!==recordsState.window)return;
+    const page=(data&&data.records)||[];
+    recordsState.rows=recordsState.rows.concat(page);
+    recordsState.total=n(data&&data.records_total)||recordsState.total;
+  }catch(err){
+    if(err.code===401||err.code===403){
+      $("gate").classList.remove("hidden");
+      $("statusline").textContent="管理密钥无效或缺失（HTTP "+err.code+"）";
+      return;
+    }
+    const msg=$("channel-msg");
+    if(msg){
+      msg.className="msg plan-err";
+      msg.textContent="原始记录加载失败："+err.message;
+      msg.classList.remove("hidden");
+    }
+  }finally{
+    recordsState.loading=false;
+    paintRecords();
+  }
 }
 
 function renderChannel(view){
@@ -808,7 +791,6 @@ function renderChannel(view){
   ].join("");
 
   renderChannelProviders(summary,baseline);
-  renderOfficialChannels(data);
   renderChannelTimeline(summary,baseline);
   renderChannelHours(summary);
   renderChannelRecords(data,baseline);
@@ -842,7 +824,11 @@ function renderChannelError(err){
 async function loadChannel(){
   const win=$("window").value||"24h";
   try{
-    renderChannel(await api("/channel?window="+encodeURIComponent(win)));
+    // 已经翻到的深度跟着刷新一起带上：自动刷新不会把用户翻到的那几页弹回第一页。
+    const view=await api("/channel?window="+encodeURIComponent(win)+"&records="+recordsDepth());
+    // 期间改过窗口，这份数据属于上一份列表，画上去会让表头和内容对不上。
+    if(win!==($("window").value||"24h"))return;
+    renderChannel(view);
   }catch(err){
     if(err.code===401||err.code===403){
       $("gate").classList.remove("hidden");
@@ -911,7 +897,6 @@ async function load(){
     // can still have usable official usage, and a failed account must never leave the
     // previous account's numbers on screen.
     renderCards(health.plan);
-    renderModels(health.plan);
     $("gate").classList.add("hidden");
   }catch(err){
     if(err.code===401||err.code===403){
@@ -927,9 +912,10 @@ $("save").addEventListener("click",()=>{const v=$("token").value.trim();if(!v)re
 $("token").addEventListener("keydown",e=>{if(e.key==="Enter")$("save").click()});
 $("forget").addEventListener("click",()=>{store.del(TOKEN_KEY);$("token").value="";$("gate").classList.remove("hidden");$("statusline").textContent="已清除本机保存的密钥"});
 $("refresh").addEventListener("click",()=>load());
-$("window").addEventListener("change",()=>{renderCards(planSnapshot||{});renderModels(planSnapshot||{});loadChannel()});
+$("window").addEventListener("change",()=>{resetRecordsState();renderCards(planSnapshot||{});loadChannel()});
 $("channel-csv").addEventListener("click",()=>downloadChannelCSV());
-$("plan-account").addEventListener("change",()=>{store.set(PLAN_ACCOUNT_KEY,$("plan-account").value);renderPlan(planSnapshot||{});renderCards(planSnapshot||{});renderModels(planSnapshot||{})});
+$("channel-records-load").addEventListener("click",()=>loadMoreRecords());
+$("plan-account").addEventListener("change",()=>{store.set(PLAN_ACCOUNT_KEY,$("plan-account").value);renderPlan(planSnapshot||{});renderCards(planSnapshot||{})});
 
 if(!store.get(TOKEN_KEY))$("gate").classList.remove("hidden");
 load();

@@ -152,6 +152,16 @@ func feedChannelPayload(t *testing.T, recorder *observation.Recorder, payload []
 	recorder.Flush()
 }
 
+// pagedChannelPayload is channelUsagePayloadAt with a request id of its own, so one test can
+// feed several requests into one window and page through them.
+func pagedChannelPayload(index int, at time.Time) []byte {
+	suffix := "-" + strconv.Itoa(index)
+	payload := strings.ReplaceAll(
+		string(channelUsagePayloadAt("sess-page-"+strconv.Itoa(index), at)),
+		channelFixtureRequestID, channelFixtureRequestID+suffix)
+	return []byte(payload)
+}
+
 // decodeObject decodes one JSON object into its raw members, so a key can be asserted on the
 // wire instead of through a struct this test chose the shape of.
 func decodeObject(t *testing.T, raw []byte, context string) map[string]json.RawMessage {
@@ -541,6 +551,84 @@ func TestChannelViewJoinsTheGatewayChannel(t *testing.T) {
 	} {
 		if got := rows[1][column[name]]; got != want {
 			t.Errorf("csv %s = %q, want %q", name, got, want)
+		}
+	}
+}
+
+// TestChannelViewPagesRecords pins the slicing the 原始记录 table pages with: records is one page
+// of the newest-first window, offset moves that page, an offset past the end answers with an empty
+// page instead of an error, and a size outside the cap is rejected rather than silently clamped.
+func TestChannelViewPagesRecords(t *testing.T) {
+	recorder, _ := startChannelRecorder(t)
+	base := time.Now().UTC().Truncate(time.Second)
+	for index := 0; index < 5; index++ {
+		feedChannelPayload(t, recorder, pagedChannelPayload(index, base.Add(time.Duration(index)*time.Second)))
+	}
+
+	type page struct {
+		Records       []observation.Record `json:"records"`
+		RecordsTotal  int                  `json:"records_total"`
+		RecordsOffset int                  `json:"records_offset"`
+		RecordsLimit  int                  `json:"records_limit"`
+	}
+	decode := func(query string) page {
+		t.Helper()
+		request := pluginAPIRequest(BasePath + "/channel?window=24h" + query)
+		response := route(&request)
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("GET /channel%s: status = %d, body = %s", query, response.StatusCode, response.Body)
+		}
+		var out page
+		if errUnmarshal := json.Unmarshal(response.Body, &out); errUnmarshal != nil {
+			t.Fatalf("GET /channel%s must decode: %v", query, errUnmarshal)
+		}
+		return out
+	}
+
+	whole := decode("")
+	if whole.RecordsTotal != 5 || len(whole.Records) != 5 {
+		t.Fatalf("the default page = %d of %d records, want all five", len(whole.Records), whole.RecordsTotal)
+	}
+	if whole.RecordsOffset != 0 || whole.RecordsLimit != channelRecordLimit {
+		t.Errorf("the default page = offset %d limit %d, want 0/%d",
+			whole.RecordsOffset, whole.RecordsLimit, channelRecordLimit)
+	}
+
+	head := decode("&records=2")
+	if len(head.Records) != 2 || head.RecordsOffset != 0 || head.RecordsLimit != 2 || head.RecordsTotal != 5 {
+		t.Fatalf("records=2 = %d rows (offset %d, limit %d, total %d)",
+			len(head.Records), head.RecordsOffset, head.RecordsLimit, head.RecordsTotal)
+	}
+	tail := decode("&records=2&offset=2")
+	if len(tail.Records) != 2 || tail.RecordsOffset != 2 {
+		t.Fatalf("offset=2 = %d rows at offset %d", len(tail.Records), tail.RecordsOffset)
+	}
+	if tail.Records[0].RequestID == head.Records[0].RequestID {
+		t.Errorf("the second page repeats the first page's newest row: %q", tail.Records[0].RequestID)
+	}
+	if !tail.Records[0].Time.Before(head.Records[1].Time) {
+		t.Errorf("records must stay newest-first across pages: %s is not older than %s",
+			tail.Records[0].Time, head.Records[1].Time)
+	}
+	if last := decode("&records=2&offset=4"); len(last.Records) != 1 {
+		t.Errorf("the last page has %d rows, want the one left over", len(last.Records))
+	}
+	if empty := decode("&records=2&offset=5"); len(empty.Records) != 0 || empty.RecordsTotal != 5 {
+		t.Errorf("offset past the end = %d rows (total %d), want an empty page that still reports the total",
+			len(empty.Records), empty.RecordsTotal)
+	}
+
+	for _, bad := range []struct{ query, code string }{
+		{"&records=0", "invalid_records"},
+		{"&records=" + strconv.Itoa(channelRecordMaxLimit+1), "invalid_records"},
+		{"&records=abc", "invalid_records"},
+		{"&offset=-1", "invalid_offset"},
+		{"&offset=abc", "invalid_offset"},
+	} {
+		request := pluginAPIRequest(BasePath + "/channel?window=24h" + bad.query)
+		response := route(&request)
+		if response.StatusCode != http.StatusBadRequest || !strings.Contains(string(response.Body), bad.code) {
+			t.Errorf("GET /channel%s = %d %s, want 400 + %s", bad.query, response.StatusCode, response.Body, bad.code)
 		}
 	}
 }

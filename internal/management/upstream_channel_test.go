@@ -190,64 +190,34 @@ func TestUpstreamChannelReachesThePage(t *testing.T) {
 	}
 }
 
-// TestUpstreamChannelTableIsPresent asserts the page carries the new table next to the
-// CPA-side 渠道分布 table, the caliber caption, the column on 官方用量明细, and the render
-// function the loader wires to the payload.
-func TestUpstreamChannelTableIsPresent(t *testing.T) {
+// TestChannelSectionKeepsOnlyTheRealChannelDimension asserts the page shows the gateway channel
+// table alone. The two official-source tables left the page on request; the payload behind them
+// (/channel's official_channels / official_usage and the per-model rows in /health) stays in the
+// API, so the collector's data is still reachable without the page.
+func TestChannelSectionKeepsOnlyTheRealChannelDimension(t *testing.T) {
 	page := string(indexHTML(nil))
-	for _, id := range []string{"official-channels", "official-channels-note", "official-channels-caption"} {
-		if !strings.Contains(page, `id="`+id+`"`) {
-			t.Errorf("page is missing the %s element", id)
-		}
-	}
-	if !strings.Contains(page, "上游推理渠道（官方 usage）") {
-		t.Error("page is missing the 上游推理渠道（官方 usage） heading")
-	}
-	if !strings.Contains(page, "<th>上游渠道</th>") {
-		t.Error("page is missing the 上游渠道 column header")
-	}
-	if !strings.Contains(page, "function renderOfficialChannels(") {
-		t.Error("page is missing the renderOfficialChannels function")
-	}
-	// The new table sits beside the CPA-credential channel distribution and its caption follows
-	// it. (The per-model table that used to come after was removed: it answered no question the
-	// two channel tables do not answer better.)
-	providers := strings.Index(page, `id="channel-providers"`)
-	official := strings.Index(page, `id="official-channels"`)
-	caption := strings.Index(page, `id="official-channels-caption"`)
-	if providers < 0 || official < 0 || caption < 0 {
-		t.Fatalf("page is missing a table of the 渠道 section: providers=%d official=%d caption=%d",
-			providers, official, caption)
-	}
-	if !(providers < official && official < caption) {
-		t.Errorf("the upstream-channel table must follow 渠道分布: providers=%d official=%d caption=%d",
-			providers, official, caption)
-	}
-
-	body := jsFunctionBody(t, page, "renderOfficialChannels")
 	for _, needle := range []string{
-		"official_channels", "official_usage", "moneyText(row.cost_usd)", "empty-row",
+		`id="official-channels"`, "official-channels-note", "official-channels-caption",
+		"上游推理渠道（官方 usage）", "function renderOfficialChannels(", "renderOfficialChannels(data)",
+		"官方用量明细", "function renderModels(",
 	} {
-		if !strings.Contains(body, needle) {
-			t.Errorf("renderOfficialChannels must use %s, got:\n%s", needle, body)
+		if strings.Contains(page, needle) {
+			t.Errorf("page still carries the removed %q official-usage element", needle)
 		}
 	}
-	// The caliber has to be on the page: official records only, so failures can only be
-	// counted per CPA credential, and the coverage is stated with the oldest record.
-	for _, needle := range []string{"来自 Cline 官方 per-request usage", "只含成功计费请求", "失败(502)不在其中", "数据覆盖到 "} {
-		if !strings.Contains(body, needle) {
-			t.Errorf("the caliber caption is missing %q, got:\n%s", needle, body)
-		}
+	if !strings.Contains(page, `id="channel-providers"`) {
+		t.Fatal("page is missing the 真实渠道 table")
 	}
-	// An empty collector says the records have not arrived, not that they are zero.
-	for _, needle := range []string{"官方用量记录还没有到", "不是 0"} {
-		if !strings.Contains(body, needle) {
-			t.Errorf("the empty state must say %q, got:\n%s", needle, body)
-		}
+	if !strings.Contains(page, "真实渠道（网关") {
+		t.Error("page is missing the 真实渠道 heading")
 	}
-	// The overview's per-model table reads the same field; its info tooltip must not keep
-	// claiming the official records carry no channel at all.
-	if strings.Contains(page, "官方记录里没有最终上游渠道") {
-		t.Error("the 官方用量明细 tooltip still claims the official records carry no upstream channel")
+	if !strings.Contains(page, "function renderChannelProviders(") {
+		t.Error("page is missing the renderChannelProviders function")
+	}
+	body := jsFunctionBody(t, page, "renderChannelProviders")
+	for _, needle := range []string{"summary.providers", "off_baseline", "empty-row"} {
+		if !strings.Contains(body, needle) {
+			t.Errorf("renderChannelProviders must use %s, got:\n%s", needle, body)
+		}
 	}
 }

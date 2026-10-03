@@ -156,16 +156,23 @@ func TestIndexPageCarriesNoData(t *testing.T) {
 			t.Errorf("page is missing %q", needle)
 		}
 	}
-	for _, needle := range []string{"Cline 套餐用量", "plan-cards", "% 已用", "近 31 天已用 Token（官方）", "套餐详情"} {
+	for _, needle := range []string{"Cline 套餐用量", "plan-cards", "% 已用", "近 31 天已用 Token（官方）"} {
 		if !strings.Contains(page, needle) {
 			t.Errorf("page is missing the %q plan element", needle)
 		}
 	}
 	// The overview keeps the official usage view the collector still gathers: the window
-	// selector, the three official cards, their charts, and the per-model table below.
-	for _, needle := range []string{"概览", "请求数", "总 Token 数", "缓存命中率", "sparkline", "近 7 天", "官方用量明细", "id=\"models\""} {
+	// selector, the three official cards and their charts.
+	for _, needle := range []string{"概览", "请求数", "总 Token 数", "缓存命中率", "sparkline", "近 7 天"} {
 		if !strings.Contains(page, needle) {
 			t.Errorf("page is missing the %q overview element", needle)
+		}
+	}
+	// The plan detail block and the two official-source tables left the page on request; the
+	// payloads they read are still served by /health and /channel, so only the page drops them.
+	for _, needle := range []string{"套餐详情", "官方用量明细", `id="models"`, "上游推理渠道（官方 usage）", `id="official-channels"`} {
+		if strings.Contains(page, needle) {
+			t.Errorf("page still carries the removed %q element", needle)
 		}
 	}
 	if !strings.Contains(page, "grid-template-columns:repeat(3,minmax(0,1fr))") {
@@ -210,19 +217,17 @@ func jsFunctionBody(t *testing.T, page, name string) string {
 // misattributed. The overview must be rendered by its callers instead.
 func TestOverviewRendersIndependentlyOfThePlanCard(t *testing.T) {
 	page := string(indexHTML(nil))
-	if body := jsFunctionBody(t, page, "renderPlan"); strings.Contains(body, "renderCards(") || strings.Contains(body, "renderModels(") {
-		t.Error("renderPlan must not render the overview or the per-model table: its early return would leave the previous account's numbers on screen")
+	if body := jsFunctionBody(t, page, "renderPlan"); strings.Contains(body, "renderCards(") {
+		t.Error("renderPlan must not render the overview: its early return would leave the previous account's numbers on screen")
 	}
 	if body := jsFunctionBody(t, page, "renderCards"); strings.Contains(body, "renderPlan(") {
 		t.Error("renderCards must not depend on renderPlan")
 	}
-	if body := jsFunctionBody(t, page, "renderModels"); strings.Contains(body, "renderPlan(") {
-		t.Error("renderModels must not depend on renderPlan")
+	if !strings.Contains(page, "renderCards(health.plan)") {
+		t.Error("load() must call renderCards(health.plan) for every refresh, independent of the plan card")
 	}
-	for _, call := range []string{"renderCards(health.plan)", "renderModels(health.plan)"} {
-		if !strings.Contains(page, call) {
-			t.Errorf("load() must call %s for every refresh, independent of the plan card", call)
-		}
+	if strings.Contains(page, "function renderModels(") {
+		t.Error("the per-model table left the page, so renderModels must be gone with it")
 	}
 	if !strings.Contains(page, `$("plan-account").addEventListener("change"`) {
 		t.Fatal("page is missing the account picker listener")
@@ -230,10 +235,45 @@ func TestOverviewRendersIndependentlyOfThePlanCard(t *testing.T) {
 	lineStart := strings.Index(page, `$("plan-account").addEventListener("change"`)
 	lineEnd := strings.Index(page[lineStart:], "\n")
 	listener := page[lineStart : lineStart+lineEnd]
-	for _, call := range []string{"renderPlan(", "renderCards(", "renderModels("} {
+	for _, call := range []string{"renderPlan(", "renderCards("} {
 		if !strings.Contains(listener, call) {
 			t.Errorf("switching accounts must re-render everything, %s is missing from: %s", call, listener)
 		}
+	}
+}
+
+// TestChannelTimelineAndRecordPaging pins the two channel-section changes: the hourly timeline
+// draws the newest ten hours only, and the raw-record table pages through the window instead of
+// stopping at the newest twenty rows.
+func TestChannelTimelineAndRecordPaging(t *testing.T) {
+	page := string(indexHTML(nil))
+	if !strings.Contains(page, "const timelineHourLimit=10;") {
+		t.Error("the timeline limit must be ten hours")
+	}
+	hours := jsFunctionBody(t, page, "newestChannelHours")
+	if !strings.Contains(hours, "timelineHourLimit") {
+		t.Fatalf("newestChannelHours must cut the timeline at the hour limit, got:\n%s", hours)
+	}
+	for _, name := range []string{"renderChannelTimeline", "renderChannelHours"} {
+		if body := jsFunctionBody(t, page, name); !strings.Contains(body, "newestChannelHours(summary)") {
+			t.Errorf("%s must render the newest hours, got:\n%s", name, body)
+		}
+	}
+	for _, needle := range []string{
+		`id="channel-records-more"`, `id="channel-records-load"`, "function loadMoreRecords(",
+		"IntersectionObserver", "const recordsPageSize=20;", "records_total",
+	} {
+		if !strings.Contains(page, needle) {
+			t.Errorf("the raw-record table is missing %q", needle)
+		}
+	}
+	if body := jsFunctionBody(t, page, "loadMoreRecords"); !strings.Contains(body, `"&offset="`) {
+		t.Errorf("loadMoreRecords must ask the API for the next offset, got:\n%s", body)
+	}
+	// A refresh has to carry the depth the page already shows, otherwise the 60s auto-refresh
+	// would throw the reader back to the first page.
+	if body := jsFunctionBody(t, page, "loadChannel"); !strings.Contains(body, "recordsDepth()") {
+		t.Errorf("loadChannel must ask for the depth the page already shows, got:\n%s", body)
 	}
 }
 

@@ -141,7 +141,12 @@ const (
 type responseSection struct {
 	frames  int
 	routing routing
-	found   bool
+	// promptTokens and completionTokens are the usage numbers of the last frame in this
+	// section that carried any. The upstream sends the counters cumulatively, so the last
+	// frame is the whole answer; a section whose frames name none keeps 0/0.
+	promptTokens     int64
+	completionTokens int64
+	found            bool
 }
 
 // line dispatches one complete line. Section headers are recognised first, because every
@@ -238,6 +243,18 @@ func (p *parser) frameLine(line []byte) {
 		return
 	}
 	p.response.frames++
+	// The usage block sits beside `choices` and is decoded, never text-matched, for the same
+	// reason the routing block is: "usage" occurs inside prompts too. A frame whose usage names
+	// only one of the two counters updates only that one, and the last frame that names a
+	// counter wins: the upstream reports them cumulatively, so the newest is the whole answer.
+	if usage := frame.Usage; usage != nil {
+		if usage.PromptTokens != nil {
+			p.response.promptTokens = int64(*usage.PromptTokens)
+		}
+		if usage.CompletionTokens != nil {
+			p.response.completionTokens = int64(*usage.CompletionTokens)
+		}
+	}
 	for _, choice := range frame.Choices {
 		metadata := choice.Delta.ProviderMetadata
 		if metadata == nil {
@@ -253,7 +270,8 @@ func (p *parser) frameLine(line []byte) {
 
 // finish closes the last section and materialises the fact. The channel fields stay empty
 // when no response section carried a provider_metadata block: an empty channel is the honest
-// answer for a request that failed, and it is never replaced by a default.
+// answer for a request that failed, and it is never replaced by a default. The same rule covers
+// the usage counters, which are read out of that winning section and stay 0 when it named none.
 func (p *parser) finish() Fact {
 	p.closeResponse()
 	fact := p.fact
@@ -274,6 +292,11 @@ func (p *parser) finish() Fact {
 		fact.TotalProviderAttemptCount = p.best.routing.totalProviderAttemptCount
 		fact.FallbacksAvailable = p.best.routing.fallbacksAvailable
 		fact.GatewayCost = p.best.routing.cost
+		// The usage numbers describe the same answer the channel does, so they come from the
+		// same section: pairing a record's counters with the usage of an attempt that failed
+		// would be exactly the guess this parser exists to avoid.
+		fact.PromptTokens = p.best.promptTokens
+		fact.CompletionTokens = p.best.completionTokens
 		fact.Frames = p.best.frames
 	}
 	if fact.FallbacksAvailable == nil {
@@ -344,9 +367,9 @@ func normaliseHeader(key string) string {
 	return strings.ReplaceAll(strings.ToLower(strings.TrimSpace(key)), "-", "_")
 }
 
-// responseFrame is the decoded shape of one upstream SSE frame. Only the path to the routing
-// block is declared: the rest of the frame (the model's own text, the usage block) is skipped
-// by the decoder, so a frame costs the routing block, not the frame.
+// responseFrame is the decoded shape of one upstream SSE frame. Only the paths this package
+// reads are declared: the rest of the frame (the model's own text) is skipped by the decoder,
+// so a frame costs the routing block and the usage counters, not the frame.
 type responseFrame struct {
 	Choices []struct {
 		Delta struct {
@@ -362,6 +385,17 @@ type responseFrame struct {
 			ProviderMetadata *providerMetadata `json:"provider_metadata"`
 		} `json:"message"`
 	} `json:"choices"`
+	// Usage is the frame's own usage block: a pointer, so "the frame carried none" stays
+	// distinguishable from "the frame carried zeros".
+	Usage *usageBlock `json:"usage"`
+}
+
+// usageBlock is the token accounting of one response frame. Only the two counters the join
+// fallback matches on are declared; they decode as numbers (or as strings holding one), and a
+// counter the frame did not name stays nil rather than becoming a zero.
+type usageBlock struct {
+	PromptTokens     *flexInt `json:"prompt_tokens"`
+	CompletionTokens *flexInt `json:"completion_tokens"`
 }
 
 type providerMetadata struct {

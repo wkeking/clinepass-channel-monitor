@@ -209,19 +209,19 @@ func TestUpstreamChannelTableIsPresent(t *testing.T) {
 	if !strings.Contains(page, "function renderOfficialChannels(") {
 		t.Error("page is missing the renderOfficialChannels function")
 	}
-	// The new table sits beside the CPA-credential channel distribution, before the per-model
-	// table, and its caption follows it.
+	// The new table sits beside the CPA-credential channel distribution and its caption follows
+	// it. (The per-model table that used to come after was removed: it answered no question the
+	// two channel tables do not answer better.)
 	providers := strings.Index(page, `id="channel-providers"`)
 	official := strings.Index(page, `id="official-channels"`)
 	caption := strings.Index(page, `id="official-channels-caption"`)
-	channelModels := strings.Index(page, `id="channel-models"`)
-	if providers < 0 || official < 0 || caption < 0 || channelModels < 0 {
-		t.Fatalf("page is missing a table of the 渠道 section: providers=%d official=%d caption=%d models=%d",
-			providers, official, caption, channelModels)
+	if providers < 0 || official < 0 || caption < 0 {
+		t.Fatalf("page is missing a table of the 渠道 section: providers=%d official=%d caption=%d",
+			providers, official, caption)
 	}
-	if !(providers < official && official < caption && caption < channelModels) {
-		t.Errorf("the upstream-channel table must follow 渠道分布 and precede 按模型: providers=%d official=%d caption=%d models=%d",
-			providers, official, caption, channelModels)
+	if !(providers < official && official < caption) {
+		t.Errorf("the upstream-channel table must follow 渠道分布: providers=%d official=%d caption=%d",
+			providers, official, caption)
 	}
 
 	body := jsFunctionBody(t, page, "renderOfficialChannels")

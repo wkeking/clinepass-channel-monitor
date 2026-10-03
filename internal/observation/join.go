@@ -22,16 +22,19 @@ import (
 //   - the fact must carry a channel at all. A request that failed has no routing block, and an
 //     empty channel must never be filled in from anything else: a guessed "deepseek" is
 //     indistinguishable from a measured one.
-//   - the fact's session uuid (the "Session_id: session-<uuid>" header, prefix stripped) must
-//     appear inside the record's session_id, which CPA writes as "codex:session-<uuid>". The
-//     8 trailing characters of the log file name are a CPA-internal id that appears nowhere in
-//     the usage payload, so they are not a join key.
+//   - first, and for as long as it finds anything, the session: the fact's session uuid (the
+//     "Session_id: session-<uuid>" header, prefix stripped) must appear inside the record's
+//     session_id, which CPA writes as "codex:session-<uuid>". The 8 trailing characters of the
+//     log file name are a CPA-internal id that appears nowhere in the usage payload, so they
+//     are not a join key.
 //   - |fact.time - record.time| must be shorter than joinWindow. Measured on live traffic the
 //     two clocks are 72-218 ms apart; the window is the allowance, not the expectation.
 //
-// A client that sends no Session_id header cannot be joined at all: those records show a
-// session like "lcp:v1:<hex>", there is nothing to match on, and the honest answer is an empty
-// channel rather than a guessed one.
+// The current client traffic sends no Session_id header at all (every fact carries
+// has_session false), so the session cannot match anything and the match falls back to the
+// counters the two halves both report — see matchByUsage. A client that sends neither a header
+// nor tokens still cannot be joined: those records keep an empty channel, which is the honest
+// answer rather than a guessed one.
 type FactSource interface {
 	Facts() []channellog.Fact
 }
@@ -68,11 +71,15 @@ func FactsFromChannelLog(lookup func() *channellog.Scanner) FactSource {
 // export must render it as "unknown", never as the baseline.
 const ChannelSourceLog = "log"
 
-// joinWindow is the widest |fact.time - record.time| a join may be made on. It is exclusive: a
-// fact exactly two seconds away belongs to some other request, so it does not match. The
-// measured distance between the log's arrival timestamp and the usage-reported time is 72-218
-// ms, which is why two seconds is an allowance with two orders of magnitude of headroom rather
-// than a tight fit.
+// joinWindow is the widest |fact.time - record.time| a join may be made on. The measured
+// distance between the log's arrival timestamp and the usage-reported time is 72-218 ms, which
+// is why two seconds is an allowance with two orders of magnitude of headroom rather than a
+// tight fit.
+//
+// The two paths read the bound differently, and that is deliberate. The session match is
+// exclusive — a fact exactly two seconds away belongs to some other request — while the
+// token-and-counter fallback admits the boundary itself, because there the counters, not the
+// clock, are what identifies the request and the window only has to exclude the impossible.
 const joinWindow = 2 * time.Second
 
 // channelJoin is one read of the facts, held for the length of one view. It is rebuilt per
@@ -92,10 +99,19 @@ func (r *Recorder) openJoin() channelJoin {
 	return channelJoin{facts: r.facts.Facts()}
 }
 
-// match returns the fact that belongs to the record. When several qualify the closest one in
-// time wins: the session header is what makes the match possible, and the timestamp is what
-// picks among the requests of one session.
+// match returns the fact that belongs to the record: the session match first, because it is
+// proven, and the token-and-time fallback only when the session found nothing.
 func (j channelJoin) match(record Record) (channellog.Fact, bool) {
+	if fact, found := j.matchBySession(record); found {
+		return fact, true
+	}
+	return j.matchByUsage(record)
+}
+
+// matchBySession is the proven path. When several facts qualify the closest one in time wins:
+// the session header is what makes the match possible, and the timestamp is what picks among
+// the requests of one session.
+func (j channelJoin) matchBySession(record Record) (channellog.Fact, bool) {
 	var best channellog.Fact
 	found := false
 	bestDelta := time.Duration(0)
@@ -119,6 +135,54 @@ func (j channelJoin) match(record Record) (channellog.Fact, bool) {
 		}
 	}
 	return best, found
+}
+
+// matchByUsage is the fallback for the traffic that sends no Session_id header: the usage
+// callback and the request log both report the same token counters, and the arrival times are
+// milliseconds apart, so the pair of counters inside a two-second window identifies the request
+// when nothing else can.
+//
+// It is a deliberately tight rule, and its seams are the point:
+//
+//   - the pair must be exact. A record of (37, 16) and a fact of (37, 17) are two different
+//     requests, however close in time they are.
+//   - a 0/0 on either side carries no information at all, so two zeros may never pair up: a
+//     failed request reports no tokens, and a log that named no usage has no counters to match.
+//     Both are skipped rather than being allowed to match each other.
+//   - exactly one candidate, or no join at all. Two facts with the same counters in the same
+//     window is a real possibility on a busy deployment, and picking one of them would attach a
+//     measured channel to the wrong request. Ambiguity is not evidence.
+func (j channelJoin) matchByUsage(record Record) (channellog.Fact, bool) {
+	if record.InputTokens == 0 && record.OutputTokens == 0 {
+		return channellog.Fact{}, false
+	}
+	var candidate channellog.Fact
+	candidates := 0
+	for _, fact := range j.facts {
+		if !fact.HasChannel() {
+			// A fact without a channel is never a candidate: it cannot fill one in.
+			continue
+		}
+		if fact.PromptTokens == 0 && fact.CompletionTokens == 0 {
+			continue
+		}
+		if fact.PromptTokens != record.InputTokens || fact.CompletionTokens != record.OutputTokens {
+			continue
+		}
+		delta := record.Time.Sub(fact.Time)
+		if delta < 0 {
+			delta = -delta
+		}
+		if delta > joinWindow {
+			continue
+		}
+		candidate = fact
+		candidates++
+	}
+	if candidates != 1 {
+		return channellog.Fact{}, false
+	}
+	return candidate, true
 }
 
 // withChannel returns the record as the view reads it: a copy whose gateway half is filled from

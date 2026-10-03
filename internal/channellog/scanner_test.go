@@ -723,6 +723,7 @@ func TestFactCarriesEveryKey(t *testing.T) {
 		"final_provider", "resolved_provider", "canonical_slug", "original_model_id",
 		"pinned_provider", "affinity_outcome", "model_attempt_count",
 		"total_provider_attempt_count", "fallbacks_available", "gateway_cost",
+		"prompt_tokens", "completion_tokens",
 		"frames", "attempts_seen", "had_error_response", "source_file", "parsed_at",
 	}
 	for _, key := range want {

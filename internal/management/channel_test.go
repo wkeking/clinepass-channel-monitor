@@ -198,7 +198,7 @@ func TestChannelViewIsPresent(t *testing.T) {
 	page := string(indexHTML(nil))
 	for _, id := range []string{
 		"channel-section", "channel-csv", "channel-headline", "channel-cards",
-		"channel-providers", "channel-models", "channel-hours", "channel-records",
+		"channel-providers", "channel-hours", "channel-records",
 		"channel-timeline",
 	} {
 		if !strings.Contains(page, `id="`+id+`"`) {

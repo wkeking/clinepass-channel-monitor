@@ -24,6 +24,11 @@ const (
 	fixturePinnedProvider   = "deepseek"
 	fixtureAffinityOutcome  = "confirmed"
 	fixtureCost             = 0.00001515
+
+	// The usage numbers the frozen captures carry, read out of their own usage frames. The
+	// fallback join matches a record's counters against them, so they are pinned here.
+	fixturePromptTokens     = 37
+	fixtureCompletionTokens = 16
 )
 
 // fixtureLog returns one frozen capture.
@@ -113,6 +118,19 @@ func requireChannel(t *testing.T, fact Fact, context string) {
 	}
 }
 
+// requireUsage compares a fact's token counters against the numbers the fixtures carry. They are
+// the only thing the fallback join has left when the client sent no Session_id header, so a
+// drifted value here is a record that silently stops matching on the host.
+func requireUsage(t *testing.T, fact Fact, context string) {
+	t.Helper()
+	if fact.PromptTokens != fixturePromptTokens {
+		t.Errorf("%s: prompt_tokens = %d, want %d", context, fact.PromptTokens, fixturePromptTokens)
+	}
+	if fact.CompletionTokens != fixtureCompletionTokens {
+		t.Errorf("%s: completion_tokens = %d, want %d", context, fact.CompletionTokens, fixtureCompletionTokens)
+	}
+}
+
 // TestParsePlainSuccessFixture pins the exact values of the sanitized capture: the request
 // identity, the routing block the Responses protocol drops, and the frame count it came from.
 func TestParsePlainSuccessFixture(t *testing.T) {
@@ -129,6 +147,7 @@ func TestParsePlainSuccessFixture(t *testing.T) {
 		t.Errorf("method = %q, want POST", fact.Method)
 	}
 	requireChannel(t, fact, fixturePlain)
+	requireUsage(t, fact, fixturePlain)
 	if fact.Frames != 2 {
 		t.Errorf("frames = %d, want 2: the section holds two JSON frames and the [DONE] marker", fact.Frames)
 	}
@@ -163,6 +182,7 @@ func TestParseRetryFixtureUsesTheServedChannel(t *testing.T) {
 		t.Errorf("path = %q, want /v1/responses", fact.Path)
 	}
 	requireChannel(t, fact, fixtureRetry)
+	requireUsage(t, fact, fixtureRetry)
 	if !fact.HadErrorResponse {
 		t.Error("had_error_response = false, want true for a capture with an API ERROR RESPONSE section")
 	}
@@ -239,6 +259,11 @@ func TestFileWithoutResponseSectionHasAnEmptyChannel(t *testing.T) {
 		t.Errorf("session = (%q, %q, %v), want the header read and the prefix stripped",
 			fact.SessionID, fact.SessionUUID, fact.HasSession)
 	}
+	// A request that never got an answer names no usage either: both counters stay zero.
+	if fact.PromptTokens != 0 || fact.CompletionTokens != 0 {
+		t.Errorf("usage = (%d, %d), want 0/0 without a response section",
+			fact.PromptTokens, fact.CompletionTokens)
+	}
 }
 
 // TestLastParseableResponseSectionWins pins "take the last API RESPONSE that parses": when a
@@ -257,6 +282,53 @@ func TestLastParseableResponseSectionWins(t *testing.T) {
 	}
 	if fact.AttemptsSeen != 2 {
 		t.Errorf("attempts_seen = %d, want 2", fact.AttemptsSeen)
+	}
+}
+
+// TestUsageNumbersComeFromTheWinningSection pins where the counters are read from. The
+// upstream reports usage more than once — and a section that carries usage without a routing
+// block is an attempt the request was not served by — so the numbers have to describe the same
+// answer the channel does. Pairing a record with another attempt's counters would be the same
+// class of guess as inventing a channel.
+func TestUsageNumbersComeFromTheWinningSection(t *testing.T) {
+	log := syntheticLog("2026-10-02T22:24:00.000000000+08:00", "/v1/responses", "", `{"input":"hi"}`,
+		"=== API RESPONSE 1 ===\n"+
+			channelFrame("deepseek", "deepseek", "deepseek/deepseek-v4.1-flash", 1)+"\n"+
+			usageFrame(37, 4)+"\n"+
+			usageFrame(37, 16)+"\n\n"+
+			"=== API RESPONSE 2 ===\n"+
+			usageFrame(99, 99)+"\n")
+	fact, errParse := parseLog(strings.NewReader(log), "usage_sections.log", time.Now())
+	if errParse != nil {
+		t.Fatalf("parse: %v", errParse)
+	}
+	// The last usage frame of the winning section wins over the earlier one in it, and the
+	// later section's numbers are not the served answer's.
+	if fact.PromptTokens != 37 || fact.CompletionTokens != 16 {
+		t.Errorf("usage = (%d, %d), want the winning section's last frame (37, 16)",
+			fact.PromptTokens, fact.CompletionTokens)
+	}
+	if fact.FinalProvider != "deepseek" {
+		t.Errorf("final_provider = %q, want the channel of the section the usage came from", fact.FinalProvider)
+	}
+}
+
+// TestSectionWithoutUsageYieldsZeroCounters is the other half of "never a guess": a section
+// whose frames name no usage leaves both counters at zero, and so does a file with no response
+// section at all.
+func TestSectionWithoutUsageYieldsZeroCounters(t *testing.T) {
+	log := syntheticLog("2026-10-02T22:25:00.000000000+08:00", "/v1/responses", "", `{"input":"hi"}`,
+		"=== API RESPONSE 1 ===\n"+channelFrame("deepseek", "deepseek", "deepseek/deepseek-v4.1-flash", 1)+"\n")
+	fact, errParse := parseLog(strings.NewReader(log), "no_usage.log", time.Now())
+	if errParse != nil {
+		t.Fatalf("parse: %v", errParse)
+	}
+	if !fact.HasChannel() {
+		t.Fatal("the frame carries a routing block, so the fact must report a channel")
+	}
+	if fact.PromptTokens != 0 || fact.CompletionTokens != 0 {
+		t.Errorf("usage = (%d, %d), want 0/0 for a section that named none",
+			fact.PromptTokens, fact.CompletionTokens)
 	}
 }
 
@@ -313,4 +385,12 @@ func channelFrame(finalProvider, resolvedProvider, slug string, attempts int) st
 		`"totalProviderAttemptCount":` + count + `,` +
 		`"fallbacksAvailable":[],` +
 		`"affinity":{"outcome":"confirmed","pinnedProvider":"` + finalProvider + `"}}}}}}],"id":"gen_test"}`
+}
+
+// usageFrame renders one SSE frame carrying the upstream's token counters, the way the last
+// frame of a streamed answer does. It carries no routing block: the upstream reports usage
+// cumulatively, and the counters must still be read from the section that served the request.
+func usageFrame(prompt, completion int) string {
+	return `data: {"choices":[],"usage":{"prompt_tokens":` + strconv.Itoa(prompt) +
+		`,"completion_tokens":` + strconv.Itoa(completion) + `}}`
 }

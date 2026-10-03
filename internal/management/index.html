@@ -148,10 +148,6 @@ td.num,th.num{text-align:right}
         <tr><th>上游渠道</th><th>真实模型</th><th class="num">请求</th><th class="num">输入</th><th class="num">输出</th><th class="num">缓存</th><th class="num">成本(USD)</th></tr>
       </thead><tbody></tbody></table></div>
       <div class="sub" id="official-channels-caption" style="margin:8px 0 12px"></div>
-      <div class="sub" id="channel-models-note" style="margin:18px 0 8px;font-weight:600">按模型</div>
-      <div class="wrap"><table id="channel-models"><thead>
-        <tr><th>模型</th><th class="num">请求</th><th class="num">偏离</th><th class="num">TTFT p50</th><th class="num">解码 p50</th></tr>
-      </thead><tbody></tbody></table></div>
       <div class="sub" id="channel-timeline-note" style="margin:18px 0 8px;font-weight:600">时间线（每小时）</div>
       <div class="cards" id="channel-timeline"></div>
       <div class="wrap" style="margin-top:14px"><table id="channel-hours"><thead>
@@ -630,25 +626,6 @@ function renderOfficialChannels(view){
   }).join("");
 }
 
-function renderChannelModels(summary){
-  const body=$("channel-models").querySelector("tbody");
-  const rows=(summary&&summary.models)||[];
-  if(!rows.length){
-    body.innerHTML='<tr class="empty-row"><td colspan="5">该窗口没有按模型的数据。</td></tr>';
-    return;
-  }
-  body.innerHTML=rows.map(function(row){
-    const slug=String(row.canonical_slug||"");
-    return "<tr>"+
-      '<td><span class="mono">'+esc(row.model||"—")+"</span>"+
-        (slug?'<div class="sub" style="margin-top:2px">'+esc(slug)+"</div>":"")+"</td>"+
-      '<td class="num">'+int(row.requests)+"</td>"+
-      '<td class="num">'+(n(row.off_baseline)>0?'<span class="plan-warn">'+int(row.off_baseline)+"</span>":int(row.off_baseline))+"</td>"+
-      '<td class="num">'+msText(row.ttft_p50_ms)+"</td>"+
-      '<td class="num">'+tpsText(row.decode_p50_tps)+"</td>"+
-      "</tr>";
-  }).join("");
-}
 
 function renderChannelTimeline(summary,baseline){
   const box=$("channel-timeline");
@@ -832,7 +809,6 @@ function renderChannel(view){
 
   renderChannelProviders(summary,baseline);
   renderOfficialChannels(data);
-  renderChannelModels(summary);
   renderChannelTimeline(summary,baseline);
   renderChannelHours(summary);
   renderChannelRecords(data,baseline);

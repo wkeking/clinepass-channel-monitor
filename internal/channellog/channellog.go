@@ -19,9 +19,11 @@
 //     excluded. The plugin's own JSONL store lives in a SUBDIRECTORY of the same directory,
 //     which is one of the reasons the scan never recurses.
 //
-// The fact it produces carries the join key the later merge needs: the log's Timestamp (the
-// request arrival) and the Session_id header, whose uuid also reaches the observation store
-// inside "codex:session-<uuid>".
+// The fact it produces carries the join keys the later merge needs: the log's Timestamp (the
+// request arrival), the Session_id header, whose uuid also reaches the observation store inside
+// "codex:session-<uuid>", and the upstream's own prompt/completion token counters for the
+// traffic that sends no such header — the fallback the join uses when the session matches
+// nothing.
 package channellog
 
 import (
@@ -137,6 +139,14 @@ type Fact struct {
 	TotalProviderAttemptCount int      `json:"total_provider_attempt_count"`
 	FallbacksAvailable        []string `json:"fallbacks_available"`
 	GatewayCost               float64  `json:"gateway_cost"`
+
+	// PromptTokens and CompletionTokens are the upstream's own usage numbers, taken from the
+	// last usage frame of the winning response section. They are 0 when the log named none —
+	// a request that never got a complete answer — and a record may not be joined onto a 0/0
+	// pair. They exist because the client traffic no longer sends a Session_id header: the
+	// clock alone would be a guess, while the exact pair of counters is not.
+	PromptTokens     int64 `json:"prompt_tokens"`
+	CompletionTokens int64 `json:"completion_tokens"`
 
 	// Frames is how many SSE frames the response section behind this fact carried: the last
 	// section that had a routing block, or, when none had one, the last section seen.

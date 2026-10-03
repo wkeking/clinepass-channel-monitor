@@ -1,6 +1,8 @@
 package observation
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -30,6 +32,10 @@ const (
 	joinGatewayCost = 0.00001515
 	// joinArrivalGap is how far the log's arrival timestamp sits from the usage-reported time.
 	joinArrivalGap = 120 * time.Millisecond
+	// joinInputTokens and joinOutputTokens are the counters the fixture record carries and the
+	// fixture facts of the fallback tests agree on: the pair the fallback matches.
+	joinInputTokens  = 37
+	joinOutputTokens = 16
 )
 
 // factSet is a FactSource a test fills after the recorder has started. The real scanner
@@ -115,6 +121,19 @@ func failedFact(at time.Time) channellog.Fact {
 		SourceFile:       fact.SourceFile,
 		ParsedAt:         fact.ParsedAt,
 	}
+}
+
+// usageOnlyFact is the parsed request log of a client that sent no Session_id header — the
+// traffic the fallback exists for. Everything the session match would have used is absent; what
+// is left is the arrival time, the channel, and the counters both halves report.
+func usageOnlyFact(at time.Time, prompt, completion int64, channel string) channellog.Fact {
+	fact := gatewayFact(at, "", channel)
+	fact.SessionID = ""
+	fact.SessionUUID = ""
+	fact.HasSession = false
+	fact.PromptTokens = prompt
+	fact.CompletionTokens = completion
+	return fact
 }
 
 // stampUsage pins the payload's own timestamp to the instant the test wants the record to
@@ -320,6 +339,280 @@ func TestJoinNeedsTheSessionHeader(t *testing.T) {
 				t.Errorf("cpa_providers = %+v, want the credential the record did report", summary.CPAProviders)
 			}
 		})
+	}
+}
+
+// TestJoinFallsBackToTheCounters is the case the current client traffic produces: the record's
+// session is the client's own "lcp:v1:<hex>", the fact carries no session at all, and the only
+// thing the two halves agree on is the pair of token counters.
+func TestJoinFallsBackToTheCounters(t *testing.T) {
+	source := &factSet{}
+	recorder, clock := newRecorderWithFacts(t, providerBaseline, source)
+	at := clock.at.Add(-time.Minute)
+	wire := usageFixture(providerFixture, at)
+	wire.SessionID = "lcp:v1:0f0e0d0c"
+	wire.Detail.InputTokens = joinInputTokens
+	wire.Detail.OutputTokens = joinOutputTokens
+	stampUsage(&wire, at)
+	feedUsage(t, recorder, wire)
+	source.set(usageOnlyFact(at.Add(joinArrivalGap), joinInputTokens, joinOutputTokens, joinGatewayOther))
+
+	records := channelRecordsOf(t, recorder)
+	if len(records) != 1 {
+		t.Fatalf("want exactly 1 record, got %d: %+v", len(records), records)
+	}
+	record := records[0]
+	if record.ChannelSource != ChannelSourceLog || record.GatewayProvider != joinGatewayOther {
+		t.Errorf("record = %+v, want the channel %q joined on the counters", record, joinGatewayOther)
+	}
+	if record.FinalProvider != joinGatewayOther || record.ResolvedProvider != joinGatewayOther {
+		t.Errorf("record = %+v, want both provider keys filled from the one fact", record)
+	}
+	if record.GatewayCost != joinGatewayCost {
+		t.Errorf("gateway_cost = %v, want %v", record.GatewayCost, joinGatewayCost)
+	}
+	summary := recorder.Summary(mustWindow(t, "24h"))
+	if summary.Resolved != 1 || summary.Unresolved != 0 {
+		t.Errorf("resolved/unresolved = %d/%d, want 1/0 for a fallback join", summary.Resolved, summary.Unresolved)
+	}
+	if summary.OffBaseline != 1 {
+		t.Errorf("off_baseline = %d, want 1: the joined channel %q is not the baseline",
+			summary.OffBaseline, joinGatewayOther)
+	}
+}
+
+// TestJoinFallbackOnTheFrozenCapture is the production shape end to end: one frozen CPA request
+// log read by the real scanner, one record carrying the counters the host reported for that same
+// request, and the channel the page has to show coming out of the fact. The client in the
+// capture sends no Session_id header, which is exactly the traffic the fallback exists for.
+func TestJoinFallbackOnTheFrozenCapture(t *testing.T) {
+	logDir := t.TempDir()
+	raw, errRead := os.ReadFile(filepath.Join("..", "channellog", "testdata", "plain_success.log"))
+	if errRead != nil {
+		t.Fatalf("read the frozen capture: %v", errRead)
+	}
+	path := filepath.Join(logDir, "req-fixture.log")
+	if errWrite := os.WriteFile(path, raw, 0o644); errWrite != nil {
+		t.Fatalf("write %s: %v", path, errWrite)
+	}
+	// Backdated past the scanner's age gate: a file CPA is still writing is not read.
+	old := time.Now().Add(-time.Hour)
+	if errChtimes := os.Chtimes(path, old, old); errChtimes != nil {
+		t.Fatalf("backdate %s: %v", path, errChtimes)
+	}
+	scanner := channellog.New(channellog.Options{
+		Enabled: true, Dir: logDir, StoreDir: t.TempDir(), MinAge: 0,
+	})
+	stored, errScan := scanner.ScanOnce()
+	if errScan != nil {
+		t.Fatalf("ScanOnce: %v", errScan)
+	}
+	if stored != 1 {
+		t.Fatalf("stored = %d, want the capture to become exactly one fact", stored)
+	}
+	facts := scanner.Facts()
+	if len(facts) != 1 {
+		t.Fatalf("facts = %d, want 1", len(facts))
+	}
+	if facts[0].HasSession || !facts[0].HasChannel() {
+		t.Fatalf("fact = %+v, want the capture's absent header and its gateway channel", facts[0])
+	}
+
+	source := FactsFromChannelLog(func() *channellog.Scanner { return scanner })
+	recorder, _ := newRecorderWithFacts(t, providerBaseline, source)
+	// The record's time is the fact's own arrival timestamp plus the measured gap between the
+	// two clocks, and its counters are the ones the same capture reports: 37 prompt, 16
+	// completion.
+	at := facts[0].Time.Add(joinArrivalGap)
+	wire := usageFixture(providerFixture, at)
+	wire.SessionID = "lcp:v1:0f0e0d0c"
+	wire.Detail.InputTokens = joinInputTokens
+	wire.Detail.OutputTokens = joinOutputTokens
+	stampUsage(&wire, at)
+	feedUsage(t, recorder, wire)
+
+	records := channelRecordsOf(t, recorder)
+	if len(records) != 1 {
+		t.Fatalf("want exactly 1 record, got %d", len(records))
+	}
+	record := records[0]
+	if record.ChannelSource != ChannelSourceLog || record.GatewayProvider != joinGatewayChannel {
+		t.Errorf("record = %+v, want the capture's channel %q joined without a session header",
+			record, joinGatewayChannel)
+	}
+	if record.GatewaySlug != "deepseek/deepseek-v4.1-flash" || record.GatewayAttempts != 1 {
+		t.Errorf("record = %+v, want the routing block out of the capture", record)
+	}
+	summary := recorder.Summary(mustWindow(t, "24h"))
+	if summary.Resolved != 1 || summary.Unresolved != 0 {
+		t.Errorf("resolved/unresolved = %d/%d, want 1/0", summary.Resolved, summary.Unresolved)
+	}
+}
+
+// TestJoinFallbackRefusesAmbiguity is the guard that makes the fallback evidence rather than a
+// guess: two facts with the record's counters inside the window cannot be told apart, so
+// neither is joined. Attaching one of them would file a measured channel under the wrong
+// request.
+func TestJoinFallbackRefusesAmbiguity(t *testing.T) {
+	source := &factSet{}
+	recorder, clock := newRecorderWithFacts(t, providerBaseline, source)
+	at := clock.at.Add(-time.Minute)
+	wire := usageFixture(providerFixture, at)
+	wire.SessionID = "lcp:v1:0f0e0d0c"
+	wire.Detail.InputTokens = joinInputTokens
+	wire.Detail.OutputTokens = joinOutputTokens
+	stampUsage(&wire, at)
+	feedUsage(t, recorder, wire)
+
+	first := usageOnlyFact(at.Add(joinArrivalGap), joinInputTokens, joinOutputTokens, joinGatewayChannel)
+	first.SourceFile = "req-first.log"
+	second := usageOnlyFact(at.Add(joinArrivalGap+300*time.Millisecond), joinInputTokens, joinOutputTokens, joinGatewayOther)
+	second.SourceFile = "req-second.log"
+	source.set(first, second)
+
+	records := channelRecordsOf(t, recorder)
+	if len(records) != 1 {
+		t.Fatalf("want exactly 1 record, got %d", len(records))
+	}
+	if got := records[0]; got.ChannelSource != "" || got.GatewayProvider != "" || got.FinalProvider != "" {
+		t.Errorf("record = %+v, want no channel: two candidate facts are not evidence", got)
+	}
+	summary := recorder.Summary(mustWindow(t, "24h"))
+	if summary.Resolved != 0 || summary.Unresolved != 1 {
+		t.Errorf("resolved/unresolved = %d/%d, want 0/1 for an ambiguous pair", summary.Resolved, summary.Unresolved)
+	}
+}
+
+// TestJoinFallbackNeedsTheExactCounters keeps a near miss out. The counters are what replaces
+// the missing session header, so an off-by-one pair is a different request, however close in
+// time it is.
+func TestJoinFallbackNeedsTheExactCounters(t *testing.T) {
+	for _, check := range []struct {
+		name                  string
+		prompt, completion    int64
+		recordPrompt, recordC int64
+	}{
+		{name: "one prompt token more", prompt: joinInputTokens + 1, completion: joinOutputTokens,
+			recordPrompt: joinInputTokens, recordC: joinOutputTokens},
+		{name: "one completion token more", prompt: joinInputTokens, completion: joinOutputTokens + 1,
+			recordPrompt: joinInputTokens, recordC: joinOutputTokens},
+		{name: "a zeroed pair against a named one", prompt: 0, completion: 0,
+			recordPrompt: joinInputTokens, recordC: joinOutputTokens},
+	} {
+		t.Run(check.name, func(t *testing.T) {
+			source := &factSet{}
+			recorder, clock := newRecorderWithFacts(t, providerBaseline, source)
+			at := clock.at.Add(-time.Minute)
+			wire := usageFixture(providerFixture, at)
+			wire.SessionID = "lcp:v1:0f0e0d0c"
+			wire.Detail.InputTokens = check.recordPrompt
+			wire.Detail.OutputTokens = check.recordC
+			stampUsage(&wire, at)
+			feedUsage(t, recorder, wire)
+			source.set(usageOnlyFact(at.Add(joinArrivalGap), check.prompt, check.completion, joinGatewayOther))
+
+			records := channelRecordsOf(t, recorder)
+			if len(records) != 1 {
+				t.Fatalf("want exactly 1 record, got %d", len(records))
+			}
+			if got := records[0]; got.ChannelSource != "" || got.GatewayProvider != "" || got.FinalProvider != "" {
+				t.Errorf("record = %+v, want no channel for a mismatched counter pair", got)
+			}
+		})
+	}
+}
+
+// TestJoinFallbackNeverPairsTwoZeros is the guard against the one pair that would otherwise
+// match everything empty: a failed request reports no tokens at all, and a fact whose log named
+// no usage carries 0/0, so "both are zero" may never be read as agreement.
+func TestJoinFallbackNeverPairsTwoZeros(t *testing.T) {
+	source := &factSet{}
+	recorder, clock := newRecorderWithFacts(t, providerBaseline, source)
+	at := clock.at.Add(-time.Minute)
+	wire := usageFixture(providerFixture, at)
+	wire.SessionID = "lcp:v1:0f0e0d0c"
+	wire.Failed = true
+	wire.Detail = usageDetail{}
+	stampUsage(&wire, at)
+	feedUsage(t, recorder, wire)
+	// The fact does carry a channel — only its usage is missing — so the counters are the sole
+	// reason this must not join.
+	source.set(usageOnlyFact(at.Add(joinArrivalGap), 0, 0, joinGatewayOther))
+
+	records := channelRecordsOf(t, recorder)
+	if len(records) != 1 {
+		t.Fatalf("want exactly 1 record, got %d", len(records))
+	}
+	if got := records[0]; got.ChannelSource != "" || got.GatewayProvider != "" || got.FinalProvider != "" {
+		t.Errorf("record = %+v, want no channel: two zeros are not a match", got)
+	}
+	summary := recorder.Summary(mustWindow(t, "24h"))
+	if summary.Resolved != 0 || summary.Unresolved != 1 {
+		t.Errorf("resolved/unresolved = %d/%d, want 0/1: a failure is never attributed to a channel",
+			summary.Resolved, summary.Unresolved)
+	}
+}
+
+// TestJoinFallbackTakesNoChannelFromAChannellessFact keeps the oldest guarantee in front of the
+// new path: a fact without a routing block never fills one in, even when its counters agree
+// with the record exactly.
+func TestJoinFallbackTakesNoChannelFromAChannellessFact(t *testing.T) {
+	source := &factSet{}
+	recorder, clock := newRecorderWithFacts(t, providerBaseline, source)
+	at := clock.at.Add(-time.Minute)
+	wire := usageFixture(providerFixture, at)
+	wire.SessionID = "lcp:v1:0f0e0d0c"
+	wire.Detail.InputTokens = joinInputTokens
+	wire.Detail.OutputTokens = joinOutputTokens
+	stampUsage(&wire, at)
+	feedUsage(t, recorder, wire)
+
+	fact := failedFact(at.Add(joinArrivalGap))
+	fact.PromptTokens = joinInputTokens
+	fact.CompletionTokens = joinOutputTokens
+	if fact.HasChannel() {
+		t.Fatalf("the fixture failed fact carries a channel: %+v", fact)
+	}
+	source.set(fact)
+
+	records := channelRecordsOf(t, recorder)
+	if len(records) != 1 {
+		t.Fatalf("want exactly 1 record, got %d", len(records))
+	}
+	if got := records[0]; got.ChannelSource != "" || got.GatewayProvider != "" || got.FinalProvider != "" {
+		t.Errorf("record = %+v, want no channel: the fact has none to give", got)
+	}
+}
+
+// TestJoinPrefersTheSessionOverTheCounters pins the order of the two rules: the session is the
+// proven match, so when it finds a fact the counters are not consulted at all — even though a
+// second fact agrees with the record exactly and the fallback would then be ambiguous.
+func TestJoinPrefersTheSessionOverTheCounters(t *testing.T) {
+	source := &factSet{}
+	recorder, clock := newRecorderWithFacts(t, providerBaseline, source)
+	at := clock.at.Add(-time.Minute)
+	wire := usageFixture(providerFixture, at)
+	wire.SessionID = joinRecordSession
+	wire.Detail.InputTokens = joinInputTokens
+	wire.Detail.OutputTokens = joinOutputTokens
+	stampUsage(&wire, at)
+	feedUsage(t, recorder, wire)
+
+	bySession := gatewayFact(at.Add(joinArrivalGap), joinSessionUUID, joinGatewayOther)
+	bySession.PromptTokens = joinInputTokens
+	bySession.CompletionTokens = joinOutputTokens
+	bySession.SourceFile = "req-session.log"
+	byCounters := usageOnlyFact(at.Add(joinArrivalGap), joinInputTokens, joinOutputTokens, joinGatewayChannel)
+	byCounters.SourceFile = "req-counters.log"
+	source.set(bySession, byCounters)
+
+	records := channelRecordsOf(t, recorder)
+	if len(records) != 1 {
+		t.Fatalf("want exactly 1 record, got %d", len(records))
+	}
+	if got := records[0]; got.GatewayProvider != joinGatewayOther {
+		t.Errorf("record = %+v, want the session's channel %q to win over the counters",
+			got, joinGatewayOther)
 	}
 }
 

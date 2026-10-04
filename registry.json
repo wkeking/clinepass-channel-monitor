@@ -4,9 +4,9 @@
     {
       "id": "clinepass-channel-monitor",
       "name": "Cline 渠道监控",
-      "description": "在管理中心展示 Cline 套餐、限额与近 31 天官方用量，并按请求观测每条请求最终落在哪个网关渠道（finalProvider，取自 CPA 请求日志）、TTFT 与解码速度；观测总开关关闭时不声明任何请求钩子。 / Shows the Cline plan, rolling limits and official 31-day usage in the Management Center, plus the gateway channel each request actually landed on (finalProvider, read from CPA's request log), its TTFT and decode speed; with observation switched off it declares no request hook at all.",
+      "description": "在管理中心展示 Cline 套餐、限额与近 31 天官方用量，并按请求观测每条请求最终落在哪个网关渠道（finalProvider，取自 CPA 请求日志）、TTFT 与解码速度；观测总开关关闭时不声明任何请求钩子。页面顶部的「配置自检」按当前状态列出还差哪一项开关、缺了会少什么功能、补哪一行（只读，不替用户改配置）。 / Shows the Cline plan, rolling limits and official 31-day usage in the Management Center, plus the gateway channel each request actually landed on (finalProvider, read from CPA's request log), its TTFT and decode speed; with observation switched off it declares no request hook at all. A read-only configuration self-check at the top of the page lists which switches are still off, what breaks without them, and the exact line to add.",
       "author": "wkeking",
-      "version": "0.3.0",
+      "version": "0.3.1",
       "repository": "https://github.com/wkeking/clinepass-channel-monitor",
       "homepage": "https://github.com/wkeking/clinepass-channel-monitor",
       "license": "MIT",

@@ -76,6 +76,8 @@ curl -s -X POST -H "Authorization: Bearer $CPA_MANAGEMENT_KEY" \
 
 > ⚠️ 商店安装的 `.so` 落在容器内插件目录，**容器重建会丢失**。想持久化，请给插件目录挂一个宿主卷（bind mount），或重建后重装一次。方式 A 放在挂载卷里则不受重建影响。
 
+> ⚠️ **商店安装会重写这个插件的配置块**（CPA v8.0.8 实测）：安装那一刻 `plugins.configs.clinepass-channel-monitor` 被写成只有 `enabled: true` 与 `store:`（安装元数据），你自己加的键全部丢失——包括 `channel_log_enabled: true`。它落回默认值 `false` 后请求日志旁路不再运行，「真实渠道」整列变空（安装之前的记录仍有渠道，因为 fact 是从落盘的 fact 文件 join 进来的）。每次从商店安装 / 更新后，请把 `channel_log_enabled: true`（以及你改过的其它键）加回配置块；配置块只剩 `enabled` + `store` 时就是这个情况。改完不用重启容器：配置文件被改动会直接触发一次 reload。
+
 ## 配置
 
 配置写在 CPA 配置文件的 `plugins.configs.clinepass-channel-monitor` 下：
@@ -373,6 +375,7 @@ v0.1.x 的 `/stats`、`/events`、`/export` 三条路由已移除，请求它们
 | 上游返回 502，能否看出是哪个上游渠道 | **不能**。官方用量接口只记成功计费请求（实测 200 条里 0 条零 completion），失败不会出现在里面；CPA 的 usage 载荷里 `Failure.Body` 只有一句 `upstream stream returned an error payload`，不含上游渠道字样。上游错误原文（例如 `failed to generate stream from Vercel: … status 429 … Rate limit exceeded`）只在 CPA 自己的 `main.log` 里。渠道区只能按 CPA 凭据给出失败分布 |
 | `POST /v1/responses` 的请求能看到吗 | 能。渠道取自宿主每个请求结束后的 usage 回调，与客户端协议无关；旧的流式分片设计在这里才是盲区，已退役。**网关级渠道**（`finalProvider`）要看 `channel_log_enabled`：它在上游响应里，只有 CPA 请求日志能看到（CPA 翻译成 Responses 时丢了它，clinepass 上游也没有 `/responses` 端点） |
 | `channel_log` 一个 fact 都没有 / 目录里没有日志文件 | 按顺序查：① CPA 侧是否同时满足 `observability.logs.request-log: true` 与 `server.commercial-mode: false`（两个都满足才写文件）；② 改完是否**重启过容器**（实测 reload 成功也不出文件，见 [docs/channel-observation.md](docs/channel-observation.md) §2.2）；③ `logs-max-total-size-mb` 是否太小（默认 10 MB，与 `main.log` 共享，日志几秒内就被清理器删掉）；④ 插件侧 `channel_log_enabled` / `channel_log_dir` 是否指对；⑤ 文件 mtime 是否还在 `channel_log_min_age_seconds` 之内。健康度看 `/health` 的 `channel_log.health`（`scanned` / `parsed` / `parse_failures` / `skipped_young` / `last_error`） |
+| **从商店安装 / 更新之后**「真实渠道」整列变空，而安装之前的记录还有渠道 | 商店安装重写了插件配置块，只剩 `enabled` + `store`（`config.yaml` 里这个块的 mtime 就是安装时刻），`channel_log_enabled` 落回默认 `false`，scanner 不再启动。判据：`/health` 的 `channel_log.enabled=false`、`facts_total=0`、`scanned=0`，且 `channel-log-<日期>.jsonl` 的 mtime 停在安装那一刻；安装之后的记录 `final_provider` 为空、之前的有值（fact 从落盘文件 join）。处理：把 `channel_log_enabled: true` 加回配置块，文件改动会直接触发一次 reload（实测不用重启容器、也不用重装插件），scanner 随即补扫积压的请求日志 |
 | 打开 `channel_log_enabled` 有没有代价 | 有，且是明确测过的：CPA 请求日志里是**明文 prompt**，单个长上下文请求 4.0–5.7 MB，实测目录增速约 8 MB/分钟、日增量约 3.5 GB；代价对照（解码 p50 −2.4%、CPU 中位 +0.35 个百分点、内存中位 +16 MiB）见 [docs/channel-observation.md](docs/channel-observation.md) §4.2 / §4.3。默认关闭 |
 | 记录 / CSV 里有些列一直为空（`generation_id`、`pinned_provider`、`protocol`、`cost_usd` …） | 目录里仍有**旧版本（`v: 1`）写下的行**，CSV 也保留了这些 v1 列。usage 载荷里没有对应字段，所以 v2 不再写这些键；`v: 2` 的行这些列本来就是空的 |
 | 页面能开但一直空 | 页面里的管理密钥没填或填错（管理接口会返回 401/403）；或 `plan_accounts` 为空（凭据没被发现） |

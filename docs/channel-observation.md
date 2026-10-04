@@ -414,8 +414,13 @@ last_error_at, pending_files`
 - 实测 10 个文件 = **31.2 MB**，在约 2.5 分钟内产生；真实流量下目录 5 分钟长了约 **40 MB**（约 8 MB/分钟）。
 - 按今天的请求构成（**743** 条 input > 100k token）估算：日增量约 **3.5 GB/天**，突发时 **≥10 GB/天**。
   试运行期间生产把 `logs-max-total-size-mb` 设为 **2048**。
-- **目录上限与 `main.log` 共享**：CPA 的清理器按 `logs-max-total-size-mb`（默认 10 MB）清理 `*.log`，
-  所以上限不提的话，请求日志会在几秒内被删掉（这也是必须同时调这个键的原因）。
+- **目录上限与 `main.log` 共享**：CPA 的清理器按 `logs-max-total-size-mb` 清理 `*.log`。这个键的
+  **默认值是 0＝不清理**（`internal/config/config_load.go` 里 `cfg.LogsMaxTotalSizeMB = 0`，`config.example.yaml`
+  也写明 0 表示 disable——容易跟隔壁 `error-logs-max-files` 的 10 混起来）。上面「几秒内被删掉」发生在
+  试运行前这台主机把它设成 **10** 的时候：上限装不下一个请求的日志，文件就会在插件扫到之前被清理器删掉
+  （插件只读 mtime 早于 `channel_log_min_age_seconds`＝5 秒的文件）。插件自己 `channel_log_delete_after_read`
+  默认 true，fact 落盘即 unlink 源日志，所以常态下目录不会涨；留下的只有解析失败或落盘失败的文件，
+  因此仍然建议按 3.5 GB/天 的写入速率给一个够大的兜底上限（试运行用的 2048）。
 
 ### 4.3 打开请求日志的代价对照（V4，实测 2026-10-02）
 
@@ -537,7 +542,8 @@ last_error_at, pending_files`
   整树比对还要排掉本地新改、未同步的文件（如 `docs/`、`README.md`）。
 - **P2 的前置动作（CPA 侧，必须重启容器）**：在 `/opt/cpa/config.yaml` 里设
   `observability.logs.request-log: true`、`server.commercial-mode: false`，并把 `logs-max-total-size-mb`
-  提到试运行所需（本次 2048；默认 10 MB 会让日志几秒内被清理器删掉）。改完 **`docker restart cpa`**：
+  提到试运行所需（本次 2048；这台主机原来是 10，小到装不下一个请求的日志，会让文件在插件扫到之前
+  就被清理器删掉）。改完 **`docker restart cpa`**：
   实测 reload 成功但零文件，重启后一分钟内出现两个文件（§2.2）。插件侧再设 `channel_log_enabled: true`。
 - 验收口径（本轮实际做到的与未做到的对照见 §6）：面板能回答窗口内的请求数与偏离比例；抽查原始记录与宿主 usage
   数据库对照；CSV 含渠道字段；关掉观测（`channel_observe_enabled=false`）后请求转发照旧；磁盘/写入失败时转发照旧；
@@ -546,7 +552,8 @@ last_error_at, pending_files`
   `registered: true` 且 `/health` 的 `channel_observation.enabled` 为 false，页面显示「渠道观测未开启」。
   历史 JSONL 不需要动：reader 兼容 `v: 1` 与 `v: 2` 两种行。
   **P2 的回滚分两段**：插件侧 `channel_log_enabled: false`（scanner 停）；CPA 侧把
-  `request-log: false`、`logs-max-total-size-mb: 10`、`commercial-mode: true` 写回配置并**重启容器**。
+  `request-log: false`、`logs-max-total-size-mb: 10`（这台主机改动前的值；CPA 默认是 0＝不清理）、
+  `commercial-mode: true` 写回配置并**重启容器**。
   只做插件侧不会删掉已经写在盘上的请求日志，只要 CPA 侧还开着，日志就会继续落盘。
 
 ### 5.1 2026-10-02 第二轮部署的补充教训

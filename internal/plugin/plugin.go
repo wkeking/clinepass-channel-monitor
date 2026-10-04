@@ -30,6 +30,7 @@ import (
 	"github.com/wkeking/clinepass-channel-monitor/internal/channellog"
 	"github.com/wkeking/clinepass-channel-monitor/internal/config"
 	"github.com/wkeking/clinepass-channel-monitor/internal/hostapi"
+	"github.com/wkeking/clinepass-channel-monitor/internal/hostconf"
 	"github.com/wkeking/clinepass-channel-monitor/internal/management"
 	"github.com/wkeking/clinepass-channel-monitor/internal/observation"
 	"github.com/wkeking/clinepass-channel-monitor/internal/plan"
@@ -101,6 +102,11 @@ func LoadConfig(raw []byte) {
 		"channel_log":       strconv.FormatBool(cfg.ChannelLogEnabled),
 		"channel_log_dir":   cfg.ChannelLogDir,
 	})
+	// 装完最容易漏的是网关渠道那一套开关（插件侧的 channel_log_enabled 默认 false，CPA 侧
+	// 的请求日志也默认关）。加载时把还缺的项说一次，和页面顶部「配置自检」卡片同源。
+	if hint := hostconf.GatewayHint(cfg); hint != "" {
+		hostapi.LogAsync("info", buildinfo.ID+": "+hint, nil)
+	}
 }
 
 // observationRecorder is the running collector. It is stopped before a reconfigure starts a
@@ -275,8 +281,8 @@ func buildRegistration() registration {
 				{Name: "channel_store_dir", Type: pluginapi.ConfigFieldTypeString, Description: "渠道记录的存放目录（默认 /CLIProxyAPI/logs/channel-observation），按天一个 channel-<date>.jsonl。"},
 				{Name: "channel_retention_days", Type: pluginapi.ConfigFieldTypeNumber, Description: "渠道记录保留天数（默认 3，上限 30）。"},
 				{Name: "channel_max_size_mb", Type: pluginapi.ConfigFieldTypeNumber, Description: "渠道记录目录的总大小上限，单位 MB（默认 512，下限 16）；超出后从最旧的文件开始删。"},
-				{Name: "channel_baseline_provider", Type: pluginapi.ConfigFieldTypeString, Description: "基准渠道名（默认 deepseek）。finalProvider/resolvedProvider 不等于它的请求计入「未落在基准渠道」。"},
-				{Name: "channel_log_enabled", Type: pluginapi.ConfigFieldTypeBoolean, Description: "CPA 请求日志扫描开关（默认 false）。CPA 在 observability.logs.request-log 打开且 server.commercial-mode 关闭时，会把每个请求的完整调试日志写进 channel_log_dir，而上游 chat 响应原文里的 gateway.routing 渠道块只有这些日志能看到（CPA 翻译成 Responses 时丢掉了它）。开启后插件在旁路轮询该目录、解析 .log、把结论写入 channel_store_dir；关闭时不启协程、不访问目录。"},
+				{Name: "channel_baseline_provider", Type: pluginapi.ConfigFieldTypeString, Description: "基准渠道名（默认 deepseek）。finalProvider/resolvedProvider 不等于它的请求计入「未落在基准渠道」。取值以页面「真实渠道」表里出现的名字为准，不一致时偏离比例会失真——管理页顶部的「配置自检」会把窗口内实际出现的渠道名列出来。"},
+				{Name: "channel_log_enabled", Type: pluginapi.ConfigFieldTypeBoolean, Description: "CPA 请求日志扫描开关（默认 false）。CPA 在 observability.logs.request-log 打开且 server.commercial-mode 关闭时，会把每个请求的完整调试日志写进 channel_log_dir，而上游 chat 响应原文里的 gateway.routing 渠道块只有这些日志能看到（CPA 翻译成 Responses 时丢掉了它）。开启后插件在旁路轮询该目录、解析 .log、把结论写入 channel_store_dir；关闭时不启协程、不访问目录。打开前请先确认 CPA 侧 request-log 已开、commercial-mode 已关并**重启过容器**；管理页顶部的「配置自检」会按当前状态列出还缺哪一项。"},
 				{Name: "channel_log_dir", Type: pluginapi.ConfigFieldTypeString, Description: "CPA 请求日志目录（默认 /CLIProxyAPI/logs，容器内路径）。只扫描该目录顶层的 *.log，不递归子目录，且跳过 main.log。"},
 				{Name: "channel_log_delete_after_read", Type: pluginapi.ConfigFieldTypeBoolean, Description: "解析并落盘后删除日志文件（默认 true）。这些文件含明文 prompt，读完即 unlink，磁盘占用只与一个轮询窗口有关；解析失败的文件不删。"},
 				{Name: "channel_log_min_age_seconds", Type: pluginapi.ConfigFieldTypeNumber, Description: "只读取 mtime 早于该秒数（默认 5）的日志文件，避免读到 CPA 正在写的半个请求；读取前后都比对文件大小，变大的文件留到下一轮。"},

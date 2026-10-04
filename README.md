@@ -78,6 +78,12 @@ curl -s -X POST -H "Authorization: Bearer $CPA_MANAGEMENT_KEY" \
 
 > ⚠️ **商店安装会重写这个插件的配置块**（CPA v8.0.8 实测）：安装那一刻 `plugins.configs.clinepass-channel-monitor` 被写成只有 `enabled: true` 与 `store:`（安装元数据），你自己加的键全部丢失——包括 `channel_log_enabled: true`。它落回默认值 `false` 后请求日志旁路不再运行，「真实渠道」整列变空（安装之前的记录仍有渠道，因为 fact 是从落盘的 fact 文件 join 进来的）。每次从商店安装 / 更新后，请把 `channel_log_enabled: true`（以及你改过的其它键）加回配置块；配置块只剩 `enabled` + `store` 时就是这个情况。改完不用重启容器：配置文件被改动会直接触发一次 reload。
 
+### 装完先看页面顶部的「配置自检」
+
+插件在管理页最顶部放了一块**配置自检**：它只读 CPA 的 `config.yaml` 与插件自己的运行时状态，把「现在缺哪一项、缺了会少什么功能、补哪一行」逐条列出来。每项默认只占一行（状态 / 名称 / 配置键 / 缺什么），点开那一行才展开原因与修法——这样同时有三四项待处理时也不会把下面的表挤出首屏。每项都能单独忽略，忽略记录只存在浏览器里。没有任何问题、也没忽略过时这块**自动隐藏**——所以它出现，就代表确实还有待处理的项。常见几项：Cline 凭据、`channel_log_enabled`（网关渠道）、CPA 侧 `observability.logs.request-log` 与 `server.commercial-mode`、改完是否**重启过容器**、`channel_baseline_provider` 是否和真实渠道名一致、请求日志容量。
+
+检测面是只读的：插件不会替任何人改 CPA 的配置，也不会把凭据回显到页面或 `/health`（`host_config` 里只有布尔、数字和键名）。
+
 ## 配置
 
 配置写在 CPA 配置文件的 `plugins.configs.clinepass-channel-monitor` 下：
@@ -337,6 +343,8 @@ v0.1.x 的 `/stats`、`/events`、`/export` 三条路由已移除，请求它们
 | 字段 | 含义 |
 |---|---|
 | `plugin` / `version` / `enabled` / `uptime` | 插件标识、版本、配置里的启用开关与本次加载后的运行时长 |
+| `uptime_seconds` | 同一段运行时长的秒数（页面「配置自检」用它区分「改了配置但没重启容器」） |
+| `host_config` | 插件对 CPA 自己 `config.yaml` 的**只读**快照，供页面「配置自检」使用：`path`、`readable`、`error`、`plugins_enabled`、`plugins_dir`、`request_log`、`logs_max_total_size_mb`、`commercial_mode`、`plugin_block_keys`（`plugins.configs.clinepass-channel-monitor` 这个块的键名，按文件里的顺序）、`store_version` / `store_source`。**只有布尔、数字和键名，没有任何凭据值**；键缺失时那个字段直接不出现，而不是拿 `false` 冒充「读到了 false」 |
 | `plan` | 完整套餐快照，页面直接渲染它：`available`、`source`、`account`、`plan_name`、`plan_price`、`plan_description`、`plan_interval` / `plan_type` / `plan_active`、`plan_benefits[]`、`plan_period_start` / `plan_period_end` / `plan_canceled_at`、`limits[]`（`percent_used` / `resets_at` / `resets_in`）、`tokens`（31 天输入/输出/总量、成本、余额、计费条目数）、`usage`、`fetched_at`、`error`、`accounts[]`；`accounts[].windows[1h\|24h\|7d]`（**仅 `plan_usage_enabled: true` 时存在**）里另有 `models[]`（按模型拆分：`model` / `requests` / `input_tokens` / `output_tokens` / `cached_tokens` / `cache_ratio` / `cost_usd` / `credits_used`）、`stream_requests`、`byok_requests`、`credits_used` |
 | `plan_enabled` | 官方套餐轮询是否开启 |
 | `plan_usage` | 官方逐条用量的采集状态：`enabled`（默认 `false`）、`items`、`oldest`、`fetched_at`、`truncated`、`failures`、`retry_at`、`error` |
@@ -368,7 +376,8 @@ v0.1.x 的 `/stats`、`/events`、`/export` 三条路由已移除，请求它们
 | 「渠道」区显示「渠道观测未开启」 | 采集器在配置里被关掉了（`channel_observe_enabled: false`），插件因此不声明 usage 钩子。这是开关状态，不是故障；要数据就把它设回 `true` 并热重载插件（注意：改这个键必须真的改变值才触发重载） |
 | 「渠道」区一条记录都没有 / 比例的分母是 0 | 新口径下每条**完成的请求**都会记一条，所以先看 `/health` 的 `channel_observation.events`：① `events` 在涨而 `written` 不涨 → 写盘失败，看 `write_failures` / `last_error`；② `events` 完全不动 → 宿主没在调用插件，查 `plugins` 列表里本插件的 `registered` / `effective_enabled`，或观测被关掉了；③ `events` 在涨但当前窗口是空的 → 核对窗口起点，以及记录目录 `channel_store_dir` 是否被换过 |
 | 目录不可写 / 记录数不涨 | 看 `/health` 的 `channel_observation.last_error` 与 `write_failures`：目录权限、挂载或磁盘满都会记在这里。这时插件照常回包、照常在内存里聚合，只是不落盘；修好目录后（或换 `channel_store_dir`）新记录会继续写，但内存聚合在插件重启后会丢失 |
-| 窗口内**所有**请求都算偏离（页面偏离比例接近 100%） | 基准名与渠道名对不上：`channel_baseline_provider` 默认 `deepseek`，而 CPA 侧的渠道名是 `openai-compatible-cline1/2/3`，不区分大小写也不可能相等（验收时 1 小时窗口 6 条记录全部 `off_baseline=yes`）。这是配置语义问题、不是采集故障；基准该怎么定（改基准名、还是按 `upstream_model` 重新定义「官渠」）**尚未决定** |
+| 不知道还差哪几项配置 / 更新后某个功能变少了 | 先看管理页最顶部的**「配置自检」**：它按当前状态列出缺哪一项、会少什么功能、补哪一行（数据来自 `/health` 的 `host_config`、`channel_log` 与 `channel_observation`）。这一块没有问题时自动隐藏，出现即代表还有待处理项；每项都能单独忽略 |
+| 窗口内**所有**请求都算偏离（偏离比例接近 100%） | 基准名与真实渠道名对不上：`channel_baseline_provider` 默认 `deepseek`，而真实渠道名是 CPA 请求日志里上游响应的 `finalProvider`（实测出现过 `deepseek` / `fireworks` / `openai-compatible-private` 等）。这是配置语义问题、不是采集故障；页面顶部的「配置自检」会列出窗口内实际出现的渠道名，照它改 `channel_baseline_provider` 即可 |
 | 记录里 `tokens_per_second` 为 0 | 解码窗口短于 50 ms 时不记速度（宿主对短回答批量投递，量出来的是投递不是生成）；这类记录不进解码速度百分位。`ttft_ms` 为 0 表示宿主这次没有报首 token 时间（例如非流式请求或请求失败） |
 | 想核对官方按模型的明细 | 页面上的「官方用量明细」表、渠道区「上游推理渠道（官方 usage）」表与「概览」整节已按需求移除，`plan_usage_enabled` 也因此**默认 `false`**，逐条用量默认不再拉取。要临时核对：把 `plan_usage_enabled` 设回 `true` 并重载，再看 `GET /health` 的 `plan.windows[1h\|24h\|7d].models`（逐条口径，含请求数 / 缓存 / 成本）与 `plan.official_channels`。它按采集器**保留窗口**统计，官方接口限流（`plan.usage.failures` / `plan.usage.error`，实测 `upstream status 429`）时会不足；更长的历史区间要等采集器补齐或改用官方逐日汇总 |
 | 官方表的覆盖范围比窗口短 | 仅在 `plan_usage_enabled: true` 时相关。表按采集器**保留窗口**（26 小时）统计，且官方接口有限流：实测 `items=800`、`oldest=04:59Z` 时 `truncated=true`。这是上游限额，不是插件故障；历史更长的区间要等采集器补齐或改用官方逐日汇总 |

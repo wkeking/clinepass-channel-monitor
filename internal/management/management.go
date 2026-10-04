@@ -17,6 +17,7 @@ import (
 	"github.com/wkeking/clinepass-channel-monitor/internal/abi"
 	"github.com/wkeking/clinepass-channel-monitor/internal/buildinfo"
 	"github.com/wkeking/clinepass-channel-monitor/internal/hostapi"
+	"github.com/wkeking/clinepass-channel-monitor/internal/hostconf"
 	"github.com/wkeking/clinepass-channel-monitor/internal/observation"
 	"github.com/wkeking/clinepass-channel-monitor/internal/plan"
 	"github.com/wkeking/clinepass-channel-monitor/internal/state"
@@ -113,6 +114,11 @@ type healthResponse struct {
 	Version string `json:"version"`
 	Enabled bool   `json:"enabled"`
 	Uptime  string `json:"uptime"`
+	// UptimeSeconds is the same uptime as a number, for the configuration self-check card.
+	UptimeSeconds int64 `json:"uptime_seconds"`
+	// HostConfig is the read-only self-check of CPA's own configuration. It carries only
+	// booleans, a number, a directory name and key names, never a credential value.
+	HostConfig hostconf.Snapshot `json:"host_config"`
 	// Plan is the full subscription snapshot: which plan the account is on, how much of
 	// each rolling quota is used, the official totals and the per-credential view.
 	Plan        plan.Quota `json:"plan"`
@@ -175,6 +181,8 @@ func buildHealthResponse() healthResponse {
 		Version:            buildinfo.Version,
 		Enabled:            cfg.Enabled,
 		Uptime:             time.Since(pluginStart).Round(time.Second).String(),
+		UptimeSeconds:      int64(time.Since(pluginStart).Seconds()),
+		HostConfig:         hostconf.Read(cfg),
 		PlanEnabled:        cfg.PlanEnabled,
 		RequestHeaderNames: headerNames,
 		RequestBearerLen:   bearerLen,

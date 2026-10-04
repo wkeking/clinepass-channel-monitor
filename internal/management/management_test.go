@@ -263,6 +263,58 @@ func TestChannelTimelineAndRecordPaging(t *testing.T) {
 	}
 }
 
+// TestConfigCheckRendersAboveThePlan pins the 配置自检 block: it is the first thing on the page, it
+// covers every switch a deployment has to set by hand, and it only ever reads the payloads it is
+// given (a check that wrote back would fight the 60s refresh).
+func TestConfigCheckRendersAboveThePlan(t *testing.T) {
+	page := string(indexHTML(nil))
+	check := strings.Index(page, `id="config-check-section"`)
+	plan := strings.Index(page, `id="plan-section"`)
+	if check < 0 || plan < 0 {
+		t.Fatalf("page is missing the config-check section (%d) or the plan section (%d)", check, plan)
+	}
+	if check > plan {
+		t.Error("the config check must render above the plan section")
+	}
+	for _, needle := range []string{
+		`id="config-check"`, `id="config-check-tip"`, "function configCheckItems(",
+		"function renderConfigCheck(", "cpm-config-check-dismissed", "config-check-restore",
+		`data-check-ignore="`,
+	} {
+		if !strings.Contains(page, needle) {
+			t.Errorf("page is missing %q", needle)
+		}
+	}
+	body := jsFunctionBody(t, page, "configCheckItems")
+	for _, key := range []string{
+		`"credentials"`, `"observe"`, `"channel-log"`, `"host-config"`, `"request-log"`,
+		`"commercial-mode"`, `"restart"`, `"log-capacity"`, `"baseline"`, `"store-dir"`,
+	} {
+		if !strings.Contains(body, key) {
+			t.Errorf("configCheckItems must cover the %s check, got:\n%s", key, body)
+		}
+	}
+	for _, forbidden := range []string{"health.plan=", "health.host_config=", "channel.summary="} {
+		if strings.Contains(body, forbidden) {
+			t.Errorf("configCheckItems must not write back to its inputs: %s", forbidden)
+		}
+	}
+	// 忽略记录只存在这台浏览器里：设置与恢复都走 localStorage，不经过服务端。
+	if !strings.Contains(page, "store.set(CHECK_DISMISS_KEY") || !strings.Contains(page, "store.del(CHECK_DISMISS_KEY)") {
+		t.Error("dismissing a check item must stay in localStorage")
+	}
+	// 每项默认折叠成一行，点开才看原因与修法：三四个异常同时出现时首屏仍留得住板块。
+	render := jsFunctionBody(t, page, "renderConfigCheck")
+	for _, needle := range []string{"<details", "<summary>", `class="short"`, `class="explain"`} {
+		if !strings.Contains(render, needle) {
+			t.Errorf("renderConfigCheck must fold each row into one summary line, missing %q", needle)
+		}
+	}
+	if body := jsFunctionBody(t, page, "configCheckItems"); !strings.Contains(body, "field:field") || !strings.Contains(body, "short:short") {
+		t.Error("configCheckItems must carry the config key and the one-line summary for the folded row")
+	}
+}
+
 // TestChannelOverviewIsLocal pins what replaced the official 概览 section: the page reads no
 // per-request usage window at all, and the channel section's three cards are the summary. The
 // cache hit rate is built from the plugin's own records (summary.cached_tokens /

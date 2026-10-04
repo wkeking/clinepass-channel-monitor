@@ -28,6 +28,9 @@ func startLivePoller(t *testing.T) *plan.Poller {
 	cfg := config.Default()
 	cfg.PlanAPIKey = syntheticPlanKey
 	cfg.PlanBaseURL = server.URL
+	// The per-request pull is off by default now; this test exercises the collector, so it
+	// turns the switch back on explicitly instead of relying on the default.
+	cfg.PlanUsageEnabled = true
 	// Point credential discovery at an empty directory so the test never reads the host's
 	// own CPA configuration.
 	cfg.PlanConfigPath = filepath.Join(t.TempDir(), "missing.yaml")

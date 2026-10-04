@@ -61,6 +61,24 @@ input::placeholder{color:var(--muted)}
 /* 原始记录的翻页脚注：按钮可以点，滑到可见时也会自动取下一页（见 loadMoreRecords） */
 .records-more{display:flex;flex-wrap:wrap;align-items:center;gap:12px;margin:12px 0 2px}
 .records-more button{padding:6px 14px;font-size:12.5px}
+/* 时间线走势图：等宽 viewBox + width:100%，靠 CSS 变量取色，浅色/深色都跟着主题走 */
+.chart{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px 16px 10px}
+.chart svg{display:block;width:100%;height:auto}
+.chart .grid{stroke:var(--line);stroke-width:1}
+.chart .axis{fill:var(--muted);font-size:11px}
+.chart polyline{fill:none;stroke-width:2;stroke-linejoin:round;stroke-linecap:round}
+.chart .s-requests{stroke:var(--accent)}
+.chart .s-off{stroke:var(--err)}
+.chart .s-failed{stroke:var(--warn)}
+.chart .legend-row{display:flex;flex-wrap:wrap;gap:14px;align-items:center;margin-bottom:4px;color:var(--muted);font-size:12px}
+.chart .legend{display:inline-flex;align-items:center;gap:6px}
+.chart .legend i{width:12px;height:3px;border-radius:2px;display:inline-block}
+.chart .sw-requests{background:var(--accent)}
+.chart .sw-off{background:var(--err)}
+.chart .sw-failed{background:var(--warn)}
+.chart .dot-requests{fill:var(--accent)}
+.chart .dot-off{fill:var(--err)}
+.chart .dot-failed{fill:var(--warn)}
 .wrap{overflow-x:auto;border:1px solid var(--line);border-radius:14px;background:var(--card)}
 table{width:100%;border-collapse:separate;border-spacing:0}
 th,td{padding:10px 13px;text-align:left;white-space:nowrap;vertical-align:middle}
@@ -109,12 +127,6 @@ td.num,th.num{text-align:right}
     <div class="msg hidden" id="plan-msg"></div>
   </section>
 
-  <section>
-    <h2>概览<span class="info" id="overview-info" tabindex="0" aria-describedby="overview-info-tip" aria-label="概览口径说明">!<span class="tip" id="overview-info-tip" role="tooltip"></span></span></h2>
-    <div class="sub hidden" id="overview-warn" style="margin:-4px 0 12px"></div>
-    <div class="cards" id="cards"></div>
-  </section>
-
   <section id="channel-section">
     <h2 style="display:flex;align-items:center;gap:10px">渠道<span class="info" id="channel-info" tabindex="0" aria-describedby="channel-info-tip" aria-label="渠道口径说明">!<span class="tip" id="channel-info-tip" role="tooltip"></span></span><button id="channel-csv" style="margin-left:auto;padding:4px 10px;font-size:12px;font-weight:600;letter-spacing:0;text-transform:none">导出 CSV</button></h2>
     <div class="msg hidden" id="channel-off"></div>
@@ -128,7 +140,7 @@ td.num,th.num{text-align:right}
         <tr><th>真实渠道</th><th class="num">请求</th><th class="num">占比</th><th class="num">偏离</th><th class="num">失败</th><th class="num">TTFT p50</th><th class="num">TTFT p90</th><th class="num">解码 p50</th><th class="num">输入</th><th class="num">输出</th><th class="num">缓存</th></tr>
       </thead><tbody></tbody></table></div>
       <div class="sub" id="channel-timeline-note" style="margin:18px 0 8px;font-weight:600">时间线（每小时 · 最近 10 小时）</div>
-      <div class="cards" id="channel-timeline"></div>
+      <div class="chart" id="channel-hour-chart"></div>
       <div class="wrap" style="margin-top:14px"><table id="channel-hours"><thead>
         <tr><th>时间（新 → 旧）</th><th class="num">请求</th><th class="num">偏离</th><th class="num">失败</th><th class="num">TTFT p50</th><th class="num">解码 p50</th></tr>
       </thead><tbody></tbody></table></div>
@@ -170,7 +182,6 @@ function scaled(v){
 }
 function fmtTime(ts){if(!ts)return "-";const d=new Date(ts);if(isNaN(d))return ts;const p=x=>String(x).padStart(2,"0");return d.getFullYear()+"-"+p(d.getMonth()+1)+"-"+p(d.getDate())+" "+p(d.getHours())+":"+p(d.getMinutes())+":"+p(d.getSeconds())}
 // 官方区间有时是空的（还没取到汇总），此时不要渲染出一个空的 "~"。
-function dateRange(from,to){if(!from&&!to)return "";return "（"+(from||"")+" ~ "+(to||"")+"）"}
 // 只到天：订阅周期用得上，不需要时分秒
 function fmtDate(ts){if(!ts)return "";const d=new Date(ts);if(isNaN(d))return String(ts).slice(0,10);const p=x=>String(x).padStart(2,"0");return d.getFullYear()+"-"+p(d.getMonth()+1)+"-"+p(d.getDate())}
 
@@ -325,99 +336,6 @@ function renderPlan(plan){
 
 function windowLabel(w){return w==="1h"?"近 1 小时":w==="7d"?"近 7 天":"近 24 小时"}
 
-// officialView returns the selected account's official aggregate for the chosen window.
-// Every number on the overview comes from Cline's own API: the local per-request records
-// this plugin used to keep are gone, so there is no local fallback left.
-function officialView(plan){
-  const account=selectedPlanAccount(plan)||{};
-  const win=$("window").value||"24h";
-  return {win:win,account:account,usage:account.usage||{},off:(account.windows||{})[win]||null};
-}
-
-// 概览口径说明挂在「概览」标题旁的感叹号上（悬停显示）；真正需要留意的告警仍然
-// 显示在标题下方，不能藏进 tooltip。
-function renderOverviewNote(view){
-  const icon=$("overview-info"), tip=$("overview-info-tip"), warn=$("overview-warn");
-  if(!icon||!tip||!warn)return;
-  const off=view.off, notes=[], warns=[];
-  const acctTokens=(view.account&&view.account.tokens)||{};
-  const cumRange=acctTokens.total_tokens?dateRange(acctTokens.from_date,acctTokens.to_date):"";
-  if(off&&off.detail!==false){
-    notes.push("「请求数 / 缓存命中率」为官方口径：Cline 账号（含 Cline IDE 等其他客户端）在"+windowLabel(view.win)+"内的计费记录。");
-    notes.push("「总 Token 数」为官方累计"+cumRange+"，与上方套餐区同口径，不是该时间窗的量。");
-    if(off.covered===false){
-      warns.push("官方逐条记录覆盖自 "+fmtTime(view.usage.oldest||"")+"，该窗口更早的部分未统计，官方数值偏低。");
-    }
-    if(view.usage.error)warns.push("官方用量刷新失败："+view.usage.error);
-  }else if(off){
-    notes.push("「总 Token 数」为官方累计"+(cumRange||("（"+(off.from||"")+" ~ "+(off.to||"")+"）"))+"。");
-    notes.push("「请求数 / 缓存命中率」不适用：「"+windowLabel(view.win)+"」窗口来自官方逐日汇总，官方没有这个窗口的逐条明细。");
-    if(off.covered===false)warns.push("官方汇总的覆盖范围待确认，数值可能偏低。");
-  }else{
-    notes.push("「"+windowLabel(view.win)+"」暂无官方数据。");
-    // plan.source 有值才算轮询跑过一轮：刚重载时快照还是空的，那种情况是"还没取到"，
-    // 不是"没启用"。
-    const polled=!!(planSnapshot&&planSnapshot.source);
-    if(view.usage.error)warns.push("官方用量不可用："+view.usage.error);
-    else if(!polled)warns.push("官方用量尚未取到。");
-    else if(view.usage.enabled!==true)warns.push("官方用量未启用。");
-  }
-  tip.textContent=notes.join("\n");
-  warn.innerHTML=warns.map(text=>'<span class="plan-warn">'+esc(text)+"</span>").join(" ");
-  warn.classList.toggle("hidden",warns.length===0);
-}
-
-// 概览的三张官方口径卡片（请求数 / 总 Token 数 / 缓存命中率）。它与套餐卡分开渲染：
-// 套餐或限额调用失败的凭据仍可能有官方用量，而失败的账号不能把上一个账号的数字留在屏幕上。
-function renderCards(plan){
-  const view=officialView(plan), off=view.off;
-  const tok=view.account.tokens||{};
-  // 逐条用量的刷新时间来自采集器本身（默认 10 分钟一轮），不是套餐轮询的时间戳：
-  // 后者每 5 分钟就前进一次，用它会让卡片显示"刚更新过"而数据其实没动。
-  const fetched=view.usage&&view.usage.fetched_at?fmtTime(view.usage.fetched_at).slice(11,19):"—";
-  // detail=false 的窗口（近 7 天，官方按自然日汇总）只有 token 与成本
-  const offDetail=!!(off&&off.detail!==false);
-  const series=(off&&off.series)||{};
-  // 两种"没有数"要分开说：这个窗口官方本来就没有逐条明细（7 天），和这个账号当前没有
-  // 任何官方数据（凭据不可用 / 采集还没覆盖），含义完全不同。
-  const noWindow="该账号在这个窗口还没有官方数据（凭据不可用，或官方采集尚未覆盖）";
-  const dailyOnly="官方没有该窗口的逐条明细（近 7 天窗口来自官方逐日汇总，只有 token 与成本）";
-  const acctRange="官方累计"+dateRange(tok.from_date,tok.to_date);
-  const acctSeries=tok.series&&tok.series.length?tok.series:(series.tokens||null);
-  // 凭据不可用时官方汇总根本没取到，这不是"用量为 0"：显示 0 会把"未知"说成"没有用量"。
-  const accountAvailable=view.account.available!==false;
-  const cards=[
-    offDetail
-      ? card({label:"请求数",icon:"⇄",tint:"#60a5fa",tip:"官方口径：Cline 账号在该时间窗内的计费请求数（含其他客户端）。",
-          value:int(off.requests),unit:"条",
-          sub:["官方逐条用量 · 更新于 "+fetched,"窗口 "+(off.from?fmtTime(off.from).slice(5,16):"—")+" ~ "+(off.to?fmtTime(off.to).slice(5,16):"—")],
-          spark:series.requests})
-      : card({label:"请求数",icon:"⇄",tint:"#60a5fa",tip:off?dailyOnly:noWindow,value:"—",unit:"条",sub:[off?dailyOnly:noWindow]}),
-    !accountAvailable
-      ? card({label:"总 Token 数",icon:"Σ",tint:"#38bdf8",tip:noWindow,value:"—",unit:"token",sub:[noWindow]})
-      : off
-      ? card({label:"总 Token 数",icon:"Σ",tint:"#38bdf8",tip:"官方口径：主值为账号累计 token（近 31 天逐日汇总），副行为本窗口官方输入/输出。",
-          value:scaled(tok.total_tokens||off.total_tokens),unit:"token",
-          sub:[
-            acctRange,
-            "本窗口 输入 "+scaled(off.input_tokens)+" / 输出 "+scaled(off.output_tokens)+(off.cost_usd?" · $"+fixed(off.cost_usd,4):"")
-          ],
-          spark:acctSeries})
-      : card({label:"总 Token 数",icon:"Σ",tint:"#38bdf8",tip:"官方口径：账号累计 token（近 31 天逐日汇总）",
-          value:scaled(tok.total_tokens),unit:"token",
-          sub:[acctRange,"输入 "+scaled(tok.input_tokens)+" / 输出 "+scaled(tok.output_tokens)],
-          spark:acctSeries}),
-    offDetail
-      ? card({label:"缓存命中率",icon:"%",tint:"#34d399",tip:"官方口径：cachedTokens / promptTokens（本窗口）。",
-          value:fixed(n(off.cache_ratio)*100,2),unit:"%",
-          sub:["官方 cached "+scaled(off.cached_tokens)+" / prompt "+scaled(off.input_tokens)],
-          spark:series.cached})
-      : card({label:"缓存命中率",icon:"%",tint:"#34d399",tip:off?dailyOnly:noWindow,value:"—",unit:"%",sub:[off?dailyOnly:noWindow]})
-  ];
-  $("cards").innerHTML=cards.join("");
-  renderOverviewNote(view);
-}
-
 // --- 渠道观测（GET /channel）--------------------------------------------------
 // 这一块只回答一个问题：窗口内的 clinepass 请求里有多少比例没落在基准渠道。先给结论
 // （headline + 卡片），再拆到渠道、模型、小时与原始记录；原始记录是给上面每个数字做
@@ -523,34 +441,53 @@ function newestChannelHours(summary){
   return hours.length>timelineHourLimit?hours.slice(hours.length-timelineHourLimit):hours.slice();
 }
 
-function renderChannelTimeline(summary,baseline){
-  const box=$("channel-timeline");
+// 时间线原来用两张 sparkline 卡片；现在换成一张三条线的走势图（请求 / 偏离 / 失败）。
+// 精确值仍然看下方的小时表：图给趋势，表给数字，两边读同一份 newestChannelHours()，
+// 所以不会出现图上有点、表里少一行的情况。
+function renderChannelHourChart(summary){
+  const box=$("channel-hour-chart");
+  if(!box)return;
   const hours=newestChannelHours(summary);
   if(!hours.length){
     box.innerHTML='<div class="msg">该窗口没有小时数据。</div>';
     return;
   }
-  const requests=hours.map(function(point){return n(point.requests)});
-  const offs=hours.map(function(point){return n(point.off_baseline)});
-  let peakRatio=0,peakHour="";
-  hours.forEach(function(point){
-    const ratio=n(point.requests)>0?n(point.off_baseline)/n(point.requests):0;
-    if(ratio>peakRatio){peakRatio=ratio;peakHour=fmtHour(point.hour)}
-  });
-  let total=0,offTotal=0;
-  hours.forEach(function(point){total+=n(point.requests);offTotal+=n(point.off_baseline)});
-  box.innerHTML=[
-    card({label:"每小时请求",icon:"⇄",tint:"#60a5fa",
-      tip:"按小时拆开的请求数，只画最近 "+timelineHourLimit+" 个小时；某个小时为 0 就是当时没有请求，不做插值。",
-      value:int(total),unit:"条",
-      sub:["最近 "+hours.length+" 个小时点","偏离合计 "+int(offTotal)+" 条"],
-      spark:requests}),
-    card({label:"每小时偏离基准渠道",icon:"!",tint:"#f87171",
-      tip:"按小时拆开的偏离请求数；峰值小时是比例最高的那一个。",
-      value:int(offTotal),unit:"条",
-      sub:[peakHour?("峰值 "+pctText(peakRatio)+"（"+peakHour+"）"):"窗口内没有偏离请求"],
-      spark:offs})
-  ].join("");
+  const series=[
+    {name:"requests",label:"请求",values:hours.map(function(point){return n(point.requests)})},
+    {name:"off",label:"偏离",values:hours.map(function(point){return n(point.off_baseline)})},
+    {name:"failed",label:"失败",values:hours.map(function(point){return n(point.failed)})}
+  ];
+  // 固定 viewBox + width:100%，横纵都不拉伸：图随卡片宽度等比缩放，坐标文字不会变形。
+  const width=1000,height=240,left=54,right=18,top=18,bottom=42;
+  const plotWidth=width-left-right,plotHeight=height-top-bottom;
+  let max=1;
+  series.forEach(function(line){line.values.forEach(function(value){if(value>max)max=value})});
+  const xAt=function(index){return hours.length<=1?left+plotWidth/2:left+index*plotWidth/(hours.length-1)};
+  const yAt=function(value){return top+(1-value/max)*plotHeight};
+  const grid=[0,0.5,1].map(function(ratio){
+    const y=yAt(max*ratio);
+    return '<line class="grid" x1="'+left+'" y1="'+fixed(y,1)+'" x2="'+(width-right)+'" y2="'+fixed(y,1)+'"></line>'+
+      '<text class="axis" x="'+(left-10)+'" y="'+fixed(y,1)+'" text-anchor="end" dominant-baseline="middle">'+int(max*ratio)+"</text>";
+  }).join("");
+  const hourTicks=hours.map(function(point,index){
+    // 10 个点全标会挤在一起，隔一个标一个；表格里每个小时都有。
+    if(hours.length>6&&index%2!==0)return "";
+    return '<text class="axis" x="'+fixed(xAt(index),1)+'" y="'+(height-bottom+22)+'" text-anchor="middle">'+esc(fmtHour(point.hour).slice(6))+"</text>";
+  }).join("");
+  const lines=series.map(function(line){
+    const points=line.values.map(function(value,index){return fixed(xAt(index),1)+","+fixed(yAt(value),1)}).join(" ");
+    const dots=line.values.map(function(value,index){
+      return '<circle class="dot-'+line.name+'" cx="'+fixed(xAt(index),1)+'" cy="'+fixed(yAt(value),1)+'" r="2.8">'+
+        "<title>"+esc(fmtHour(hours[index].hour)+" · "+line.label+" "+int(value))+"</title></circle>";
+    }).join("");
+    return '<polyline class="s-'+line.name+'" points="'+points+'"></polyline>'+dots;
+  }).join("");
+  const legend=series.map(function(line){
+    return '<span class="legend"><i class="sw-'+line.name+'"></i>'+esc(line.label)+"</span>";
+  }).join("");
+  box.innerHTML='<div class="legend-row">'+legend+'<span style="margin-left:auto">最近 '+int(hours.length)+" 个小时</span></div>"+
+    '<svg viewBox="0 0 '+width+" "+height+'" role="img" aria-label="'+esc("最近 "+hours.length+" 小时的请求、偏离与失败走势")+'">'+
+    grid+hourTicks+lines+"</svg>";
 }
 
 function renderChannelHours(summary){
@@ -763,35 +700,30 @@ function renderChannel(view){
 
   const hourRequests=hourList.map(function(point){return n(point.requests)});
   const hourOffs=hourList.map(function(point){return n(point.off_baseline)});
-  const hourTPS=hourList.map(function(point){return n(point.decode_p50_tps)});
+  // 缓存命中率是本地口径：只用插件自己记录下来的请求算，窗口内缓存读 / 输入。官方逐条
+  // 用量不再拉取，所以它不依赖 Cline 的接口，也不受官方限流与覆盖范围影响。
+  const inputTokens=n(summary.input_tokens),cachedTokens=n(summary.cached_tokens);
+  const cacheRatio=inputTokens>0?cachedTokens/inputTokens:0;
   $("channel-cards").innerHTML=[
-    card({label:"偏离基准渠道",icon:"!",tint:"#f87171",
-      tip:"网关渠道不是「"+baseline+"」的请求数与占比；分母是能判定渠道（日志里有路由块且 Session_id 对得上）的请求数。",
-      value:int(offCount),unit:"条",
-      sub:["占比 "+(resolved>0?pctText(summary.off_baseline_ratio):"—")+"（分母 "+int(resolved)+" 条）","基准渠道 "+baseline],
-      spark:hourOffs}),
     card({label:"请求数",icon:"⇄",tint:"#60a5fa",
       tip:"窗口内 CPA 服务过的请求数（一条 usage 记录算一条）。渠道来自 CPA 自己的请求日志，只有它能给出网关级的 finalProvider。",
       value:int(resolved+unresolved),unit:"条",
       sub:[(unresolved?("无渠道块 "+int(unresolved)+" 条"):"全部请求都有渠道块"),
            (n(summary.failed_requests)?("失败 "+int(summary.failed_requests)+" 条"):"窗口内无失败记录")],
       spark:hourRequests}),
-    card({label:"TTFT 首字延时",icon:"⏱",tint:"#a78bfa",
-      tip:"CPA 记录的请求到首个 token 的时间（p50，单位毫秒）。",
-      value:msText(summary.ttft_p50_ms),unit:"",
-      sub:["p90 "+msText(summary.ttft_p90_ms)]}),
-    card({label:"解码速度",icon:"⚡",tint:"#34d399",
-      tip:"输出 token / 解码耗时（总延时减去 TTFT）的中位数。",
-      value:tpsText(summary.decode_p50_tps),unit:"t/s",
-      sub:["p50 中位数"],spark:hourTPS}),
-    card({label:"Tokens",icon:"Σ",tint:"#38bdf8",
-      tip:"窗口内全部请求的 token 汇总。",
-      value:scaled(n(summary.input_tokens)+n(summary.output_tokens)),unit:"token",
-      sub:["输入 "+scaled(summary.input_tokens),"输出 "+scaled(summary.output_tokens),"缓存命中 "+scaled(summary.cached_tokens)]})
+    card({label:"偏离基准渠道",icon:"!",tint:"#f87171",
+      tip:"网关渠道不是「"+baseline+"」的请求数与占比；分母是能判定渠道（日志里有路由块且 Session_id 对得上）的请求数。",
+      value:int(offCount),unit:"条",
+      sub:["占比 "+(resolved>0?pctText(summary.off_baseline_ratio):"—")+"（分母 "+int(resolved)+" 条）","基准渠道 "+baseline],
+      spark:hourOffs}),
+    card({label:"缓存命中率",icon:"%",tint:"#34d399",
+      tip:"本地口径：窗口内缓存读 tokens / 输入 tokens，只用插件记录下来的请求算，不依赖 Cline 官方接口，因此是「最近的本地数据」。",
+      value:inputTokens>0?fixed(cacheRatio*100,2):"—",unit:"%",
+      sub:["缓存读 "+scaled(cachedTokens)+" / 输入 "+scaled(inputTokens)]})
   ].join("");
 
   renderChannelProviders(summary,baseline);
-  renderChannelTimeline(summary,baseline);
+  renderChannelHourChart(summary);
   renderChannelHours(summary);
   renderChannelRecords(data,baseline);
 
@@ -893,10 +825,6 @@ async function load(){
     if(health.plan_usage&&health.plan_usage.enabled)bits.push("官方逐条用量已启用");
     $("statusline").innerHTML=bits.join(" · ");
     renderPlan(health.plan);
-    // The overview is rendered independently: a credential whose plan/limits call failed
-    // can still have usable official usage, and a failed account must never leave the
-    // previous account's numbers on screen.
-    renderCards(health.plan);
     $("gate").classList.add("hidden");
   }catch(err){
     if(err.code===401||err.code===403){
@@ -912,10 +840,10 @@ $("save").addEventListener("click",()=>{const v=$("token").value.trim();if(!v)re
 $("token").addEventListener("keydown",e=>{if(e.key==="Enter")$("save").click()});
 $("forget").addEventListener("click",()=>{store.del(TOKEN_KEY);$("token").value="";$("gate").classList.remove("hidden");$("statusline").textContent="已清除本机保存的密钥"});
 $("refresh").addEventListener("click",()=>load());
-$("window").addEventListener("change",()=>{resetRecordsState();renderCards(planSnapshot||{});loadChannel()});
+$("window").addEventListener("change",()=>{resetRecordsState();loadChannel()});
 $("channel-csv").addEventListener("click",()=>downloadChannelCSV());
 $("channel-records-load").addEventListener("click",()=>loadMoreRecords());
-$("plan-account").addEventListener("change",()=>{store.set(PLAN_ACCOUNT_KEY,$("plan-account").value);renderPlan(planSnapshot||{});renderCards(planSnapshot||{})});
+$("plan-account").addEventListener("change",()=>{store.set(PLAN_ACCOUNT_KEY,$("plan-account").value);renderPlan(planSnapshot||{})});
 
 if(!store.get(TOKEN_KEY))$("gate").classList.remove("hidden");
 load();

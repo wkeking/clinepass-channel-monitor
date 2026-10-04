@@ -26,7 +26,7 @@ v0.3.0 重新打开的口子不是那个逐帧钩子，而是 CPA 的 **usage �
 ## 能力一览
 
 - 管理页展示：套餐名与月费、套餐说明与权益清单、订阅周期与取消状态、5 小时 / 每周 / 每月限额进度与重置时间、近 31 天官方 Token 总量（输入/输出）、参考成本、余额、官方计费条目数；
-- 概览卡片（官方口径）：近 1 小时 / 近 24 小时的官方计费请求数、总 Token 数、缓存命中率，以及近 7 天的官方逐日汇总（只有 token 与成本）；官方记录覆盖不到窗口起点时页面会标注「官方数值偏低」；
+- 渠道区三张卡片（**本机口径**）：近 1 小时 / 近 24 小时 / 近 7 天窗口内的请求数、偏离基准渠道的请求数、缓存命中率（缓存读 token / 输入 token，来自插件自己的逐请求记录），下方是「真实渠道」表、最近 10 小时的请求 / 偏离 / 失败折线图与小时表、可翻页的原始记录表；
 - 官方用量明细（**页面已移除，数据仍在接口里**）：`/health` 的 `plan.windows[1h\|24h\|7d].models` 仍按模型拆开当前窗口（请求数、输入/输出 token、缓存命中率、参考成本、扣减 credits），并给出流式 / BYOK 条数；这份拆分来自已经拉到的记录，不产生额外上游调用；
 - 多凭据分别轮询：一个 CPA 里配置多个 Cline 条目或多把 key 时，每把 key 一个账号卡，页面顶部出现账号下拉（≥2 个凭据时）；
 - 凭据自动发现：读 CPA 自己的 `config.yaml`，通常不需要手填任何 key；key 只留在内存，不落盘、不打日志、不返回给页面；
@@ -139,7 +139,7 @@ plugins:
 | `plan_api_key` | 空 | 不手填；插件自动发现 Cline 凭据（见下文「凭据发现顺序」） |
 | `plan_base_url` | `https://api.cline.bot/api/v1` | 只有走代理 / 自建 Cline API 时才需要改 |
 | `plan_daily_enabled` | `true` | 另拉官方 Token 总量 / 成本 / 余额，最多每小时一次 |
-| `plan_usage_enabled` | `true` | 拉官方逐条用量（账号窗口的请求数 / token / 缓存命中率口径） |
+| `plan_usage_enabled` | `false` | 官方逐条用量拉取，**默认关闭**：页面不再渲染官方窗口，渠道区的缓存命中率改由本机记录计算，翻整个历史只为无人读取的数字。设为 `true` 可重新打开调试 |
 | `plan_usage_refresh` | `10m` | 官方逐条用量的增量拉取间隔（最小 1 分钟；只有大于 `plan_refresh` 时才起作用） |
 
 v0.1.x 的统计专用键（`require_routing_marker`、`unmatched_host_samples`、`ring_size`、`jsonl_enabled`、`jsonl_dir`、`retention_days`、`join_window`、`orphan_ttl`、`capture_cost`、`capture_cache`、`store_planning_reasoning`、`mask_api_key`、`log_events`）已从插件中删除。**留着它们不会导致加载失败**：未知键被忽略，新旧配置块都能读。
@@ -159,19 +159,19 @@ v0.1.x 的统计专用键（`require_routing_marker`、`unmatched_host_samples`�
 
 **套餐卡片里的数字**：`成本` 是 Cline 按上游 API 单价折算的**参考成本**（ClinePass 是包月，不按这条扣钱），5 小时/周/月限额百分比就是按这个口径算的；`余额` 是账号余额；`官方计费条目` 是逐日逐模型汇总的行数，**不是请求数**。
 
-**概览三块**（顺序：请求数 · 总 Token 数 · 缓存命中率，固定一行不换行，右上角切换近 1 小时 / 近 24 小时 / 近 7 天）：
+**「概览」整节已于 2026-10-04 从页面移除**：它画的三个数字全部来自官方逐条用量（`GET /users/{id}/usages`），而那条路径每次刷新都要按 200 条/页倒着翻整个账号历史（实测近 24 小时约 3500 条 ≈ 17 页），换来的数字已经没有页面在渲染。官方逐条拉取因此**默认关闭**（`plan_usage_enabled: false`），`plan.windows[1h|24h|7d]` 只有在把它显式设回 `true` 后才有值。页面改用渠道区的三张卡片：
 
-- **请求数 / 缓存命中率**在近 1 小时、近 24 小时窗口取官方逐条计费记录（整个账号，含 Cline IDE 等其他客户端）；
-- **总 Token 数**是官方**累计**（近 31 天逐日汇总，与套餐区同一口径），不是当前时间窗的量；副行给出本窗口的官方输入/输出与成本；
-- 近 7 天窗口来自官方逐日汇总，官方没有这个窗口的逐条明细，所以请求数与缓存命中率显示 `—`，只有 token 与成本；
-- 官方记录覆盖不到窗口起点时，标题下方会标出「官方数值偏低」；页面「概览」标题旁的感叹号里写明当前口径；
-- v0.1.x 的「平均延时 / 生成速度」两块是本机口径，数据来自已被移除的逐请求统计，v0.2.0 起不再显示；大数单位是 K / M / B / T（B = billion，十亿），例如 `1.77B token`。
+- **请求数**：窗口内 CPA 服务过的请求数（每个完成的请求一条记录，与客户端协议无关，一条 usage 记录算一条）；
+- **偏离基准渠道**：真实渠道（网关 `finalProvider`）不等于 `channel_baseline_provider` 的请求数，占比 = 偏离数 / 能判定渠道的请求数；
+- **缓存命中率**：窗口内本机记录的缓存读 token / 输入 token（一次相除，不是逐条比率的平均）。
+
+这三个数字都是**近期、本机口径**，与官方账号口径（整个账号，含 Cline IDE 等其他客户端）不同。大数单位是 K / M / B / T（B = billion，十亿），例如 `1.77B token`。
 
 **套餐详情与订阅周期**：同一条 `/users/me/plan` 响应里还有套餐说明、权益清单（`features.included`）、计费周期（`interval`、`type`）与订阅周期（`currentPeriodStart` ~ `currentPeriodEnd`）。`canceledAt` 有值表示这个订阅**已取消但当前周期结束前仍然有效**，页面顶部会标出「已取消，<到期日> 到期」。这些字段一直都在同一条响应里，显示它们不需要任何新请求。
 
-**按模型明细**：同一个窗口可以按模型拆开。近 1 小时 / 近 24 小时取记录里的 `metadata.raw_model`（**真正跑的模型**，例如 `deepseek/deepseek-v4.1-flash`），并给出请求数、缓存命中率、参考成本与扣减的 credits；近 7 天窗口来自官方逐日汇总，官方只给**路由名**（例如 `cline-pass/deepseek-v4.1-flash`），也拿不到请求数与缓存列，所以那两列显示 `—`。这份拆分同样是从已经拉到的记录里算出来的，不产生额外上游调用。
+**按模型明细**（**页面已移除，数据仍在接口里**）：同一个窗口可以按模型拆开。近 1 小时 / 近 24 小时取记录里的 `metadata.raw_model`（**真正跑的模型**，例如 `deepseek/deepseek-v4.1-flash`），并给出请求数、缓存命中率、参考成本与扣减的 credits；近 7 天窗口来自官方逐日汇总，官方只给**路由名**（例如 `cline-pass/deepseek-v4.1-flash`），也拿不到请求数与缓存列。这份拆分来自已经拉到的记录，不产生额外上游调用；`plan.windows[].models` 只有在 `plan_usage_enabled: true` 时才有值。
 
-**官方记录里有什么、没有什么**：每条记录带 `aiInferenceProviderName`（**上游推理渠道**，生产实测恒为 `vercel`）与 `metadata.raw_model`（真正跑的模型，如 `deepseek/deepseek-v4.1-flash`），但不带延时、TTFT、生成速度与失败状态码。v0.3.0 用宿主的 usage 回调补回来的是 **CPA 侧凭据**（`Provider` / `AuthID` / `AuthIndex` / `AuthType`）与宿主自己测的 TTFT / 总耗时，**不是** Cline 网关级的 `finalProvider`（网关内部最终选了哪个上游，例如 `deepseek` 之外的回退目标）——后者在**上游** `chat/completions` 响应体的 `provider_metadata.gateway.routing` 里，CPA 把它翻译成 Responses 事件时丢掉了，只有 CPA 请求日志还留着它（`channel_log_enabled`，默认关闭，见下文「渠道观测」）。于是页面上有**两个并列的渠道维度**：CPA 凭据（来自插件记录）与上游推理渠道（来自官方记录）。
+**官方记录里有什么、没有什么**：每条记录带 `aiInferenceProviderName`（**上游推理渠道**，生产实测恒为 `vercel`）与 `metadata.raw_model`（真正跑的模型，如 `deepseek/deepseek-v4.1-flash`），但不带延时、TTFT、生成速度与失败状态码。v0.3.0 用宿主的 usage 回调补回来的是 **CPA 侧凭据**（`Provider` / `AuthID` / `AuthIndex` / `AuthType`）与宿主自己测的 TTFT / 总耗时，**不是** Cline 网关级的 `finalProvider`（网关内部最终选了哪个上游，例如 `deepseek` 之外的回退目标）——后者在**上游** `chat/completions` 响应体的 `provider_metadata.gateway.routing` 里，CPA 把它翻译成 Responses 事件时丢掉了，只有 CPA 请求日志还留着它（`channel_log_enabled`，默认关闭，见下文「渠道观测」）。页面的渠道区因此以**网关 `finalProvider`**（来自 CPA 请求日志，读时合并）为主维度，**CPA 凭据**（来自插件记录）分列在原始记录表里；官方记录的**上游推理渠道**维度（`/channel` 的 `official_channels`）**页面已不再渲染**，且随 `plan_usage_enabled` 默认关闭而不再拉取。
 
 **多个 Cline 条目 / 多把 key**：官方套餐与限额是**按账号**算的，所以插件把每把 key 当成一个账号分别轮询：
 
@@ -187,9 +187,9 @@ v0.1.x 的统计专用键（`require_routing_marker`、`unmatched_host_samples`�
 
 **两种配置文件布局都支持**：CPA ≤ v7 把供应商放在顶层 `openai-compatibility:`、key 放在 `api-key-entries[].api-key`；v8 的配置 schema（`config-version: 8`）把它们挪到 `api-keys.openai-compatibility:` 下、key 改名成 `keys[].api-key`。插件从 **0.2.1** 起两种都会读（0.2.0 只认旧布局，CPA 改写配置文件后会读不到凭据），平铺的 `api-keys: ["sk_…"]` 字符串写法也一并支持。
 
-**上游调用量与限流**：逐条明细接口不能按时间过滤，窗口内有多少条记录就要翻多少页（实测近 24 小时约 3500 条 ≈ 17 页）。因此插件在内存里保留最近 **26 小时**的记录，稳态下每次只翻到已见过的记录为止（通常 1 页）；首次回填或覆盖不足时按 300ms/页 节流，最多 60 页，遇到 429 等错误会指数退避（上限 30 分钟），所以覆盖范围会在几个刷新周期内长满，而不是一次打满。
+**上游调用量与限流（仅 `plan_usage_enabled: true` 时）**：逐条明细接口不能按时间过滤，窗口内有多少条记录就要翻多少页（实测近 24 小时约 3500 条 ≈ 17 页）。因此插件在内存里保留最近 **26 小时**的记录，稳态下每次只翻到已见过的记录为止（通常 1 页）；首次回填或覆盖不足时按 300ms/页 节流，最多 60 页，遇到 429 等错误会指数退避（上限 30 分钟），所以覆盖范围会在几个刷新周期内长满，而不是一次打满。
 
-插件重载后需要重新回填；采集状态（条数、覆盖起点、是否截断、失败次数、下次重试时间）见 `/health` 的 `plan_usage`。逐条用量的增量拉取默认每 **10 分钟**一次（`plan_usage_refresh`，只有大于 `plan_refresh` 的 5 分钟轮询周期时才起作用），官方 Token 总量与余额最多每小时一次。要彻底停掉这部分上游调用，只能手工在插件配置块里写 `plan_usage_enabled: false` 或 `plan_enabled: false`——这两个键已不在配置面板里。
+**逐条用量的拉取默认关闭**（`plan_usage_enabled: false`）：页面不再渲染官方窗口，而这条路径每次刷新都要倒着翻整个账号历史，收益为零。要调试官方逐条口径时，在插件配置块里写 `plan_usage_enabled: true` 再重载；打开后增量拉取默认每 **10 分钟**一次（`plan_usage_refresh`，只有大于 `plan_refresh` 的 5 分钟轮询周期时才起作用），采集状态（条数、覆盖起点、是否截断、失败次数、下次重试时间）见 `/health` 的 `plan_usage`，重载后需要重新回填。官方 Token 总量 / 成本 / 余额走的是按日汇总接口（`plan_daily_enabled`，默认 `true`），**不受影响**，最多每小时一次。这两个键已不在配置面板里。
 
 ## 渠道观测（逐请求渠道分布）
 
@@ -335,9 +335,9 @@ v0.1.x 的 `/stats`、`/events`、`/export` 三条路由已移除，请求它们
 | 字段 | 含义 |
 |---|---|
 | `plugin` / `version` / `enabled` / `uptime` | 插件标识、版本、配置里的启用开关与本次加载后的运行时长 |
-| `plan` | 完整套餐快照，页面直接渲染它：`available`、`source`、`account`、`plan_name`、`plan_price`、`plan_description`、`plan_interval` / `plan_type` / `plan_active`、`plan_benefits[]`、`plan_period_start` / `plan_period_end` / `plan_canceled_at`、`limits[]`（`percent_used` / `resets_at` / `resets_in`）、`tokens`（31 天输入/输出/总量、成本、余额、计费条目数）、`usage`、`fetched_at`、`error`、`accounts[]`；`accounts[].windows[1h\|24h\|7d]` 里另有 `models[]`（按模型拆分：`model` / `requests` / `input_tokens` / `output_tokens` / `cached_tokens` / `cache_ratio` / `cost_usd` / `credits_used`）、`stream_requests`、`byok_requests`、`credits_used` |
+| `plan` | 完整套餐快照，页面直接渲染它：`available`、`source`、`account`、`plan_name`、`plan_price`、`plan_description`、`plan_interval` / `plan_type` / `plan_active`、`plan_benefits[]`、`plan_period_start` / `plan_period_end` / `plan_canceled_at`、`limits[]`（`percent_used` / `resets_at` / `resets_in`）、`tokens`（31 天输入/输出/总量、成本、余额、计费条目数）、`usage`、`fetched_at`、`error`、`accounts[]`；`accounts[].windows[1h\|24h\|7d]`（**仅 `plan_usage_enabled: true` 时存在**）里另有 `models[]`（按模型拆分：`model` / `requests` / `input_tokens` / `output_tokens` / `cached_tokens` / `cache_ratio` / `cost_usd` / `credits_used`）、`stream_requests`、`byok_requests`、`credits_used` |
 | `plan_enabled` | 官方套餐轮询是否开启 |
-| `plan_usage` | 官方逐条用量的采集状态：`enabled`、`items`、`oldest`、`fetched_at`、`truncated`、`failures`、`retry_at`、`error` |
+| `plan_usage` | 官方逐条用量的采集状态：`enabled`（默认 `false`）、`items`、`oldest`、`fetched_at`、`truncated`、`failures`、`retry_at`、`error` |
 | `plan_accounts` | 每个 Cline 凭据一行：`id`、`label`（掩码后的 key）、`source`（`plugin-config` / `config-file` / `host-auth`）、`available`、`rejected`、`account`、`items`、`oldest`、`truncated`、`failures`、`error` |
 | `request_header_names` / `request_bearer_len` | 上一次请求路径上看到的 header 名与 bearer 长度。v0.2.0 起不声明任何**请求侧**能力（v0.3.0 只新增 usage 钩子与管理接口），所以**恒为空**；保留是因为它们从来只含 header 名与长度，不含凭据值 |
 | `channel_observation` | v0.3.0 新增的渠道采集健康度，字段**恰好**是这些：`enabled`（观测总开关）、`directory`（JSONL 目录）、`events`（接受并处理的 usage 记录数）、`failed_events`（其中宿主标为失败的请求数）、`decode_failures`（载荷根本解不开的次数）、`dropped`（队列满丢弃）、`written`、`queued`、`write_failures`、`last_record_at`、`last_write_at`、`last_error` / `last_error_at`、`last_decode_error` / `last_decode_error_at`、`files`、`bytes`、`warmup{records,truncated}`（启动回填近 24 小时 JSONL 的结果，回填超过 96 MB 时 `truncated: true`） |
@@ -368,8 +368,8 @@ v0.1.x 的 `/stats`、`/events`、`/export` 三条路由已移除，请求它们
 | 目录不可写 / 记录数不涨 | 看 `/health` 的 `channel_observation.last_error` 与 `write_failures`：目录权限、挂载或磁盘满都会记在这里。这时插件照常回包、照常在内存里聚合，只是不落盘；修好目录后（或换 `channel_store_dir`）新记录会继续写，但内存聚合在插件重启后会丢失 |
 | 窗口内**所有**请求都算偏离（页面偏离比例接近 100%） | 基准名与渠道名对不上：`channel_baseline_provider` 默认 `deepseek`，而 CPA 侧的渠道名是 `openai-compatible-cline1/2/3`，不区分大小写也不可能相等（验收时 1 小时窗口 6 条记录全部 `off_baseline=yes`）。这是配置语义问题、不是采集故障；基准该怎么定（改基准名、还是按 `upstream_model` 重新定义「官渠」）**尚未决定** |
 | 记录里 `tokens_per_second` 为 0 | 解码窗口短于 50 ms 时不记速度（宿主对短回答批量投递，量出来的是投递不是生成）；这类记录不进解码速度百分位。`ttft_ms` 为 0 表示宿主这次没有报首 token 时间（例如非流式请求或请求失败） |
-| 想核对官方按模型的明细 | 页面上的「官方用量明细」表与渠道区「上游推理渠道（官方 usage）」表已按需求移除，数据仍在接口里：`GET /health` 的 `plan.windows[1h\|24h\|7d].models`（逐条口径，含请求数 / 缓存 / 成本）与 `plan.official_channels`。它按采集器**保留窗口**统计，官方接口限流（`plan.usage.failures` / `plan.usage.error`，实测 `upstream status 429`）时会不足；更长的历史区间要等采集器补齐或改用官方逐日汇总 |
-| 官方表的覆盖范围比窗口短 | 表按采集器**保留窗口**（26 小时）统计，且官方接口有限流：实测 `items=800`、`oldest=04:59Z` 时 `truncated=true`。这是上游限额，不是插件故障；历史更长的区间要等采集器补齐或改用官方逐日汇总 |
+| 想核对官方按模型的明细 | 页面上的「官方用量明细」表、渠道区「上游推理渠道（官方 usage）」表与「概览」整节已按需求移除，`plan_usage_enabled` 也因此**默认 `false`**，逐条用量默认不再拉取。要临时核对：把 `plan_usage_enabled` 设回 `true` 并重载，再看 `GET /health` 的 `plan.windows[1h\|24h\|7d].models`（逐条口径，含请求数 / 缓存 / 成本）与 `plan.official_channels`。它按采集器**保留窗口**统计，官方接口限流（`plan.usage.failures` / `plan.usage.error`，实测 `upstream status 429`）时会不足；更长的历史区间要等采集器补齐或改用官方逐日汇总 |
+| 官方表的覆盖范围比窗口短 | 仅在 `plan_usage_enabled: true` 时相关。表按采集器**保留窗口**（26 小时）统计，且官方接口有限流：实测 `items=800`、`oldest=04:59Z` 时 `truncated=true`。这是上游限额，不是插件故障；历史更长的区间要等采集器补齐或改用官方逐日汇总 |
 | 上游返回 502，能否看出是哪个上游渠道 | **不能**。官方用量接口只记成功计费请求（实测 200 条里 0 条零 completion），失败不会出现在里面；CPA 的 usage 载荷里 `Failure.Body` 只有一句 `upstream stream returned an error payload`，不含上游渠道字样。上游错误原文（例如 `failed to generate stream from Vercel: … status 429 … Rate limit exceeded`）只在 CPA 自己的 `main.log` 里。渠道区只能按 CPA 凭据给出失败分布 |
 | `POST /v1/responses` 的请求能看到吗 | 能。渠道取自宿主每个请求结束后的 usage 回调，与客户端协议无关；旧的流式分片设计在这里才是盲区，已退役。**网关级渠道**（`finalProvider`）要看 `channel_log_enabled`：它在上游响应里，只有 CPA 请求日志能看到（CPA 翻译成 Responses 时丢了它，clinepass 上游也没有 `/responses` 端点） |
 | `channel_log` 一个 fact 都没有 / 目录里没有日志文件 | 按顺序查：① CPA 侧是否同时满足 `observability.logs.request-log: true` 与 `server.commercial-mode: false`（两个都满足才写文件）；② 改完是否**重启过容器**（实测 reload 成功也不出文件，见 [docs/channel-observation.md](docs/channel-observation.md) §2.2）；③ `logs-max-total-size-mb` 是否太小（默认 10 MB，与 `main.log` 共享，日志几秒内就被清理器删掉）；④ 插件侧 `channel_log_enabled` / `channel_log_dir` 是否指对；⑤ 文件 mtime 是否还在 `channel_log_min_age_seconds` 之内。健康度看 `/health` 的 `channel_log.health`（`scanned` / `parsed` / `parse_failures` / `skipped_young` / `last_error`） |
@@ -379,7 +379,7 @@ v0.1.x 的 `/stats`、`/events`、`/export` 三条路由已移除，请求它们
 | 套餐卡片提示「插件拿不到 Cline API Key」 | 插件读的是 CPA 自己的 Cline 凭据：确认 CPA 里有指向 `api.cline.bot` 的 `openai-compatibility` 条目（或条目名恰为 `Cline`），且 `plan_config_path` 指向容器内可读的 `config.yaml`；`/health` 的 `plan_accounts` 会列出每个凭据的来源、可用性与错误 |
 | 同上，但 CPA 是 v8 且配置文件里有 `config-version: 8` | 插件 0.2.0 只认顶层 `openai-compatibility:`，而 v8 把它挪进了 `api-keys.openai-compatibility:`，于是读不到 key。升级到 **0.3.0** 即可；升级前可临时在插件配置里写 `plan_api_key` 顶上 |
 | `plan_accounts[].rejected: true` | 该 key 被上游拒绝（401/403）。检查条目里的 key 是否真的是 Cline key（形如 `sk_…`、长度 ≥ 32），不要填下游客户端 key |
-| 官方逐条用量的 `items` 一直不涨 | 看 `plan_usage.error` / `retry_at`：429 会指数退避（上限 30 分钟）；`plan_usage_enabled: false` 时不会采集 |
+| 官方逐条用量的 `items` 一直不涨 | **默认就是 0**：`plan_usage_enabled` 默认 `false`，接口不再被拉取（`plan_usage.enabled: false` 即此状态，不是故障）。显式设成 `true` 后仍不涨，再看 `plan_usage.error` / `retry_at`：429 会指数退避（上限 30 分钟） |
 | 你还在请求 `/stats`、`/events`、`/export` | v0.2.0 已移除，返回 404 属预期。要看历史逐请求数据，用 v0.1.x 写入的 JSONL 文件，或回滚到 v0.1.1 |
 | 升级 CPA 后行为变化 | 回到本文「环境要求」，核对 `X-Cpa-Support-Plugin` 头、`abi_version`/`schema_version` |
 

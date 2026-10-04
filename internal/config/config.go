@@ -88,6 +88,11 @@ type Config struct {
 	PlanDailyEnabled bool     `yaml:"plan_daily_enabled"`
 	// PlanUsageEnabled switches the official per-request collection behind the account
 	// windows (request count, tokens, cache hit ratio) fetched from /users/{id}/usages.
+	// It defaults to false: the page no longer reads those windows, the walk pages the whole
+	// history every refresh, and it costs dozens of upstream requests for numbers that carry
+	// no statistical weight here. The cache hit ratio the page shows is computed from the
+	// plugin's own per-request records instead. Set it back to true only to debug the official
+	// per-request view.
 	PlanUsageEnabled bool     `yaml:"plan_usage_enabled"`
 	PlanUsageRefresh Duration `yaml:"plan_usage_refresh"`
 
@@ -168,7 +173,11 @@ func Default() Config {
 		PlanBaseURL:      DefaultPlanBaseURL,
 		PlanRefresh:      Duration{Value: defaultPlanRefresh, Set: true},
 		PlanDailyEnabled: true,
-		PlanUsageEnabled: true,
+		// Off by default: the page builds its channel statistics from the plugin's own
+		// per-request records now, so the official per-request walk would only spend upstream
+		// requests on a view nothing renders. The switch stays so a deployment can turn it back
+		// on while debugging.
+		PlanUsageEnabled: false,
 		PlanUsageRefresh: Duration{Value: defaultPlanUsageRefresh, Set: true},
 
 		ChannelObserveEnabled:   true,

@@ -209,7 +209,7 @@ func TestChannelViewIsPresent(t *testing.T) {
 	for _, id := range []string{
 		"channel-section", "channel-csv", "channel-headline", "channel-cards",
 		"channel-providers", "channel-hours", "channel-records",
-		"channel-timeline",
+		"channel-hour-chart",
 	} {
 		if !strings.Contains(page, `id="`+id+`"`) {
 			t.Errorf("page is missing the %s element", id)

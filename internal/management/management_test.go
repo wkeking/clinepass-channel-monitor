@@ -161,16 +161,20 @@ func TestIndexPageCarriesNoData(t *testing.T) {
 			t.Errorf("page is missing the %q plan element", needle)
 		}
 	}
-	// The overview keeps the official usage view the collector still gathers: the window
-	// selector, the three official cards and their charts.
-	for _, needle := range []string{"概览", "请求数", "总 Token 数", "缓存命中率", "sparkline", "近 7 天"} {
+	// The channel section's three cards are the page's summary now: the official 概览 cards went
+	// away with the per-request pull they were built from.
+	for _, needle := range []string{"请求数", "偏离基准渠道", "缓存命中率", "sparkline"} {
 		if !strings.Contains(page, needle) {
-			t.Errorf("page is missing the %q overview element", needle)
+			t.Errorf("page is missing the %q channel element", needle)
 		}
 	}
-	// The plan detail block and the two official-source tables left the page on request; the
-	// payloads they read are still served by /health and /channel, so only the page drops them.
-	for _, needle := range []string{"套餐详情", "官方用量明细", `id="models"`, "上游推理渠道（官方 usage）", `id="official-channels"`} {
+	// The plan detail block, the two official-source tables and the 概览 cards left the page on
+	// request; the payloads behind them are still served by /health and /channel, so only the
+	// page drops them.
+	for _, needle := range []string{
+		"套餐详情", "官方用量明细", `id="models"`, "上游推理渠道（官方 usage）", `id="official-channels"`,
+		`id="cards"`, ">概览<",
+	} {
 		if strings.Contains(page, needle) {
 			t.Errorf("page still carries the removed %q element", needle)
 		}
@@ -210,38 +214,6 @@ func jsFunctionBody(t *testing.T, page, name string) string {
 	return page[start : start+end]
 }
 
-// TestOverviewRendersIndependentlyOfThePlanCard pins a regression that only shows up with
-// several credentials: when the selected credential answers 401/403 on the plan and limits
-// calls, renderPlan returns early with an error message. If the overview were rendered from
-// inside renderPlan, the previous credential's numbers would stay on screen and be
-// misattributed. The overview must be rendered by its callers instead.
-func TestOverviewRendersIndependentlyOfThePlanCard(t *testing.T) {
-	page := string(indexHTML(nil))
-	if body := jsFunctionBody(t, page, "renderPlan"); strings.Contains(body, "renderCards(") {
-		t.Error("renderPlan must not render the overview: its early return would leave the previous account's numbers on screen")
-	}
-	if body := jsFunctionBody(t, page, "renderCards"); strings.Contains(body, "renderPlan(") {
-		t.Error("renderCards must not depend on renderPlan")
-	}
-	if !strings.Contains(page, "renderCards(health.plan)") {
-		t.Error("load() must call renderCards(health.plan) for every refresh, independent of the plan card")
-	}
-	if strings.Contains(page, "function renderModels(") {
-		t.Error("the per-model table left the page, so renderModels must be gone with it")
-	}
-	if !strings.Contains(page, `$("plan-account").addEventListener("change"`) {
-		t.Fatal("page is missing the account picker listener")
-	}
-	lineStart := strings.Index(page, `$("plan-account").addEventListener("change"`)
-	lineEnd := strings.Index(page[lineStart:], "\n")
-	listener := page[lineStart : lineStart+lineEnd]
-	for _, call := range []string{"renderPlan(", "renderCards("} {
-		if !strings.Contains(listener, call) {
-			t.Errorf("switching accounts must re-render everything, %s is missing from: %s", call, listener)
-		}
-	}
-}
-
 // TestChannelTimelineAndRecordPaging pins the two channel-section changes: the hourly timeline
 // draws the newest ten hours only, and the raw-record table pages through the window instead of
 // stopping at the newest twenty rows.
@@ -254,9 +226,19 @@ func TestChannelTimelineAndRecordPaging(t *testing.T) {
 	if !strings.Contains(hours, "timelineHourLimit") {
 		t.Fatalf("newestChannelHours must cut the timeline at the hour limit, got:\n%s", hours)
 	}
-	for _, name := range []string{"renderChannelTimeline", "renderChannelHours"} {
+	for _, name := range []string{"renderChannelHourChart", "renderChannelHours"} {
 		if body := jsFunctionBody(t, page, name); !strings.Contains(body, "newestChannelHours(summary)") {
 			t.Errorf("%s must render the newest hours, got:\n%s", name, body)
+		}
+	}
+	// 时间线的两张卡撤掉，换成请求 / 偏离 / 失败三条线的走势图；下方的小时表留着给精确值。
+	if strings.Contains(page, `id="channel-timeline"`) {
+		t.Error("the two timeline cards are gone, so the channel-timeline container must be gone with them")
+	}
+	chart := jsFunctionBody(t, page, "renderChannelHourChart")
+	for _, needle := range []string{"off_baseline", "failed", "polyline", "viewBox"} {
+		if !strings.Contains(chart, needle) {
+			t.Errorf("renderChannelHourChart must use %s, got:\n%s", needle, chart)
 		}
 	}
 	for _, needle := range []string{
@@ -277,17 +259,40 @@ func TestChannelTimelineAndRecordPaging(t *testing.T) {
 	}
 }
 
-// TestOverviewDoesNotInventZeroTotals pins the other half of the same case: when the plan
-// and limits calls fail, the official totals were never fetched, so the card must say so
-// instead of printing "0 token" as if the account had no usage. Only an account that
-// answered may show a number.
-func TestOverviewDoesNotInventZeroTotals(t *testing.T) {
-	body := jsFunctionBody(t, string(indexHTML(nil)), "renderCards")
-	if !strings.Contains(body, "available!==false") {
-		t.Error("renderCards must gate the totals on the credential being available")
+// TestChannelOverviewIsLocal pins what replaced the official 概览 section: the page reads no
+// per-request usage window at all, and the channel section's three cards are the summary. The
+// cache hit rate is built from the plugin's own records (summary.cached_tokens /
+// summary.input_tokens), so it keeps working with the per-request pull switched off.
+func TestChannelOverviewIsLocal(t *testing.T) {
+	page := string(indexHTML(nil))
+	for _, gone := range []string{
+		"function renderCards(", "function renderOverviewNote(", "function officialView(",
+		"renderCards(", "cache_ratio",
+	} {
+		if strings.Contains(page, gone) {
+			t.Errorf("the official overview left the page, so %q must be gone with it", gone)
+		}
 	}
-	if !strings.Contains(body, `value:"—",unit:"token"`) {
-		t.Error("an unavailable credential must render an unknown total, not a zero")
+	body := jsFunctionBody(t, page, "renderChannel")
+	for _, needle := range []string{
+		"summary.input_tokens", "summary.cached_tokens",
+		`label:"请求数"`, `label:"偏离基准渠道"`, `label:"缓存命中率"`,
+	} {
+		if !strings.Contains(body, needle) {
+			t.Errorf("renderChannel must build the three local cards, %q is missing from:\n%s", needle, body)
+		}
+	}
+	if !strings.Contains(page, `$("plan-account").addEventListener("change"`) {
+		t.Fatal("page is missing the account picker listener")
+	}
+	lineStart := strings.Index(page, `$("plan-account").addEventListener("change"`)
+	lineEnd := strings.Index(page[lineStart:], "\n")
+	listener := page[lineStart : lineStart+lineEnd]
+	if !strings.Contains(listener, "renderPlan(") {
+		t.Errorf("switching accounts must still re-render the plan card: %s", listener)
+	}
+	if strings.Contains(listener, "renderCards(") {
+		t.Errorf("the account picker must not call the removed renderCards: %s", listener)
 	}
 }
 

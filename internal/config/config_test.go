@@ -10,9 +10,21 @@ import (
 // only be noticed in production.
 func TestPlanDefaults(t *testing.T) {
 	cfg := Default()
-	if !cfg.PlanEnabled || !cfg.PlanDailyEnabled || !cfg.PlanUsageEnabled {
-		t.Errorf("plan switches must default to true, got enabled=%v daily=%v usage=%v",
-			cfg.PlanEnabled, cfg.PlanDailyEnabled, cfg.PlanUsageEnabled)
+	if !cfg.PlanEnabled || !cfg.PlanDailyEnabled {
+		t.Errorf("plan and daily must default to true, got enabled=%v daily=%v",
+			cfg.PlanEnabled, cfg.PlanDailyEnabled)
+	}
+	// The per-request pull is off by default: the page no longer renders the official windows,
+	// so the walk would only cost upstream requests. The switch still works when set.
+	if cfg.PlanUsageEnabled {
+		t.Error("plan_usage_enabled must default to false (the page no longer reads the official windows)")
+	}
+	reEnabled, errParse := Parse([]byte("plan_usage_enabled: true\n"))
+	if errParse != nil {
+		t.Fatalf("Parse(plan_usage_enabled: true): %v", errParse)
+	}
+	if !reEnabled.PlanUsageEnabled {
+		t.Error("plan_usage_enabled: true must still turn the per-request pull back on")
 	}
 	if got := cfg.PlanUsageRefresh.Or(0); got != 10*time.Minute {
 		t.Errorf("plan_usage_refresh default = %s, want 10m", got)

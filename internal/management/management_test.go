@@ -236,10 +236,14 @@ func TestChannelTimelineAndRecordPaging(t *testing.T) {
 		t.Error("the two timeline cards are gone, so the channel-timeline container must be gone with them")
 	}
 	chart := jsFunctionBody(t, page, "renderChannelHourChart")
-	for _, needle := range []string{"off_baseline", "failed", "polyline", "viewBox"} {
+	for _, needle := range []string{"off_baseline", "failed", "monotoneCubic", "viewBox"} {
 		if !strings.Contains(chart, needle) {
 			t.Errorf("renderChannelHourChart must use %s, got:\n%s", needle, chart)
 		}
+	}
+	// 曲线是平滑的面积图（参考用量趋势卡的排版），不是折线：面积渐变与线各自一条 path。
+	if !strings.Contains(page, "function monotoneCubic(") || !strings.Contains(page, "linearGradient") {
+		t.Error("the hourly chart must draw a smooth gradient area, not the old polyline")
 	}
 	for _, needle := range []string{
 		`id="channel-records-more"`, `id="channel-records-load"`, "function loadMoreRecords(",

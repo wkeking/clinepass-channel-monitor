@@ -30,7 +30,14 @@ patterns+='|codex-[A-Za-z0-9-]{20,}'
 patterns+='|usr-[A-Za-z0-9]{8,}'
 
 # Synthetic values this repository deliberately uses in fixtures and tests.
-allowed='sk-TESTKEY|sk-FIXTURE|sk-EXAMPLE|gen_FIXTURE|fp_fixture|codex-fixture|usr-fixture'
+allowed='sk-TESTKEY|sk-FIXTURE|sk-EXAMPLE|sk-REDACTED|gen_FIXTURE|fp_fixture|codex-fixture|usr-fixture'
+# The two request-log fixtures are captures: only the Authorization header was replaced. Each of
+# them also carries the upstream response's own generation id and system_fingerprint, which are
+# not credentials but do match the captured-identifier shapes above. They are named by value
+# rather than by prefix because they are already in the history this script re-reads, and
+# rewriting history to drop two public upstream response ids is not worth the blast radius.
+allowed+='|gen_01M3YFPP549JB6EP8D4RCXD6EH|gen_01M3YFPQ5AR7XC26VCQK50Z9W1'
+allowed+='|fp_jgawxng80g|fp_wwpgsz2ino'
 
 mask() {
 	local value="$1"

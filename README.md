@@ -353,7 +353,7 @@ v0.1.x 的 `/stats`、`/events`、`/export` 三条路由已移除，请求它们
 - 记录与 fact 里不含 prompt、响应正文、下游 key（`channel_log_enabled` 时插件会**读取**含明文 prompt 的 CPA 日志文件，但只把结论写进 fact，见上一条）；
 - 插件**不会**打印或返回 CPA 管理密钥、上游 API key 或 auth 文件内容；发现的 Cline key 只留在内存，页面与 `/health` 里只出现掩码（`sk_…尾4位`）与 key 派生的稳定 id；
 - 数据只出现在两个地方：鉴权过的管理接口（`/health`、`/channel`、`/channel.csv`）和上一条说的本地 JSONL 目录。资源页面路由是静态壳，**不含任何数据**；
-- 仓库里不出现任何真实凭据或抓包标识：`scripts/check-secrets.sh` 扫描工作区**和整个 git 历史**，只放行 `sk-TESTKEY…` / `gen_FIXTURE…` / `fp_fixture…` / `codex-fixture…` 这类明显合成的值，CI 每次推送都会跑一遍。测试里要造 key 就用这些前缀，别用真 key 的前几位。
+- 仓库里不出现任何真实凭据或抓包标识：`scripts/check-secrets.sh` 扫描工作区**和整个 git 历史**，只放行 `sk-TESTKEY…` / `sk-FIXTURE…` / `gen_FIXTURE…` / `fp_fixture…` / `codex-fixture…` 这类明显合成的值，CI 每次推送都会跑一遍。测试里要造 key 就用这些前缀，别用真 key 的前几位。两份 request-log 夹具是**抓包**（只替换了 `Authorization` 头），各自还带上游响应的 generation id 与 `system_fingerprint`；它们不是凭据，但会被「抓包标识」规则命中，所以在脚本里**按具体值**放行——这两个值已经在 git 历史里，为删掉两个公开的响应 id 去重写历史不划算。
 
 ## 排障
 

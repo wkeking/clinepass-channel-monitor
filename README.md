@@ -159,7 +159,7 @@ CPA 的插件配置面板**只渲染 `plugins.configs.clinepass-channel-monitor`
 
 两个键刻意**不补**，因为它们的默认值就是「留空」：`plan_config_path`（留空 = 依次探测 `/CLIProxyAPI/config.yaml` → `/app/config.yaml`）和 `account_guard_scope_names`（留空 = 守所有条目）。把前者写成某个具体路径会取消回退，把后者写成非空会真的把守卫缩到某个账号上。
 
-副作用有一条要记住：**清空某个字段不代表「用默认值」**，下一次加载会把当前生效值写回去。要改就改成想要的值。这套写入和账号守卫共用同一个 `writeConfigAtomic`（同目录临时文件 + `rename`，保留权限），任何失败都只记一条 warn，不影响插件运行。
+副作用有一条要记住：**清空某个字段不代表「用默认值」**，下一次加载会把当前生效值写回去。要改就改成想要的值。这套写入和账号守卫共用同一个 `writeConfigAtomic`：先写好同目录临时文件再 `rename`；容器里 `config.yaml` 是 **bind mount**，`rename` 到挂载点会 `EBUSY`（2026-10-05 在生产实测：`rename /CLIProxyAPI/.clinepass-*.tmp /CLIProxyAPI/config.yaml: device or resource busy`），这时退回**直接覆写文件**——CPA 自己保存配置的做法就是这样（`internal/config/config_yaml.go` 用 `os.WriteFile`）。任何失败都只记一条 warn，不影响插件运行。
 
 ### 固定值（不在插件配置面板里显示）
 
@@ -308,9 +308,12 @@ time_utc,request_id,session_id,generation_id,model,alias,upstream_model,canonica
 
 **它凭什么敢写 CPA 的配置**：
 
-- 只改目标条目的一个标量：读文件 → 用 YAML 节点定位 `disabled` → 只替换（或插入）那一行 →
-  同目录临时文件 + `rename` 原子替换，保留文件权限、注释、缩进和其余全部内容。单测对着
-  v7/v8 两种排版断言「除那一行外逐字节相同」，也对着真实生产配置做过翻转再翻回的往返验证；
+- 只改目标条目的一个标量：读文件 → 用 YAML 节点定位 `disabled` → 只替换（或插入）那一行，
+  保留文件权限、注释、缩进和其余全部内容。写入优先走「同目录临时文件 + `rename`」；容器里
+  `config.yaml` 是 bind mount，`rename` 到挂载点会 `EBUSY`（2026-10-05 生产实测），这时退回
+  直接覆写文件，和 CPA 自己保存配置的做法一致（`internal/config/config_yaml.go` 的
+  `os.WriteFile`）。单测对着 v7/v8 两种排版断言「除那一行外逐字节相同」，也对着真实生产配置
+  做过翻转再翻回的往返验证；
 - 改完由 CPA 自己的 fsnotify 监听触发热加载，**不需要重启容器**；
 - 写之前先把守卫状态落盘，写之后回读确认；回读不一致就保持「写入待确认」并在下一轮重试，
   不会把「还没读到」误判成「有人把它放回来了」；

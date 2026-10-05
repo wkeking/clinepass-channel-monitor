@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -166,7 +167,8 @@ func TestAccountGuardLifecyclePublishesASnapshot(t *testing.T) {
 }
 
 // TestWriteConfigAtomicKeepsModeAndCleansUp pins the two properties that keep a botched write
-// from taking the gateway down: the replacement is a rename, and it keeps the file's mode.
+// from taking the gateway down: the replacement is a rename of a temp file, and it keeps the
+// file's mode.
 func TestWriteConfigAtomicKeepsModeAndCleansUp(t *testing.T) {
 	path := writeGuardConfig(t, guardFixture)
 	if errChmod := os.Chmod(path, 0o640); errChmod != nil {
@@ -174,6 +176,45 @@ func TestWriteConfigAtomicKeepsModeAndCleansUp(t *testing.T) {
 	}
 	if errWrite := writeConfigAtomic(path, []byte("hello: world\n")); errWrite != nil {
 		t.Fatalf("write: %v", errWrite)
+	}
+	info, errStat := os.Stat(path)
+	if errStat != nil {
+		t.Fatalf("stat: %v", errStat)
+	}
+	if info.Mode().Perm() != 0o640 {
+		t.Errorf("mode = %v, want 0640 preserved", info.Mode().Perm())
+	}
+	leftovers, errGlob := filepath.Glob(filepath.Join(filepath.Dir(path), ".clinepass-*.tmp"))
+	if errGlob != nil {
+		t.Fatalf("glob: %v", errGlob)
+	}
+	if len(leftovers) != 0 {
+		t.Errorf("temporary files left behind: %v", leftovers)
+	}
+}
+
+// TestWriteConfigFallsBackToAnInPlaceWrite covers the production deployment: config.yaml is
+// bind-mounted into the container, so renaming a temp file over it fails with EBUSY. Measured on
+// the live host on 2026-10-05 - the account guard's disable and the defaults seeder both hit it.
+// The bytes still have to land, at the file's own permissions, with no temp file left behind.
+func TestWriteConfigFallsBackToAnInPlaceWrite(t *testing.T) {
+	path := writeGuardConfig(t, "old: value\n")
+	if errChmod := os.Chmod(path, 0o640); errChmod != nil {
+		t.Fatalf("chmod: %v", errChmod)
+	}
+	restore := renameFile
+	renameFile = func(string, string) error { return errors.New("device or resource busy") }
+	defer func() { renameFile = restore }()
+
+	if errWrite := writeConfigAtomic(path, []byte("new: value\n")); errWrite != nil {
+		t.Fatalf("write: %v", errWrite)
+	}
+	got, errRead := os.ReadFile(path)
+	if errRead != nil {
+		t.Fatalf("read: %v", errRead)
+	}
+	if string(got) != "new: value\n" {
+		t.Errorf("content = %q, want the bytes to land in place", got)
 	}
 	info, errStat := os.Stat(path)
 	if errStat != nil {

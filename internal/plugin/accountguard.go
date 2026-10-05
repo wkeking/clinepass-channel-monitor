@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -17,10 +18,12 @@ import (
 	"github.com/wkeking/clinepass-channel-monitor/internal/state"
 )
 
-// The account guard is the one part of this plugin that writes to CPA's own configuration: when
-// an account's gateway channel stays off the baseline for account_guard_threshold requests in a
-// row, it flips that openai-compatibility entry's `disabled` (hostconf.SetEntryDisabled, which
-// touches one token and nothing else) and later flips it back on the backoff schedule.
+// The account guard is one of the two parts of this plugin that write to CPA's own configuration
+// (the other is the defaults seeder in plugindefaults.go, which only adds keys that are missing
+// from the plugin's own block): when an account's gateway channel stays off the baseline for
+// account_guard_threshold requests in a row, it flips that openai-compatibility entry's
+// `disabled` (hostconf.SetEntryDisabled, which touches one token and nothing else) and later
+// flips it back on the backoff schedule.
 //
 // Three properties make that safe enough to run on somebody's gateway:
 //
@@ -391,10 +394,20 @@ func entryDisabled(raw []byte, name string, want bool) bool {
 	return false
 }
 
-// writeConfigAtomic replaces CPA's configuration file in one rename, keeping its permissions.
-// The plugin never writes that file any other way: a half-written file would be read by the host
-// watcher and could take the gateway down with it. Both writers - the account guard and the
-// configuration-defaults seeder - go through here.
+// renameFile is os.Rename, indirected so a test can force the fallback below.
+var renameFile = os.Rename
+
+// writeConfigAtomic replaces CPA's configuration file, keeping its permissions. Both writers -
+// the account guard and the configuration-defaults seeder - go through here.
+//
+// It prefers one rename of a fully written temporary file: that is what keeps a half-written
+// document from ever being visible. It cannot be the only path, because the documented deployment
+// bind-mounts config.yaml into the container, and rename fails there with EBUSY ("device or
+// resource busy") - a mount point cannot be replaced. Measured on the production host on
+// 2026-10-05: `rename /CLIProxyAPI/.clinepass-*.tmp /CLIProxyAPI/config.yaml: device or resource
+// busy`. CPA's own config writer has the same constraint and writes the file in place
+// (internal/config/config_yaml.go, os.WriteFile), so the fallback does exactly that: the same
+// bytes, written over the existing file at its own permissions.
 func writeConfigAtomic(path string, data []byte) error {
 	mode := os.FileMode(0o600)
 	if info, errStat := os.Stat(path); errStat == nil {
@@ -423,7 +436,31 @@ func writeConfigAtomic(path string, data []byte) error {
 	if errChmod := os.Chmod(name, mode); errChmod != nil {
 		return errChmod
 	}
-	return os.Rename(name, path)
+	if errRename := renameFile(name, path); errRename != nil {
+		if errInPlace := writeFileInPlace(path, data, mode); errInPlace != nil {
+			return fmt.Errorf("replace %s: %w (in-place write: %v)", path, errRename, errInPlace)
+		}
+	}
+	return nil
+}
+
+// writeFileInPlace overwrites the file's contents without replacing the file itself, which is the
+// only option for a bind-mounted config.yaml. It is not atomic, and it does not have to be: the
+// host's own writer is not either, and the file is a few kilobytes.
+func writeFileInPlace(path string, data []byte, mode os.FileMode) error {
+	handle, errOpen := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, mode)
+	if errOpen != nil {
+		return errOpen
+	}
+	if _, errWrite := handle.Write(data); errWrite != nil {
+		_ = handle.Close()
+		return errWrite
+	}
+	if errSync := handle.Sync(); errSync != nil {
+		_ = handle.Close()
+		return errSync
+	}
+	return handle.Close()
 }
 
 // accountGuardLogFields is the one-line summary a reconfigure writes into the host log.

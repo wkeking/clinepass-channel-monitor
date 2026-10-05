@@ -476,7 +476,10 @@ curl -s -H "Authorization: Bearer $CPA_MANAGEMENT_KEY" http://127.0.0.1:8317/v0/
 
 v0.3.1 只加了一样东西：管理页顶部的**配置自检**。`/health` 多两个字段（`uptime_seconds`、`host_config`），插件加载时如果网关渠道没开，会往宿主日志打一条同源的提示。插件自己的配置键、`/channel` 契约、接口清单都没有变化，按下面「升级到 v0.3.0」的同一套步骤替换 `.so`、重载、回读版本即可（`make build` 的版本号来自 `internal/buildinfo`，0.3.1 的新旧文件名与 0.3.0 不会互相覆盖）。
 
-**注意宿主会按 semver 留最高的那个 `.so`**：实测把 `0.3.0-dev.N`（< `0.3.0`）装进目录、再重启容器，宿主加载了 `0.3.0` 并把 dev 文件标成 `old plugin file removed`。想用 dev 构建压过商店装的正式版，构建版本必须**高于**已装版本（例如装的是 0.3.0，就用 0.3.1-dev.N）。
+**先分清两种选文件规则：装过商店版本之后，宿主按 `store.version` 精确挑文件，不再看 semver。**
+
+- 有 store 记录时（`plugins.configs.<id>.store.version` 或 `release-tag`），它是「该加载哪个文件」的期望版本：`internal/pluginhost/platform.go` 的 `selectPluginFiles` 会把同 id 的候选里**文件名版本 ≠ store 版本的全部跳过**，只留匹配的那个，其余同 id 文件按 `old plugin file removed` 删除（`desiredPluginVersions` 取自 `config.go`）。所以从商店装了 `0.3.1` 之后，装 `...-v0.3.1-dev.192.so` **永远不会被加载**：实测重启后 `/v0/management/plugins` 回 `registered:false, effective_enabled:false`、页面与 `/health` 一起 404、`main.log` 里连 `pluginhost: plugin loaded` 都没有，只有 `sudo docker restart cpa` 加上下面的改名才能恢复。要部署开发版就把产物**按 store 版本命名**：`sudo install dist/<id>-v0.3.1-dev.N.so <dir>/<id>-v0.3.1.so`（`/health.version` 报的仍是编译进去的 `0.3.1-dev.N`）；或者先把 `store.version` 对齐到新版本。
+- 没有 store 记录时才回到 semver 规则（留最高的那个 `.so`）：实测把 `0.3.0-dev.N`（< `0.3.0`）装进目录再重启，宿主加载了 `0.3.0` 并把 dev 文件标成 `old plugin file removed`；这种场景下想压过正式版，构建版本必须**高于**已装版本（例如装的是 0.3.0，就用 0.3.1-dev.N）。
 
 ### 升级到 v0.3.0
 

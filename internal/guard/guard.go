@@ -29,7 +29,7 @@ import (
 const (
 	defaultThreshold         = 3
 	defaultMinEnabled        = 1
-	defaultReenableMinutes   = 30
+	defaultReenableMinutes   = 5
 	defaultMaxDisableMinutes = 360
 )
 
@@ -68,7 +68,7 @@ type Options struct {
 	// ScopeNames restricts decisions to these account names, matched case
 	// insensitively. Empty means every account.
 	ScopeNames []string
-	// ReenableMinutes is the first backoff step. Negative values fall back to 30;
+	// ReenableMinutes is the first backoff step. Negative values fall back to 5;
 	// exactly 0 means the guard never re-enables an account on its own.
 	ReenableMinutes int
 	// MaxDisableMinutes caps the exponential backoff. Values <= 0 fall back to 360.

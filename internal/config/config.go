@@ -45,7 +45,12 @@ const (
 	DefaultAccountGuardMinEnabled = 1
 	// DefaultAccountGuardReenableMinutes is how long a guarded account stays disabled before the
 	// guard tries it again, and DefaultAccountGuardMaxDisableMinutes caps the doubling backoff.
-	DefaultAccountGuardReenableMinutes   = 30
+	//
+	// Five minutes is deliberately short: the guard only disables on a fresh run of
+	// DefaultAccountGuardThreshold off-baseline channels, so the first probe cheaply finds out
+	// whether the episode has passed, and an account that is still bad re-disables on its next
+	// three requests and then waits twice as long (the doubling ladder reaches the cap).
+	DefaultAccountGuardReenableMinutes   = 5
 	DefaultAccountGuardMaxDisableMinutes = 360
 	// DefaultChannelRetentionDays and DefaultChannelMaxSizeMB bound the on-disk history.
 	// Retention is the primary limit; the size cap is the safety net for a traffic burst

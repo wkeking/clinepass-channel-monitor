@@ -299,7 +299,7 @@ func buildRegistration() registration {
 				{Name: "account_guard_threshold", Type: pluginapi.ConfigFieldTypeNumber, Description: "默认 3。连续多少次非基准渠道就关这个账号。没有渠道块、没 join 上的请求既不计数也不清零；基准渠道命中一次清零。"},
 				{Name: "account_guard_min_enabled", Type: pluginapi.ConfigFieldTypeNumber, Description: "默认 1（0 或负数按 1 处理）。至少保留几个可用账号：守卫不会把账号全部关掉。"},
 				{Name: "account_guard_scope_names", Type: pluginapi.ConfigFieldTypeString, Description: "默认：留空（守所有 Cline 条目）。在 Cline 条目之上再缩小范围：只守这些条目名（不区分大小写；YAML 列表或逗号分隔）。第一次上线建议只写一个账号名试。"},
-				{Name: "account_guard_reenable_minutes", Type: pluginapi.ConfigFieldTypeNumber, Description: "默认 30。被守卫关掉的账号过多少分钟自动放回；每次再犯翻倍，直到 account_guard_max_disable_minutes。0 = 永不自动放回，只能人工改回。"},
+				{Name: "account_guard_reenable_minutes", Type: pluginapi.ConfigFieldTypeNumber, Description: "默认 5。被守卫关掉的账号过多少分钟自动放回；每次再犯翻倍，直到 account_guard_max_disable_minutes。0 = 永不自动放回，只能人工改回。"},
 				{Name: "account_guard_max_disable_minutes", Type: pluginapi.ConfigFieldTypeNumber, Description: "默认 360 分钟。退避上限：账号被关得越频繁，放回前等得越久，但不会超过这个值。"},
 			},
 		},

@@ -66,7 +66,7 @@ func TestSeedPluginConfigDefaultsFillsThePanel(t *testing.T) {
 		"            account_guard_dry_run: true\n",
 		"            account_guard_threshold: 3\n",
 		"            account_guard_min_enabled: 1\n",
-		"            account_guard_reenable_minutes: 30\n",
+		"            account_guard_reenable_minutes: 5\n",
 		"            account_guard_max_disable_minutes: 360\n",
 	} {
 		if !strings.Contains(text, needle) {
@@ -219,7 +219,7 @@ config-version: 8
 		"account_guard_dry_run":             true,
 		"account_guard_threshold":           3,
 		"account_guard_min_enabled":         1,
-		"account_guard_reenable_minutes":    30,
+		"account_guard_reenable_minutes":    5,
 		"account_guard_max_disable_minutes": 360,
 	}
 	for key, expected := range want {

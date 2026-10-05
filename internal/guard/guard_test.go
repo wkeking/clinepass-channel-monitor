@@ -673,8 +673,8 @@ func TestDefaults(t *testing.T) {
 		if len(decisions) != 1 || decisions[0].Streak != 3 {
 			t.Fatalf("decisions = %+v, want one at the default threshold 3", decisions)
 		}
-		if got := *slotFor(t, state, cline1Key).NextRetryAt; !got.Equal(at(3).Add(30 * time.Minute)) {
-			t.Fatalf("NextRetryAt = %v, want the default 30 minute step", got)
+		if got := *slotFor(t, state, cline1Key).NextRetryAt; !got.Equal(at(3).Add(5 * time.Minute)) {
+			t.Fatalf("NextRetryAt = %v, want the default 5 minute step", got)
 		}
 	})
 

@@ -159,7 +159,7 @@ account_guard_dry_run: true           # 只算并记录，不改配置（默认 
 account_guard_threshold: 3            # 连续 N 次非基准渠道
 account_guard_min_enabled: 1          # 至少保留几个可用账号，达不到就不动手
 account_guard_scope_names: []         # 只守这些条目名（空 = 所有 openai-compatibility 条目）
-account_guard_reenable_minutes: 30    # 多久后自动恢复；0 = 不自动恢复
+account_guard_reenable_minutes: 5     # 多久后自动恢复；0 = 不自动恢复
 account_guard_max_disable_minutes: 360
 account_guard_management_key: ""      # 留空 = 走「直接最小节点编辑」；填了 = 走管理接口
 ```
@@ -226,8 +226,10 @@ account_guard_management_key: ""      # 留空 = 走「直接最小节点编辑�
 1. 写路径取 **路 B**：插件直接做最小 YAML 节点编辑，不改用管理接口、不引入明文管理密钥。
 2. alias **保持 1:1**：接受「关掉账号 = 对应 alias 暂时不可用」，不改成共用 alias。
 3. 阈值 **3 次**（`account_guard_threshold: 3`）。
-4. **自动恢复**：按方案默认 30 分钟起、指数退避（`account_guard_reenable_minutes: 30`、
-   `account_guard_max_disable_minutes: 360`）。
+4. **自动恢复**：按方案默认起、指数退避（`account_guard_reenable_minutes` 默认 30、
+   `account_guard_max_disable_minutes: 360`）。**2026-10-05 追加调整**：默认值下调到 **5 分钟**
+   （守卫只在连续 3 次非基准渠道时才关账号，第一次放回很便宜；问题还在就重新 3 连击再关、
+   等待翻倍，上限仍是 360 分钟）。
 
 下面是最初的四个问题，保留原文以便对照：
 

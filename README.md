@@ -119,7 +119,7 @@ plugins:
       account_guard_threshold: 3       # 连续几次非基准渠道算问题
       account_guard_min_enabled: 1     # 至少保留几个可用账号（0 或负数按 1 处理）
       account_guard_scope_names: []    # 只守这些条目名；留空 = 所有 openai-compatibility 条目
-      account_guard_reenable_minutes: 30      # 多久后自动放回；每再犯一次翻倍
+      account_guard_reenable_minutes: 5       # 多久后自动放回；每再犯一次翻倍
       account_guard_max_disable_minutes: 360  # 退避上限
 ```
 
@@ -148,7 +148,7 @@ plugins:
 | `account_guard_threshold` | `3` | 连续几次非基准渠道算问题。没有渠道块、没 join 上的请求既不计数也不清零，而且**会留到下一轮再看**：渠道来自 CPA 请求日志，请求刚结束时那份日志还没被扫描到（要等 `channel_log_min_age_seconds`），等渠道块落地后这一条仍然会计数；命中一次基准渠道清零 |
 | `account_guard_min_enabled` | `1` | 至少保留几个可用账号（0 或负数按 1 处理）：守卫不会把账号全部关掉 |
 | `account_guard_scope_names` | 空 | 在「只守 Cline 条目」之上再缩小范围：只守这些条目名（不区分大小写）；留空 = 所有命中 `hosts` 的条目（或名字恰为 `Cline` 的条目）。第一次上线建议只写一个账号名 |
-| `account_guard_reenable_minutes` | `30` | 被守卫关掉的账号过多久自动放回；每再犯一次翻倍，直到 `account_guard_max_disable_minutes`。`0` = 永不自动放回 |
+| `account_guard_reenable_minutes` | `5` | 被守卫关掉的账号过多久自动放回；每再犯一次翻倍，直到 `account_guard_max_disable_minutes`。默认只等 5 分钟：守卫只在「连续 3 次非基准渠道」时才关账号，所以第一次放回很便宜，问题还在就按下一次 3 连击重新关、等待翻倍。`0` = 永不自动放回 |
 | `account_guard_max_disable_minutes` | `360` | 退避上限 |
 
 ### 面板里的默认值是怎么来的
@@ -302,7 +302,7 @@ time_utc,request_id,session_id,generation_id,model,alias,upstream_model,canonica
 **它做什么**：某个账号的**真实渠道**（请求日志里的 `finalProvider`）连续
 `account_guard_threshold`（默认 3）次不是基准渠道（`channel_baseline_provider`，默认
 `deepseek`）时，插件把该账号所在的 `openai-compatibility` 条目的 `disabled` 置 true；
-再过 `account_guard_reenable_minutes`（默认 30 分钟）自动放回，放回后再犯就把等待翻倍，
+再过 `account_guard_reenable_minutes`（默认 5 分钟）自动放回，放回后再犯就把等待翻倍，
 上限是 `account_guard_max_disable_minutes`（默认 360 分钟）。判定用的就是页面「渠道」区那份
 数据（usage 记录 + CPA 请求日志 join 出来的渠道），所以**页面显示什么，守卫就按什么判**。
 

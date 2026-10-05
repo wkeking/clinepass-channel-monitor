@@ -60,6 +60,55 @@ func TestHostsDefaultDrivesCredentialDiscovery(t *testing.T) {
 	}
 }
 
+// TestIsClineEntryIsTheCredentialDiscoveryRule pins the filter the account guard uses: an
+// openai-compatibility entry is a Cline account when its base-url host is in `hosts`, or when it
+// is named exactly `Cline`. Everything else - an official DeepSeek key, another relay - is out,
+// which is what keeps the guard from switching off accounts that have nothing to do with Cline.
+func TestIsClineEntryIsTheCredentialDiscoveryRule(t *testing.T) {
+	cfg := Default()
+	cases := []struct {
+		name    string
+		baseURL string
+		want    bool
+	}{
+		{"Cline1", "https://api.cline.bot/api/v1", true},
+		{"Cline2", "https://api.cline.bot/api/v1", true},
+		{"DeepSeek", "https://api.deepseek.com", false},
+		{"UGQ DS", "https://ugq.ai/v1", false},
+		{"api.cline.bot.example.com", "https://api.cline.bot.example.com/v1", false},
+		{"Cline", "https://relay.internal/v1", true},
+		{"cline", "", true},
+	}
+	for _, testCase := range cases {
+		if got := cfg.IsClineEntry(testCase.name, testCase.baseURL); got != testCase.want {
+			t.Errorf("IsClineEntry(%q, %q) = %v, want %v", testCase.name, testCase.baseURL, got, testCase.want)
+		}
+	}
+
+	suffix, errParse := Parse([]byte("hosts: [\".cline.bot\"]\n"))
+	if errParse != nil {
+		t.Fatalf("Parse(): %v", errParse)
+	}
+	if !suffix.IsClineEntry("relay", "https://api.cline.bot/v1") {
+		t.Error("a suffix host must match its subdomains")
+	}
+	if suffix.IsClineEntry("relay", "https://evil-cline.bot/v1") {
+		t.Error("a suffix host must not match a look-alike domain")
+	}
+
+	// hosts: [] is documented as "match Cline entries by name only".
+	named, errNamed := Parse([]byte("hosts: []\n"))
+	if errNamed != nil {
+		t.Fatalf("Parse(): %v", errNamed)
+	}
+	if named.IsClineEntry("Cline1", "https://api.cline.bot/api/v1") {
+		t.Error("with hosts: [] a host must not decide; only the name does")
+	}
+	if !named.IsClineEntry("Cline", "https://api.cline.bot/api/v1") {
+		t.Error("an entry named Cline must still be watched with hosts: []")
+	}
+}
+
 // TestParseIgnoresRemovedKeys keeps an existing v0.1.x configuration block loadable: a
 // deployment that still carries the per-request statistics keys must not fail to load.
 func TestParseIgnoresRemovedKeys(t *testing.T) {

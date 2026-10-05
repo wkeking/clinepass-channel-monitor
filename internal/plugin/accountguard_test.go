@@ -43,13 +43,23 @@ func newGuardRunner(t *testing.T, path string) *accountGuardRunner {
 	t.Helper()
 	dir := t.TempDir()
 	return &accountGuardRunner{
-		cfg:     config.Config{PlanConfigPath: path, ChannelStoreDir: dir, AccountGuardThreshold: 3},
+		cfg:     guardTestConfig(path, dir),
 		store:   guard.NewStore(dir),
 		stop:    make(chan struct{}),
 		done:    make(chan struct{}),
 		state:   guard.NewState(),
 		pending: map[string]bool{},
 	}
+}
+
+// guardTestConfig is config.Default() pointed at the test's own files. Starting from the defaults
+// matters now that the guard filters the entry list by Cline host: a zero Config has no hosts, so
+// nothing would match and the tests would silently assert against an empty account list.
+func guardTestConfig(path, dir string) config.Config {
+	cfg := config.Default()
+	cfg.PlanConfigPath = path
+	cfg.ChannelStoreDir = dir
+	return cfg
 }
 
 // TestAccountGuardApplyFlipsOneEntryAndRecordsIt pins the one write this plugin performs on
@@ -147,11 +157,70 @@ func TestAccountGuardAccountsHonourPending(t *testing.T) {
 	}
 }
 
+// mixedProvidersFixture is the shape production actually has on 2026-10-05: the two Cline
+// accounts sit in the same openai-compatibility list as an official DeepSeek key and an unrelated
+// relay. Only the Cline ones may ever be switched off by the guard.
+const mixedProvidersFixture = `api-keys:
+    openai-compatibility:
+        - "base-url": "https://api.deepseek.com"
+          "disabled": true
+          "name": "DeepSeek"
+        - "base-url": "https://ugq.ai/v1"
+          "disabled": false
+          "name": "UGQ DS"
+        - "base-url": "https://api.cline.bot/api/v1"
+          "disabled": false
+          "name": "Cline1"
+        - "base-url": "https://api.cline.bot/api/v1"
+          "disabled": false
+          "name": "Cline2"
+        - "base-url": "https://relay.internal/v1"
+          "disabled": false
+          "name": "Cline"
+`
+
+// TestGuardAccountsOnlyWatchClineEntries pins the filter: the guard watches the accounts Cline
+// serves and nobody else. The rule is credential discovery's rule - base-url host in `hosts`, or
+// an entry named exactly `Cline` (a self-hosted relay) - so the official DeepSeek key and the
+// ugq.ai relay are out.
+func TestGuardAccountsOnlyWatchClineEntries(t *testing.T) {
+	path := writeGuardConfig(t, mixedProvidersFixture)
+	runner := newGuardRunner(t, path)
+	raw, errRead := os.ReadFile(path)
+	if errRead != nil {
+		t.Fatalf("read: %v", errRead)
+	}
+	if got := strings.Join(guardAccountNames(runner.accounts(raw)), ","); got != "Cline1,Cline2,Cline" {
+		t.Errorf("watched accounts = %q, want the api.cline.bot entries plus the one named Cline", got)
+	}
+
+	// hosts: [] is documented as "match Cline entries by name only": now the api.cline.bot
+	// entries drop out and the entry literally named Cline stays.
+	runner.cfg.Hosts = nil
+	if got := strings.Join(guardAccountNames(runner.accounts(raw)), ","); got != "Cline" {
+		t.Errorf("watched accounts with hosts: [] = %q, want only the entry named Cline", got)
+	}
+
+	// A suffix host keeps matching its subdomains, and only those.
+	runner.cfg.Hosts = []string{".cline.bot"}
+	if got := strings.Join(guardAccountNames(runner.accounts(raw)), ","); got != "Cline1,Cline2,Cline" {
+		t.Errorf("watched accounts with a suffix host = %q", got)
+	}
+}
+
+func guardAccountNames(accounts []guard.Account) []string {
+	names := make([]string, 0, len(accounts))
+	for _, account := range accounts {
+		names = append(names, account.Name)
+	}
+	return names
+}
+
 // TestAccountGuardLifecyclePublishesASnapshot pins start/stop: a runner that is switched off still
 // publishes a snapshot (so the page can say "off"), and stopping unpublishes it.
 func TestAccountGuardLifecyclePublishesASnapshot(t *testing.T) {
 	path := writeGuardConfig(t, guardFixture)
-	cfg := config.Config{PlanConfigPath: path, ChannelStoreDir: t.TempDir(), AccountGuardEnabled: false}
+	cfg := guardTestConfig(path, t.TempDir())
 	startAccountGuard(cfg)
 	published := state.AccountGuard()
 	if published == nil {

@@ -131,7 +131,7 @@ plugins:
 |---|---|---|
 | `enabled` | `true` | 关闭后不再注册路由、不再轮询官方用量 |
 | `priority` | `1` | 插件优先级 |
-| `hosts` | `["api.cline.bot"]` | **只用于凭据发现**：决定 CPA `openai-compatibility` 里哪些条目算 Cline 条目，进而取它们的 `api-keys` / `api-key-entries` 来轮询官方套餐。匹配规则：用 `net/url` 解析条目的 `base-url` 取 host 后**小写精确比较**；以 `.` 开头的项按**域名后缀**匹配（`".cline.bot"` 命中 `api.cline.bot`，不命中 `evil-cline.bot`）。显式留空 `[]` → 不按 host 匹配，只认条目名恰为 `Cline` 的条目 |
+| `hosts` | `["api.cline.bot"]` | **凭据发现与账号守卫共用**：决定 CPA `openai-compatibility` 里哪些条目算 Cline 条目——凭据发现会取它们的 `api-keys` / `api-key-entries` 轮询官方套餐，账号守卫只对它们做判定（列表里别的供应商不计数、不会被关）。匹配规则：用 `net/url` 解析条目的 `base-url` 取 host 后**小写精确比较**；以 `.` 开头的项按**域名后缀**匹配（`".cline.bot"` 命中 `api.cline.bot`，不命中 `evil-cline.bot`）。显式留空 `[]` → 不按 host 匹配，只认条目名恰为 `Cline` 的条目 |
 | `plan_config_path` | 空（自动探测） | 容器内 CPA 配置文件路径，用于读 Cline 凭据。留空时按 `/CLIProxyAPI/config.yaml`（容器内挂载点）→ `/app/config.yaml` 依次尝试。Cline 的 key 通常以 `openai-compatibility[].api-key-entries[].api-key` 存在这里 |
 | `plan_refresh` | `5m` | 套餐、限额与官方用量的轮询周期（最小 1 分钟） |
 | `channel_observe_enabled` | `true` | 渠道观测总开关。关闭时插件**不声明** `usage_plugin` 能力，宿主不注册 usage 适配层，请求路径上没有任何插件开销，页面「渠道」区显示「渠道观测未开启」 |
@@ -147,7 +147,7 @@ plugins:
 | `account_guard_dry_run` | `true` | 只算不改：照样算连击、写审计与页面状态，但**不动任何 `openai-compatibility` 条目**，宿主日志里写 `account guard (dry run) …`。上线头一两天应该保持 true |
 | `account_guard_threshold` | `3` | 连续几次非基准渠道算问题。没有渠道块、没 join 上的请求既不计数也不清零；命中一次基准渠道清零 |
 | `account_guard_min_enabled` | `1` | 至少保留几个可用账号（0 或负数按 1 处理）：守卫不会把账号全部关掉 |
-| `account_guard_scope_names` | 空 | 只守这些条目名（不区分大小写）；留空 = 所有 `openai-compatibility` 条目。第一次上线建议只写一个账号名 |
+| `account_guard_scope_names` | 空 | 在「只守 Cline 条目」之上再缩小范围：只守这些条目名（不区分大小写）；留空 = 所有命中 `hosts` 的条目（或名字恰为 `Cline` 的条目）。第一次上线建议只写一个账号名 |
 | `account_guard_reenable_minutes` | `30` | 被守卫关掉的账号过多久自动放回；每再犯一次翻倍，直到 `account_guard_max_disable_minutes`。`0` = 永不自动放回 |
 | `account_guard_max_disable_minutes` | `360` | 退避上限 |
 
@@ -306,6 +306,13 @@ time_utc,request_id,session_id,generation_id,model,alias,upstream_model,canonica
 上限是 `account_guard_max_disable_minutes`（默认 360 分钟）。判定用的就是页面「渠道」区那份
 数据（usage 记录 + CPA 请求日志 join 出来的渠道），所以**页面显示什么，守卫就按什么判**。
 
+**它只守 Cline 账号**：`openai-compatibility` 列表里通常还躺着别的供应商（一把官方 DeepSeek
+key、某个自建中转），而「真实渠道不是 deepseek」这条规则只对 Cline 服务的账号成立——因为别家
+渠道回退就把它关掉是插件的错，不是那些账号的错。所以守卫先用**凭据发现那条同样的规则**过一遍
+条目：`base-url` 的 host 命中 `hosts`（默认 `api.cline.bot`），或者条目名恰好是 `Cline`
+（自建中转的情形）；都不满足的条目**完全不进判定**，不计数、不会被关。在这之上，
+`account_guard_scope_names` 还能再缩小到其中几个名字。
+
 **它凭什么敢写 CPA 的配置**：
 
 - 只改目标条目的一个标量：读文件 → 用 YAML 节点定位 `disabled` → 只替换（或插入）那一行，
@@ -418,7 +425,7 @@ v0.1.x 的 `/stats`、`/events`、`/export` 三条路由已移除，请求它们
 | `plugin` / `version` / `enabled` / `uptime` | 插件标识、版本、配置里的启用开关与本次加载后的运行时长 |
 | `uptime_seconds` | 同一段运行时长的秒数（页面「配置自检」用它区分「改了配置但没重启容器」） |
 | `host_config` | 插件对 CPA 自己 `config.yaml` 的**只读**快照，供页面「配置自检」使用：`path`、`readable`、`error`、`plugins_enabled`、`plugins_dir`、`request_log`、`logs_max_total_size_mb`、`commercial_mode`、`plugin_block_keys`（`plugins.configs.clinepass-channel-monitor` 这个块的键名，按文件里的顺序）、`store_version` / `store_source`。**只有布尔、数字和键名，没有任何凭据值**；键缺失时那个字段直接不出现，而不是拿 `false` 冒充「读到了 false」 |
-| `account_guard` | 账号守卫的快照（`account_guard_enabled` 为 false 时也在，页面据此显示「未启用」）：`enabled`、`dry_run`、`judging`（有没有真实渠道数据可判）、`path`（会写哪个文件）、`entries`、`threshold`、`baseline`、`last_tick_at`、`last_action_at`、`error`、`accounts[]`（`name` / `provider_key` / `disabled` / `by_guard` / `streak` / `last_channel` / `last_sample_at` / `next_retry_at` / `disable_count` / `pending`）、`recent[]`（最近 10 次决策）。**只有账号名、渠道名、计数与时间，没有 key**；插件还没应用过配置时不出现 |
+| `account_guard` | 账号守卫的快照（`account_guard_enabled` 为 false 时也在，页面据此显示「未启用」）：`enabled`、`dry_run`、`judging`（有没有真实渠道数据可判）、`path`（会写哪个文件）、`entries`、`threshold`、`baseline`、`last_tick_at`、`last_action_at`、`error`、`accounts[]`、`recent[]`（最近 10 次决策）。`entries` 与 `accounts[]` **只含 Cline 条目**（按 `hosts` 的 host 规则，或条目名恰为 `Cline` 过滤），每条是 `name` / `provider_key` / `disabled` / `by_guard` / `streak` / `last_channel` / `last_sample_at` / `next_retry_at` / `disable_count` / `pending`。**只有账号名、渠道名、计数与时间，没有 key、也没有 base-url**；插件还没应用过配置时不出现 |
 | `plan` | 完整套餐快照，页面直接渲染它：`available`、`source`、`account`、`plan_name`、`plan_price`、`plan_description`、`plan_interval` / `plan_type` / `plan_active`、`plan_benefits[]`、`plan_period_start` / `plan_period_end` / `plan_canceled_at`、`limits[]`（`percent_used` / `resets_at` / `resets_in`）、`tokens`（31 天输入/输出/总量、成本、余额、计费条目数）、`usage`、`fetched_at`、`error`、`accounts[]`；`accounts[].windows[1h\|24h\|7d]`（**仅 `plan_usage_enabled: true` 时存在**）里另有 `models[]`（按模型拆分：`model` / `requests` / `input_tokens` / `output_tokens` / `cached_tokens` / `cache_ratio` / `cost_usd` / `credits_used`）、`stream_requests`、`byok_requests`、`credits_used` |
 | `plan_enabled` | 官方套餐轮询是否开启 |
 | `plan_usage` | 官方逐条用量的采集状态：`enabled`（默认 `false`）、`items`、`oldest`、`fetched_at`、`truncated`、`failures`、`retry_at`、`error` |
@@ -461,6 +468,7 @@ v0.1.x 的 `/stats`、`/events`、`/export` 三条路由已移除，请求它们
 | **从商店安装 / 更新之后**「真实渠道」整列变空，而安装之前的记录还有渠道 | 商店安装会写这个配置块（正常只写 `enabled` + `store` 并保留其余键，个别情况下整块只剩这两个——`config.yaml` 里这个块的 mtime 就是安装时刻），`channel_log_enabled` 落回默认 `false`，scanner 不再启动。判据：`/health` 的 `channel_log.enabled=false`、`facts_total=0`、`scanned=0`，且 `channel-log-<日期>.jsonl` 的 mtime 停在安装那一刻；安装之后的记录 `final_provider` 为空、之前的有值（fact 从落盘文件 join）。处理：把 `channel_log_enabled: true` 加回配置块，文件改动会直接触发一次 reload（实测不用重启容器、也不用重装插件），scanner 随即补扫积压的请求日志。注意插件加载时会**自己把缺失的键补成默认值**（见「[面板里的默认值是怎么来的](#面板里的默认值是怎么来的)」），所以 `channel_log_enabled` 会被补成显式的 `false` 摆回面板里——改成 `true` 就对了 |
 | 打开 `channel_log_enabled` 有没有代价 | 有，且是明确测过的：CPA 请求日志里是**明文 prompt**，单个长上下文请求 4.0–5.7 MB，实测目录增速约 8 MB/分钟、日增量约 3.5 GB；代价对照（解码 p50 −2.4%、CPU 中位 +0.35 个百分点、内存中位 +16 MiB）见 [docs/channel-observation.md](docs/channel-observation.md) §4.2 / §4.3。默认关闭 |
 | 账号被守卫关了 / 想立刻放回 | 把那个条目的 `disabled` 改成 `false`（或删掉这一行）就行：守卫下一轮读到「我记着是我关的，但文件说是 enabled」会认输并清空连击与退避，不跟你抢。想彻底停掉这个功能：`account_guard_enabled: false`（它已经关掉的账号**不会**自动放回，要你自己改回来） |
+| 账号守卫表里没有某个账号（或者你不想让某个 Cline 账号被守） | 守卫**只守 Cline 条目**：条目的 `base-url` host 必须命中 `hosts`（默认 `api.cline.bot`），或者条目名恰好是 `Cline`。同一个 `openai-compatibility` 列表里别的供应商（官方 DeepSeek、别的中转）本来就不进判定。要让某个 Cline 账号不进判定，把 `account_guard_scope_names` 缩到你想守的那几个名字。改完不用重启容器 |
 | 守卫不判定，页面写「还没有真实渠道数据，暂不判定」、状态列是灰色「未判定」 | 判定依赖真实渠道，先按上文把 `channel_log_enabled` 与 CPA 侧的 `observability.logs.request-log` 开起来；`/health` 的 `account_guard.judging=false` 就是这个状态。这一列此刻不会显示绿色「正常」，免得被当成“已确认没问题” |
 | 守卫该关却没关，页面写「写入待确认」 | 说明写 `config.yaml` 失败或回读不一致：看宿主日志里 `account guard could not …`（带 `error`），常见原因是配置文件路径只读、被换成了目录、或权限不对。守卫每个 tick 都会重试，不会重复写 |
 | 记录 / CSV 里有些列一直为空（`generation_id`、`pinned_provider`、`protocol`、`cost_usd` …） | 目录里仍有**旧版本（`v: 1`）写下的行**，CSV 也保留了这些 v1 列。usage 载荷里没有对应字段，所以 v2 不再写这些键；`v: 2` 的行这些列本来就是空的 |

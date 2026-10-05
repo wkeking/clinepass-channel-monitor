@@ -148,6 +148,16 @@ func (r *accountGuardRunner) tick() {
 
 // accounts reads the guard's view of the configuration: what the file says, with any write this
 // runner is still waiting to read back applied on top (see accountGuardRunner.pending).
+// accounts reads the guard's view of the configuration: the Cline entries only, what the file
+// says about each, with any write this runner is still waiting to read back applied on top (see
+// accountGuardRunner.pending).
+//
+// The Cline-only filter is not cosmetic. An openai-compatibility list usually holds unrelated
+// providers too - an official DeepSeek key, some other relay - and the guard's rule ("the gateway
+// channel was not deepseek three times in a row") only means anything for the accounts that Cline
+// serves. Switching off somebody's own DeepSeek key because Cline's gateway fell back would be a
+// fault of this plugin, not of that account. The filter is the same rule credential discovery
+// uses: base-url host in `hosts`, or the entry is named exactly `Cline`.
 func (r *accountGuardRunner) accounts(raw []byte) []guard.Account {
 	entries := hostconf.Entries(raw)
 	accounts := make([]guard.Account, 0, len(entries))
@@ -158,6 +168,9 @@ func (r *accountGuardRunner) accounts(raw []byte) []guard.Account {
 	}
 	r.mu.Unlock()
 	for _, entry := range entries {
+		if !r.cfg.IsClineEntry(entry.Name, entry.BaseURL) {
+			continue
+		}
 		disabled := entry.Disabled
 		if wanted, ok := pending[entry.ProviderKey]; ok {
 			disabled = wanted

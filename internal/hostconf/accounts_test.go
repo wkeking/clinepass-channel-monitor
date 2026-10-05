@@ -98,6 +98,9 @@ func TestEntriesReadsTheV8Layout(t *testing.T) {
 	if first.ProviderKey != "openai-compatible-deepseek" {
 		t.Errorf("entry 0 provider key = %q", first.ProviderKey)
 	}
+	if first.BaseURL != "https://api.deepseek.com" {
+		t.Errorf("entry 0 base url = %q, want the entry's own upstream", first.BaseURL)
+	}
 	if len(first.Aliases) != 1 || first.Aliases[0] != "deepseek-flash" {
 		t.Errorf("entry 0 aliases = %#v", first.Aliases)
 	}
@@ -107,6 +110,9 @@ func TestEntriesReadsTheV8Layout(t *testing.T) {
 	}
 	if second.ProviderKey != "openai-compatible-cline1" {
 		t.Errorf("entry 1 provider key = %q", second.ProviderKey)
+	}
+	if second.BaseURL != "https://api.cline.bot/api/v1" {
+		t.Errorf("entry 1 base url = %q, want the Cline host", second.BaseURL)
 	}
 	if len(second.Aliases) != 1 || second.Aliases[0] != "deepseek-flash-1" {
 		t.Errorf("entry 1 aliases = %#v", second.Aliases)

@@ -42,6 +42,10 @@ type Entry struct {
 	Index int `json:"index"`
 	// Name is the entry name, e.g. "Cline1".
 	Name string `json:"name"`
+	// BaseURL is the entry's upstream base URL. It carries no credential, and it is what tells
+	// a Cline account apart from the other openai-compatibility entries in the same list
+	// (config.Config.IsClineEntry).
+	BaseURL string `json:"base_url,omitempty"`
 	// Disabled is the entry's own switch; a missing key means enabled.
 	Disabled bool `json:"disabled"`
 	// ProviderKey is the name a record reports in cpa_provider, e.g. "openai-compatible-cline1".
@@ -102,6 +106,7 @@ func Entries(raw []byte) []Entry {
 		}
 		entry := Entry{Index: index}
 		entry.Name = scalarString(mapValue(node, "name"))
+		entry.BaseURL = scalarString(mapValue(node, "base-url"))
 		entry.Disabled = boolValue(mapValue(node, "disabled"))
 		entry.ProviderKey = ProviderKey(entry.Name)
 		entry.Aliases = entryAliases(node)

@@ -392,3 +392,20 @@ func (c Config) HostMatched(baseURL string) (string, bool) {
 	}
 	return host, false
 }
+
+// IsClineEntry reports whether one openai-compatibility entry is a Cline account. It is the same
+// rule credential discovery applies to these entries: the base-url host is one of Hosts, or the
+// entry is named exactly "Cline" (the self-hosted relay case). With `hosts: []` only the name
+// matches, which is what that setting documents.
+//
+// The account guard uses this to stay on Cline accounts: a deployment's openai-compatibility list
+// usually holds unrelated providers too (an official DeepSeek key, some other relay), and those
+// must never be switched off by a rule about Cline's gateway channels.
+func (c Config) IsClineEntry(name, baseURL string) bool {
+	if len(c.Hosts) > 0 {
+		if _, matched := c.HostMatched(baseURL); matched {
+			return true
+		}
+	}
+	return strings.EqualFold(strings.TrimSpace(name), "cline")
+}

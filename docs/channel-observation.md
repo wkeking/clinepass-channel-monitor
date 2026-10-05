@@ -148,9 +148,9 @@ reload 确认 `request-log: false -> true` → 打一条真实流式请求（37 
 
 **join key（实测，12 条里对上 10 条）**：日志 `HEADERS` 里的 `Session_id` 头是 `session-<uuid>`；
 usage 记录的 `session_id` 是 `codex:session-<uuid>`（同一个 uuid）。匹配规则：该 uuid 出现在记录的 `session_id` 里
-**且** `|log.Timestamp − record.time| ≤ 2s`；实测偏移 **72–218 ms**（记录的时间是 usage 上报的 `RequestedAt`，
-晚于日志的到达时间戳）。**不发 `Session_id` 头的客户端**（其记录形如 `lcp:v1:<hex>`）走 token/时间兜底（2026-10-03 已实现：fact 新增 `prompt_tokens`/`completion_tokens`，要求 2 秒窗口 + 两个计数器精确相等 + 候选唯一），
-这条路**还没实现**（§6「仍未做」）。
+**且** `|log.Timestamp − record.time| < 2s`（会话匹配的窗口）；实测偏移 **72–218 ms**（记录的时间是 usage 上报的 `RequestedAt`，
+晚于日志的到达时间戳）。**不发 `Session_id` 头的客户端**（其记录形如 `lcp:v1:<hex>`）走 token/时间兜底（2026-10-03 已实现：fact 新增 `prompt_tokens`/`completion_tokens`，两个计数器精确相等 + 候选唯一；
+窗口 **5 秒**，2026-10-05 由 2 秒放宽——客户端整段重发上下文时请求体 90 MB 量级，`RequestedAt` 比日志到达戳晚 **1.99–2.38 s**，2 秒窗口正好把这类请求的渠道丢成「无渠道块」）。
 
 ### 2.3 P3：响应侧拦截器 —— 曾选定，已退役（因果已更正）
 
@@ -646,7 +646,7 @@ last_error_at, pending_files`
 
 **仍未做（本轮明确未完成）**
 
-- [x] **不带 `Session_id` 的客户端（记录形如 `lcp:v1:<hex>`）的 token/时间兜底 join**：2026-10-03 已实现并上线（`0.3.0-dev.183`）。实测动因：生产上当时的流量**全部**没有 `Session_id` 头（当天 187 条 fact 里 118 条 `has_session=false`），1 小时窗口只能判定 8/134 条；回退上线后同一窗口 72/221。规则：fact 带 `prompt_tokens`/`completion_tokens`，记录带 token 时按「2 秒窗口 + 两计数器精确相等 + 候选恰好 1 条」匹配，两条都匹配不上就留空。**限制**：磁盘上早于该构建的 fact 行没有这两个键，回退只对新解析的 fact 生效（随 3 天留存滚动）。
+- [x] **不带 `Session_id` 的客户端（记录形如 `lcp:v1:<hex>`）的 token/时间兜底 join**：2026-10-03 已实现并上线（`0.3.0-dev.183`）。实测动因：生产上当时的流量**全部**没有 `Session_id` 头（当天 187 条 fact 里 118 条 `has_session=false`），1 小时窗口只能判定 8/134 条；回退上线后同一窗口 72/221。规则：fact 带 `prompt_tokens`/`completion_tokens`，记录带 token 时按「两计数器精确相等 + 候选恰好 1 条」匹配，两条都匹配不上就留空。窗口初版 2 秒，**2026-10-05 放宽到 5 秒**：客户端整段重发上下文时请求体 90 MB 量级，usage 的 `RequestedAt` 比日志到达戳晚 **1.99–2.38 s**（生产 A/B 面 11 条 Cline3 记录，真实渠道全部是 `deepseek`），2 秒窗口正好在边界上把它们丢成「无渠道块」。**限制**：磁盘上早于该构建的 fact 行没有这两个键，回退只对新解析的 fact 生效（随 3 天留存滚动）。
 - [x] **合并与页面（Phase 3 / Phase 4）**：构建 `0.3.0-dev.182` 已完成——schema 升 v3，凭据改名 `cpa_provider`，
       网关值占用 `final_provider`/`resolved_provider`（另有 `gateway_slug`/`gateway_attempts`/`gateway_cost`/`channel_source`），
       新增 `summary.unresolved_requests` 与 `summary.cpa_providers[]`，CSV 同步；页面的「真实渠道」表按网关维度、原始记录表

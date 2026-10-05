@@ -27,8 +27,10 @@ import (
 //     session_id, which CPA writes as "codex:session-<uuid>". The 8 trailing characters of the
 //     log file name are a CPA-internal id that appears nowhere in the usage payload, so they
 //     are not a join key.
-//   - |fact.time - record.time| must be shorter than joinWindow. Measured on live traffic the
-//     two clocks are 72-218 ms apart; the window is the allowance, not the expectation.
+//   - |fact.time - record.time| must be shorter than the window the path uses (joinWindow for
+//     the session match, the wider joinUsageWindow for the counter fallback). Measured on live
+//     traffic the two clocks are 72-218 ms apart; the window is the allowance, not the
+//     expectation.
 //
 // The current client traffic sends no Session_id header at all (every fact carries
 // has_session false), so the session cannot match anything and the match falls back to the
@@ -71,16 +73,31 @@ func FactsFromChannelLog(lookup func() *channellog.Scanner) FactSource {
 // export must render it as "unknown", never as the baseline.
 const ChannelSourceLog = "log"
 
-// joinWindow is the widest |fact.time - record.time| a join may be made on. The measured
-// distance between the log's arrival timestamp and the usage-reported time is 72-218 ms, which
-// is why two seconds is an allowance with two orders of magnitude of headroom rather than a
-// tight fit.
-//
-// The two paths read the bound differently, and that is deliberate. The session match is
-// exclusive — a fact exactly two seconds away belongs to some other request — while the
-// token-and-counter fallback admits the boundary itself, because there the counters, not the
-// clock, are what identifies the request and the window only has to exclude the impossible.
+// joinWindow is the widest |fact.time - record.time| the session match may be made on. The
+// measured distance between the log's arrival timestamp and the usage-reported time is 72-218 ms
+// for ordinary traffic, which is why two seconds is an allowance with an order of magnitude of
+// headroom rather than a tight fit. The session match is exclusive — a fact exactly two seconds
+// away belongs to some other request — because it picks the closest qualifying fact of a whole
+// session, so a wide window would let one turn's channel drift onto the next.
 const joinWindow = 2 * time.Second
+
+// joinUsageWindow is the same allowance for the token-and-counter fallback, and it is wider than
+// joinWindow on purpose: the two timestamps that fallback compares are further apart exactly when
+// the request body is large. CPA stamps the request log's Timestamp when the request arrives,
+// while the usage hook's RequestedAt is the later moment the body has been read; for the ~93 MB
+// /v1/responses bodies seen on production (one client re-sends its whole context) the gap is
+// 1.99-2.38 s, and for a one-megabyte body it is 14-218 ms. A two-second window therefore threw
+// away the channel of every large-body request that landed past the boundary — the page showed
+// "无渠道块" and the account guard never saw the sample — while five seconds covers the measured
+// maximum with headroom.
+//
+// Widening this side costs little because the counters, not the clock, are what identify the
+// request here, and the fallback still refuses an ambiguous pair rather than guessing. Across the
+// 8,320 facts on production, no two facts share a counter pair within two seconds, three pairs do
+// within five seconds (all of them the same 1,494-token probe request repeated), and an ambiguous
+// pair is dropped instead of attached to the wrong request. This path admits the boundary itself,
+// because there the window only has to exclude the impossible.
+const joinUsageWindow = 5 * time.Second
 
 // channelJoin is one read of the facts, held for the length of one view. It is rebuilt per
 // query instead of being cached: a fact reaches the scanner seconds after the request it
@@ -138,9 +155,10 @@ func (j channelJoin) matchBySession(record Record) (channellog.Fact, bool) {
 }
 
 // matchByUsage is the fallback for the traffic that sends no Session_id header: the usage
-// callback and the request log both report the same token counters, and the arrival times are
-// milliseconds apart, so the pair of counters inside a two-second window identifies the request
-// when nothing else can.
+// callback and the request log both report the same token counters, and those counters are what
+// identifies the request when nothing else can. The window is joinUsageWindow, the wider
+// allowance, because a large request body pushes the two timestamps seconds apart (see the
+// constant).
 //
 // It is a deliberately tight rule, and its seams are the point:
 //
@@ -173,7 +191,7 @@ func (j channelJoin) matchByUsage(record Record) (channellog.Fact, bool) {
 		if delta < 0 {
 			delta = -delta
 		}
-		if delta > joinWindow {
+		if delta > joinUsageWindow {
 			continue
 		}
 		candidate = fact

@@ -40,7 +40,8 @@
 
 - **真实渠道**来自 CPA 请求日志解析出的 fact（`final_provider`，`channel_source: "log"`），
   由插件在**读时**与记录 join（`internal/observation/join.go`：先按 `Session_id` 的 uuid，
-  再回退到「2 秒窗口 + token 精确相等且候选唯一」）。
+  再回退到「token 精确相等且候选唯一」，窗口 2 秒 → 2026-10-05 放宽到 5 秒以覆盖大 body
+  请求的 1.99–2.38 s 时延）。
 - join 的覆盖：**实测** 197/200 = 98.5%。
 
 ### 1.2 这条规则在真实流量上会命中什么

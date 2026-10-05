@@ -1056,7 +1056,7 @@ function renderChannel(view){
   if(tip){
     tip.textContent=[
       "「真实渠道」= Cline 网关实际服务的渠道（finalProvider），来自 CPA 自己的请求日志里上游响应的 provider_metadata.gateway.routing；「CPA 凭据」= 这条请求用了哪把 key（usage 回调给出）。两者分列，不能互相替代。",
-      "只有日志里有路由块、且 Session_id 与 usage 记录对得上的请求才有真实渠道（实测偏移 72–218 ms，窗口 2 秒）；失败的请求上游不返回路由块，所以它们的渠道列显示「无渠道块」，不计入偏离比例。",
+      "只有日志里有路由块、且 Session_id 或 token 计数与 usage 记录对得上的请求才有真实渠道（实测偏移 72–218 ms；会话匹配窗口 2 秒，token 兜底窗口 5 秒，大 body 请求实测滞后 1.99–2.38 s）；失败的请求上游不返回路由块，所以它们的渠道列显示「无渠道块」，不计入偏离比例。",
       "「偏离基准渠道」= 真实渠道不等于 " + baseline + " 的请求数；占比 = 偏离数 / 能判定渠道的请求数。",
       "TTFT 与延时来自 CPA 的 usage 记录（纳秒转毫秒）；解码速度 = 输出 token / （总延时 − TTFT），窗口短于 50ms 时不记速度。",
       "「失败」= CPA 的 usage 记录里 Failed 为真的请求（当前实测全部是上游 502），按本窗口的记录计数，与页顶进程计数器无关。",

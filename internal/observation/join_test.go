@@ -282,6 +282,56 @@ func TestJoinWindowIsExclusiveAtTheBoundary(t *testing.T) {
 	}
 }
 
+// TestJoinFallbackToleratesALargeUploadLag covers the production shape the two-second window
+// used to drop. A client that re-sends its whole context makes the request body tens of
+// megabytes, and the usage hook's RequestedAt then lands about two seconds after the request
+// log's arrival stamp: CPA stamps the log when the request arrives, the usage callback reports
+// the later moment the body finished being read. Measured on production the lag for a ~93 MB
+// body is 1.99-2.38 s, so a two-second window silently turned the channel of every one of those
+// requests into "no channel block" — the page lost the row and the account guard never saw the
+// sample. The counters still identify the request exactly, so the wider fallback window joins it.
+func TestJoinFallbackToleratesALargeUploadLag(t *testing.T) {
+	for _, check := range []struct {
+		name   string
+		lag    time.Duration
+		joined bool
+	}{
+		{"just past the session window", joinWindow + 200*time.Millisecond, true},
+		{"the largest lag measured on production", 2380 * time.Millisecond, true},
+		{"just past the fallback window", joinUsageWindow + time.Millisecond, false},
+	} {
+		t.Run(check.name, func(t *testing.T) {
+			source := &factSet{}
+			recorder, clock := newRecorderWithFacts(t, providerBaseline, source)
+			at := clock.at.Add(-time.Minute)
+			wire := usageFixture(providerFixture, at)
+			// A session the fact does not carry: the fallback, not the session match, has to
+			// answer, exactly as it does for the production traffic that sends no header.
+			wire.SessionID = "lcp:v1:0f0e0d0c"
+			wire.Detail.InputTokens = joinInputTokens
+			wire.Detail.OutputTokens = joinOutputTokens
+			stampUsage(&wire, at)
+			feedUsage(t, recorder, wire)
+
+			source.set(usageOnlyFact(at.Add(check.lag), joinInputTokens, joinOutputTokens, joinGatewayOther))
+
+			records := channelRecordsOf(t, recorder)
+			if len(records) != 1 {
+				t.Fatalf("want exactly 1 record, got %d", len(records))
+			}
+			record := records[0]
+			if check.joined {
+				if record.ChannelSource != ChannelSourceLog || record.GatewayProvider != joinGatewayOther {
+					t.Errorf("record = %+v, want the channel %q joined at a lag of %v",
+						record, joinGatewayOther, check.lag)
+				}
+			} else if record.ChannelSource != "" || record.GatewayProvider != "" || record.FinalProvider != "" {
+				t.Errorf("record = %+v, want no channel at a lag of %v", record, check.lag)
+			}
+		})
+	}
+}
+
 // TestJoinNeedsTheSessionHeader keeps the fallback out: without a session the two halves
 // cannot be told apart, so the record stays unjoined rather than being guessed onto a fact.
 func TestJoinNeedsTheSessionHeader(t *testing.T) {

@@ -182,7 +182,7 @@ func TestWriteConfigAtomicKeepsModeAndCleansUp(t *testing.T) {
 	if info.Mode().Perm() != 0o640 {
 		t.Errorf("mode = %v, want 0640 preserved", info.Mode().Perm())
 	}
-	leftovers, errGlob := filepath.Glob(filepath.Join(filepath.Dir(path), ".account-guard-*.tmp"))
+	leftovers, errGlob := filepath.Glob(filepath.Join(filepath.Dir(path), ".clinepass-*.tmp"))
 	if errGlob != nil {
 		t.Fatalf("glob: %v", errGlob)
 	}

@@ -34,7 +34,7 @@ v0.3.0 重新打开的口子不是那个逐帧钩子，而是 CPA 的 **usage �
 - **渠道观测（v0.3.0 新增）**：过去 1 小时 / 近 24 小时 / 近 7 天窗口里，clinepass 请求有多少条、多大比例没有落在基准渠道（默认 `deepseek`），并给出这些请求的 TTFT 与解码速度；「渠道」是 **CPA 为这条请求选中的凭据**（`Provider` + `AuthID` / `AuthIndex` / `AuthType`），由宿主每请求一次 usage 回调给出，因此对**所有客户端协议**都成立（含 `POST /v1/responses`）；页面有「渠道」区，可导出 CSV。注意当前生产上渠道名是 `openai-compatible-cline*`、基准仍是 `deepseek`，于是每条都算偏离——基准语义**未决**，见下文「渠道观测 → 两个口径」；网关级渠道另由 `channel_log_enabled`（默认关闭）从 CPA 请求日志取，并与记录**读时合并**：页面的「真实渠道」表按网关维度、原始记录表分列「真实渠道 / 尝试 / CPA 凭据」，`off_baseline` 只对真渠道判定（没有渠道块的请求记「无渠道块」，不计入比例）。官方 usage 的「上游推理渠道」表与按模型明细**页面已移除**，但 `/channel` 的 `official_channels` / `official_usage` 与 `/health` 的 `plan.windows[].models` 仍在返回；
 - **请求路径零成本开关**：除 `ManagementAPI` 外只声明 `usage_plugin`，且**只在 `channel_observe_enabled: true` 时声明**；关闭时能力为 nil，宿主不注册 usage 适配层，请求路径上没有任何插件代码在跑（不拦分片、不走 ABI、不做探针）；
 - **账号守卫（默认关闭）**：某个账号的真实渠道连续 `account_guard_threshold`（默认 3）次不是基准渠道时，把它所在的 `openai-compatibility` 条目 `disabled` 置 true，之后按退避自动放回；只改配置里的那一个标量、由 CPA 自己的 watcher 热加载，默认 `dry_run` 只记录不动手。见「[账号守卫](#账号守卫可选默认关闭)」；
-- **不改写、不阻塞任何请求**：不声明任何 translator / normalizer / 请求侧或响应侧拦截能力，不 clone、不改写请求或响应；对每次 usage 回调只回一个「不改变」信封 `{"ok":true,"result":{}}`，回调发生在请求**结束之后**，与请求处理无关。**唯一的例外是上面那条账号守卫**：它不在请求路径上，但会在旁路改 CPA 的配置，从而改变**后续**请求可以选到哪些凭据——所以它默认关闭，且默认只试运行；
+- **不改写、不阻塞任何请求**：不声明任何 translator / normalizer / 请求侧或响应侧拦截能力，不 clone、不改写请求或响应；对每次 usage 回调只回一个「不改变」信封 `{"ok":true,"result":{}}`，回调发生在请求**结束之后**，与请求处理无关。**请求路径之外有两处会写 CPA 配置**：账号守卫会改 `openai-compatibility` 条目的 `disabled`，从而改变**后续**请求能选到哪些凭据（所以默认关闭、默认只试运行）；加载时会把插件配置块里缺失的键补成当前生效值（只加缺失键，已有键一个字节都不动）。两者都不在请求路径上，也不拦截任何请求；
 - **fail-open**：配置解析失败时回落到默认值，插件照常加载并照常提供套餐视图；观测层自身的错误（载荷解不开、队列满、目录不可写）也只在插件内部消化，宿主请求流程完全不受影响。
 
 ## 环境要求
@@ -99,7 +99,6 @@ plugins:
       priority: 1
       # ---- 凭据发现 ----
       hosts: ["api.cline.bot"]         # 哪些 openai-compatibility 条目算 Cline（支持 ".cline.bot" 后缀写法）
-      timezone: "Asia/Shanghai"
       # ---- Cline 官方用量（套餐 / 限额 / 官方用量，恒定开启）----
       plan_config_path: "/CLIProxyAPI/config.yaml"   # 容器内 CPA config.yaml 路径，用于读 Cline 凭据（留空则自动探测）
       plan_refresh: 5m                 # 套餐与限额刷新间隔
@@ -133,7 +132,6 @@ plugins:
 | `enabled` | `true` | 关闭后不再注册路由、不再轮询官方用量 |
 | `priority` | `1` | 插件优先级 |
 | `hosts` | `["api.cline.bot"]` | **只用于凭据发现**：决定 CPA `openai-compatibility` 里哪些条目算 Cline 条目，进而取它们的 `api-keys` / `api-key-entries` 来轮询官方套餐。匹配规则：用 `net/url` 解析条目的 `base-url` 取 host 后**小写精确比较**；以 `.` 开头的项按**域名后缀**匹配（`".cline.bot"` 命中 `api.cline.bot`，不命中 `evil-cline.bot`）。显式留空 `[]` → 不按 host 匹配，只认条目名恰为 `Cline` 的条目 |
-| `timezone` | `Asia/Shanghai` | 展示时区。v0.2.0 起页面按**浏览器本地时区**渲染官方接口返回的绝对时间，所以这个键被保留但**没有代码读取它**（原来的消费方是已移除的本地逐请求统计）；留着是为了兼容既有配置块 |
 | `plan_config_path` | 空（自动探测） | 容器内 CPA 配置文件路径，用于读 Cline 凭据。留空时按 `/CLIProxyAPI/config.yaml`（容器内挂载点）→ `/app/config.yaml` 依次尝试。Cline 的 key 通常以 `openai-compatibility[].api-key-entries[].api-key` 存在这里 |
 | `plan_refresh` | `5m` | 套餐、限额与官方用量的轮询周期（最小 1 分钟） |
 | `channel_observe_enabled` | `true` | 渠道观测总开关。关闭时插件**不声明** `usage_plugin` 能力，宿主不注册 usage 适配层，请求路径上没有任何插件开销，页面「渠道」区显示「渠道观测未开启」 |
@@ -145,13 +143,23 @@ plugins:
 | `channel_log_dir` | `/CLIProxyAPI/logs` | CPA 请求日志目录（容器内路径；宿主是 `/opt/cpa/logs`）。只扫描该目录**顶层**的 `*.log`，不递归子目录，且跳过 `main.log` |
 | `channel_log_delete_after_read` | `true` | fact 落盘后 unlink 源日志。解析失败或落盘失败的文件不删，计数进 `/health` 的 `channel_log` |
 | `channel_log_min_age_seconds` | `5` | 只读 mtime 早于该秒数的日志文件，避免读到 CPA 正在写的半个请求；读前读后都比对文件大小，变大的留到下一轮 |
-| `account_guard_enabled` | `false` | 账号守卫总开关。打开后，某个账号的真实渠道连续 `account_guard_threshold` 次不是 `channel_baseline_provider` 时，插件把该 `openai-compatibility` 条目的 `disabled` 置 true；**这是本插件唯一会写 CPA 配置的行为**，详见「[账号守卫](#账号守卫可选默认关闭)」 |
-| `account_guard_dry_run` | `true` | 只算不改：照样算连击、写审计与页面状态，但不碰 `config.yaml`，宿主日志里写 `account guard (dry run) …`。上线头一两天应该保持 true |
+| `account_guard_enabled` | `false` | 账号守卫总开关。打开后，某个账号的真实渠道连续 `account_guard_threshold` 次不是 `channel_baseline_provider` 时，插件把该 `openai-compatibility` 条目的 `disabled` 置 true；它和上面「[面板里的默认值是怎么来的](#面板里的默认值是怎么来的)」那套回填，是本插件**仅有的两个会写 CPA 配置的行为**，详见「[账号守卫](#账号守卫可选默认关闭)」 |
+| `account_guard_dry_run` | `true` | 只算不改：照样算连击、写审计与页面状态，但**不动任何 `openai-compatibility` 条目**，宿主日志里写 `account guard (dry run) …`。上线头一两天应该保持 true |
 | `account_guard_threshold` | `3` | 连续几次非基准渠道算问题。没有渠道块、没 join 上的请求既不计数也不清零；命中一次基准渠道清零 |
 | `account_guard_min_enabled` | `1` | 至少保留几个可用账号（0 或负数按 1 处理）：守卫不会把账号全部关掉 |
 | `account_guard_scope_names` | 空 | 只守这些条目名（不区分大小写）；留空 = 所有 `openai-compatibility` 条目。第一次上线建议只写一个账号名 |
 | `account_guard_reenable_minutes` | `30` | 被守卫关掉的账号过多久自动放回；每再犯一次翻倍，直到 `account_guard_max_disable_minutes`。`0` = 永不自动放回 |
 | `account_guard_max_disable_minutes` | `360` | 退避上限 |
+
+### 面板里的默认值是怎么来的
+
+CPA 的插件配置面板**只渲染 `plugins.configs.clinepass-channel-monitor` 里存了什么**：它不会把插件代码里的默认值合并进来，插件能声明的字段类型（`sdk/pluginapi.ConfigField`）也只有 `Name` / `Type` / `EnumValues` / `Description`，**没有「默认值」这个字段**（商店 manifest 同样没有配置块）。所以商店安装只写 `enabled` + `store` 之后，面板就是一片空白，看起来像什么都没配。
+
+插件因此在自己加载时把**缺失的键按当前生效值补进这个块**（`internal/hostconf/pluginconfig.go` 的 `PluginConfigDefaults`）：只加缺少的键，任何已存在的键——包括操作者改过的值和 `store` 记录——一个字节都不动，注释与顺序也保留；两种排版都支持（人工编辑通常是块式，CPA 自己保存时写成一行的 `{...}` 流式）。补完文件变化会触发一次热加载，第二轮已经没有缺失键，不会来回写。
+
+两个键刻意**不补**，因为它们的默认值就是「留空」：`plan_config_path`（留空 = 依次探测 `/CLIProxyAPI/config.yaml` → `/app/config.yaml`）和 `account_guard_scope_names`（留空 = 守所有条目）。把前者写成某个具体路径会取消回退，把后者写成非空会真的把守卫缩到某个账号上。
+
+副作用有一条要记住：**清空某个字段不代表「用默认值」**，下一次加载会把当前生效值写回去。要改就改成想要的值。这套写入和账号守卫共用同一个 `writeConfigAtomic`（同目录临时文件 + `rename`，保留权限），任何失败都只记一条 warn，不影响插件运行。
 
 ### 固定值（不在插件配置面板里显示）
 
@@ -165,6 +173,7 @@ plugins:
 | `plan_daily_enabled` | `true` | 另拉官方 Token 总量 / 成本 / 余额，最多每小时一次 |
 | `plan_usage_enabled` | `false` | 官方逐条用量拉取，**默认关闭**：页面不再渲染官方窗口，渠道区的缓存命中率改由本机记录计算，翻整个历史只为无人读取的数字。设为 `true` 可重新打开调试 |
 | `plan_usage_refresh` | `10m` | 官方逐条用量的增量拉取间隔（最小 1 分钟；只有大于 `plan_refresh` 时才起作用） |
+| `timezone` | `Asia/Shanghai` | 已废弃：v0.2.0 起页面按**浏览器本地时区**渲染官方接口返回的绝对时间，没有任何代码再读它（原来的消费方是已移除的本地逐请求统计）。**已从配置面板移除**（留着一个不工作的旋钮只会误导），键本身仍然可解析，旧配置块不会因此报错 |
 
 v0.1.x 的统计专用键（`require_routing_marker`、`unmatched_host_samples`、`ring_size`、`jsonl_enabled`、`jsonl_dir`、`retention_days`、`join_window`、`orphan_ttl`、`capture_cost`、`capture_cache`、`store_planning_reasoning`、`mask_api_key`、`log_events`）已从插件中删除。**留着它们不会导致加载失败**：未知键被忽略，新旧配置块都能读。
 
@@ -446,7 +455,7 @@ v0.1.x 的 `/stats`、`/events`、`/export` 三条路由已移除，请求它们
 | 上游返回 502，能否看出是哪个上游渠道 | **不能**。官方用量接口只记成功计费请求（实测 200 条里 0 条零 completion），失败不会出现在里面；CPA 的 usage 载荷里 `Failure.Body` 只有一句 `upstream stream returned an error payload`，不含上游渠道字样。上游错误原文（例如 `failed to generate stream from Vercel: … status 429 … Rate limit exceeded`）只在 CPA 自己的 `main.log` 里。渠道区只能按 CPA 凭据给出失败分布 |
 | `POST /v1/responses` 的请求能看到吗 | 能。渠道取自宿主每个请求结束后的 usage 回调，与客户端协议无关；旧的流式分片设计在这里才是盲区，已退役。**网关级渠道**（`finalProvider`）要看 `channel_log_enabled`：它在上游响应里，只有 CPA 请求日志能看到（CPA 翻译成 Responses 时丢了它，clinepass 上游也没有 `/responses` 端点） |
 | `channel_log` 一个 fact 都没有 / 目录里没有日志文件 | 按顺序查：① CPA 侧是否同时满足 `observability.logs.request-log: true` 与 `server.commercial-mode: false`（两个都满足才写文件）；② 改完是否**重启过容器**（实测 reload 成功也不出文件，见 [docs/channel-observation.md](docs/channel-observation.md) §2.2）；③ `logs-max-total-size-mb` 是否被设得太小（它和 `main.log` 共享；**CPA 的默认值是 0＝不清理**，不清理就只剩插件自己的读完即删，别把它留在 10 这种装不下一个请求的值上——高流量下一批日志会在插件扫到之前就被清理器删掉）；④ 插件侧 `channel_log_enabled` / `channel_log_dir` 是否指对；⑤ 文件 mtime 是否还在 `channel_log_min_age_seconds` 之内。健康度看 `/health` 的 `channel_log.health`（`scanned` / `parsed` / `parse_failures` / `skipped_young` / `last_error`） |
-| **从商店安装 / 更新之后**「真实渠道」整列变空，而安装之前的记录还有渠道 | 商店安装会写这个配置块（正常只写 `enabled` + `store` 并保留其余键，个别情况下整块只剩这两个——`config.yaml` 里这个块的 mtime 就是安装时刻），`channel_log_enabled` 落回默认 `false`，scanner 不再启动。判据：`/health` 的 `channel_log.enabled=false`、`facts_total=0`、`scanned=0`，且 `channel-log-<日期>.jsonl` 的 mtime 停在安装那一刻；安装之后的记录 `final_provider` 为空、之前的有值（fact 从落盘文件 join）。处理：把 `channel_log_enabled: true` 加回配置块，文件改动会直接触发一次 reload（实测不用重启容器、也不用重装插件），scanner 随即补扫积压的请求日志 |
+| **从商店安装 / 更新之后**「真实渠道」整列变空，而安装之前的记录还有渠道 | 商店安装会写这个配置块（正常只写 `enabled` + `store` 并保留其余键，个别情况下整块只剩这两个——`config.yaml` 里这个块的 mtime 就是安装时刻），`channel_log_enabled` 落回默认 `false`，scanner 不再启动。判据：`/health` 的 `channel_log.enabled=false`、`facts_total=0`、`scanned=0`，且 `channel-log-<日期>.jsonl` 的 mtime 停在安装那一刻；安装之后的记录 `final_provider` 为空、之前的有值（fact 从落盘文件 join）。处理：把 `channel_log_enabled: true` 加回配置块，文件改动会直接触发一次 reload（实测不用重启容器、也不用重装插件），scanner 随即补扫积压的请求日志。注意插件加载时会**自己把缺失的键补成默认值**（见「[面板里的默认值是怎么来的](#面板里的默认值是怎么来的)」），所以 `channel_log_enabled` 会被补成显式的 `false` 摆回面板里——改成 `true` 就对了 |
 | 打开 `channel_log_enabled` 有没有代价 | 有，且是明确测过的：CPA 请求日志里是**明文 prompt**，单个长上下文请求 4.0–5.7 MB，实测目录增速约 8 MB/分钟、日增量约 3.5 GB；代价对照（解码 p50 −2.4%、CPU 中位 +0.35 个百分点、内存中位 +16 MiB）见 [docs/channel-observation.md](docs/channel-observation.md) §4.2 / §4.3。默认关闭 |
 | 账号被守卫关了 / 想立刻放回 | 把那个条目的 `disabled` 改成 `false`（或删掉这一行）就行：守卫下一轮读到「我记着是我关的，但文件说是 enabled」会认输并清空连击与退避，不跟你抢。想彻底停掉这个功能：`account_guard_enabled: false`（它已经关掉的账号**不会**自动放回，要你自己改回来） |
 | 守卫不判定，页面写「还没有真实渠道数据，暂不判定」、状态列是灰色「未判定」 | 判定依赖真实渠道，先按上文把 `channel_log_enabled` 与 CPA 侧的 `observability.logs.request-log` 开起来；`/health` 的 `account_guard.judging=false` 就是这个状态。这一列此刻不会显示绿色「正常」，免得被当成“已确认没问题” |

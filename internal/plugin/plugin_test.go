@@ -116,13 +116,17 @@ func TestPanelHidesFixedDefaults(t *testing.T) {
 		"hosts", "require_routing_marker", "unmatched_host_samples", "ring_size",
 		"jsonl_enabled", "jsonl_dir", "retention_days", "join_window", "orphan_ttl",
 		"capture_cost", "capture_cache",
+		// timezone is dead: nothing reads it any more (the page renders the browser's own
+		// timezone), so it must not sit in the panel looking like a working knob. The key stays
+		// parseable in the configuration block for old installs.
+		"timezone",
 	} {
 		if fields[name] {
 			t.Errorf("%s must not be exposed in the configuration panel", name)
 		}
 	}
 	for _, name := range []string{
-		"timezone", "plan_config_path", "plan_refresh",
+		"plan_config_path", "plan_refresh",
 		// The channel observation knobs must stay reachable from the panel: turning the
 		// collector off is the documented rollback for the per-frame scan cost.
 		"channel_observe_enabled", "channel_store_dir", "channel_retention_days",
@@ -131,6 +135,10 @@ func TestPanelHidesFixedDefaults(t *testing.T) {
 		// the only way to turn it on is through the configuration block.
 		"channel_log_enabled", "channel_log_dir", "channel_log_delete_after_read",
 		"channel_log_min_age_seconds",
+		// The account guard's knobs, including its two switches.
+		"account_guard_enabled", "account_guard_dry_run", "account_guard_threshold",
+		"account_guard_min_enabled", "account_guard_scope_names",
+		"account_guard_reenable_minutes", "account_guard_max_disable_minutes",
 	} {
 		if !fields[name] {
 			t.Errorf("%s must stay in the configuration panel", name)

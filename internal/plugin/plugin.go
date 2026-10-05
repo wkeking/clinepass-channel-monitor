@@ -87,6 +87,9 @@ func LoadConfig(raw []byte) {
 	stopChannelLog()
 	stopAccountGuard()
 	state.SetConfig(cfg)
+	// 面板只显示配置块里存了什么；插件声明的字段 schema 没有默认值可显示，所以缺的键在这里
+	// 用「当前生效值」补上。只补缺失键，不动任何已有键（见 plugindefaults.go）。
+	seedPluginConfigDefaults(cfg)
 	if cfg.PlanEnabled {
 		state.SetPlan(plan.Start(cfg))
 	}
@@ -280,25 +283,24 @@ func buildRegistration() registration {
 			Author:           buildinfo.Author,
 			GitHubRepository: buildinfo.Repository,
 			ConfigFields: []pluginapi.ConfigField{
-				{Name: "timezone", Type: pluginapi.ConfigFieldTypeString, Description: "展示时区。官方接口返回的是绝对时间，页面按浏览器本地时区渲染，所以本版本没有代码读取它；保留是为了兼容既有配置块。"},
-				{Name: "plan_config_path", Type: pluginapi.ConfigFieldTypeString, Description: "容器内 CPA config.yaml 的路径，用于读取 Cline 凭据；留空时按 /CLIProxyAPI/config.yaml → /app/config.yaml 自动探测。"},
-				{Name: "plan_refresh", Type: pluginapi.ConfigFieldTypeString, Description: "官方套餐、限额与官方用量的轮询周期（例如 5m）。留空即用默认 5m，最小 1 分钟。"},
-				{Name: "channel_observe_enabled", Type: pluginapi.ConfigFieldTypeBoolean, Description: "逐请求渠道观测开关（默认 true）。开启时插件声明 usage_plugin 能力，宿主每完成一个请求回调一次并带上所落渠道（无论客户端说哪种协议），记录写入 JSONL 并聚合成「渠道」视图；关闭时不声明该能力，请求路径上零开销，但页面不再有新数据。"},
-				{Name: "channel_store_dir", Type: pluginapi.ConfigFieldTypeString, Description: "渠道记录的存放目录（默认 /CLIProxyAPI/logs/channel-observation），按天一个 channel-<date>.jsonl。"},
-				{Name: "channel_retention_days", Type: pluginapi.ConfigFieldTypeNumber, Description: "渠道记录保留天数（默认 3，上限 30）。"},
-				{Name: "channel_max_size_mb", Type: pluginapi.ConfigFieldTypeNumber, Description: "渠道记录目录的总大小上限，单位 MB（默认 512，下限 16）；超出后从最旧的文件开始删。"},
-				{Name: "channel_baseline_provider", Type: pluginapi.ConfigFieldTypeString, Description: "基准渠道名（默认 deepseek）。finalProvider/resolvedProvider 不等于它的请求计入「未落在基准渠道」。取值以页面「真实渠道」表里出现的名字为准，不一致时偏离比例会失真——管理页顶部的「配置自检」会把窗口内实际出现的渠道名列出来。"},
-				{Name: "channel_log_enabled", Type: pluginapi.ConfigFieldTypeBoolean, Description: "CPA 请求日志扫描开关（默认 false）。CPA 在 observability.logs.request-log 打开且 server.commercial-mode 关闭时，会把每个请求的完整调试日志写进 channel_log_dir，而上游 chat 响应原文里的 gateway.routing 渠道块只有这些日志能看到（CPA 翻译成 Responses 时丢掉了它）。开启后插件在旁路轮询该目录、解析 .log、把结论写入 channel_store_dir；关闭时不启协程、不访问目录。打开前请先确认 CPA 侧 request-log 已开、commercial-mode 已关并**重启过容器**；管理页顶部的「配置自检」会按当前状态列出还缺哪一项。"},
-				{Name: "channel_log_dir", Type: pluginapi.ConfigFieldTypeString, Description: "CPA 请求日志目录（默认 /CLIProxyAPI/logs，容器内路径）。只扫描该目录顶层的 *.log，不递归子目录，且跳过 main.log。"},
-				{Name: "channel_log_delete_after_read", Type: pluginapi.ConfigFieldTypeBoolean, Description: "解析并落盘后删除日志文件（默认 true）。这些文件含明文 prompt，读完即 unlink，磁盘占用只与一个轮询窗口有关；解析失败的文件不删。"},
-				{Name: "channel_log_min_age_seconds", Type: pluginapi.ConfigFieldTypeNumber, Description: "只读取 mtime 早于该秒数（默认 5）的日志文件，避免读到 CPA 正在写的半个请求；读取前后都比对文件大小，变大的文件留到下一轮。"},
-				{Name: "account_guard_enabled", Type: pluginapi.ConfigFieldTypeBoolean, Description: "账号守卫总开关（默认 false）。打开后，某个账号的真实渠道连续 N 次不是基准渠道（channel_baseline_provider）就把该 openai-compatibility 条目的 disabled 置 true，再按 account_guard_reenable_minutes 起、每次翻倍的退避自动放回。它会**写 CPA 的 config.yaml**（只改那一个标量、原子替换，改完由 CPA 自己的 watcher 热加载），所以默认关闭；第一次打开请让 account_guard_dry_run 保持 true。没有真实渠道数据时（channel_log_enabled=false 或渠道没 join 上）守卫不判定，也不会误关账号。"},
-				{Name: "account_guard_dry_run", Type: pluginapi.ConfigFieldTypeBoolean, Description: "只算不动（默认 true）。守卫照常算连击、写审计和页面状态，但不改 config.yaml，只在宿主日志里写 account guard (dry run)。先这样观察一两天，确认没有误报再改成 false。"},
-				{Name: "account_guard_threshold", Type: pluginapi.ConfigFieldTypeNumber, Description: "连续多少次非基准渠道就关这个账号（默认 3）。没有渠道块、没 join 上的请求既不计数也不清零；基准渠道命中一次清零。"},
-				{Name: "account_guard_min_enabled", Type: pluginapi.ConfigFieldTypeNumber, Description: "至少保留几个可用账号（默认 1，0 或负数按 1 处理）：守卫不会把账号全部关掉。"},
-				{Name: "account_guard_scope_names", Type: pluginapi.ConfigFieldTypeString, Description: "只守这些条目名（不区分大小写；YAML 列表或逗号分隔），留空 = 所有 openai-compatibility 条目。第一次上线建议只写一个账号名试。"},
-				{Name: "account_guard_reenable_minutes", Type: pluginapi.ConfigFieldTypeNumber, Description: "被守卫关掉的账号过多少分钟自动放回（默认 30；每次再犯翻倍，直到 account_guard_max_disable_minutes）。0 = 永不自动放回，只能人工改回。"},
-				{Name: "account_guard_max_disable_minutes", Type: pluginapi.ConfigFieldTypeNumber, Description: "退避上限（默认 360 分钟）：账号被关得越频繁，放回前等得越久，但不会超过这个值。"},
+				{Name: "plan_config_path", Type: pluginapi.ConfigFieldTypeString, Description: "默认：留空（自动探测 /CLIProxyAPI/config.yaml → /app/config.yaml）。容器内 CPA config.yaml 的路径，插件从中读取 Cline 凭据；只有自动探测选错文件时才需要填。"},
+				{Name: "plan_refresh", Type: pluginapi.ConfigFieldTypeString, Description: "默认 5m（最小 1 分钟）。官方套餐、限额与官方用量的轮询周期。"},
+				{Name: "channel_observe_enabled", Type: pluginapi.ConfigFieldTypeBoolean, Description: "默认 true。逐请求渠道观测开关。开启时插件声明 usage_plugin 能力，宿主每完成一个请求回调一次并带上所落渠道（无论客户端说哪种协议），记录写入 JSONL 并聚合成「渠道」视图；关闭时不声明该能力，请求路径上零开销，但页面不再有新数据。"},
+				{Name: "channel_store_dir", Type: pluginapi.ConfigFieldTypeString, Description: "默认 /CLIProxyAPI/logs/channel-observation。渠道记录的存放目录，按天一个 channel-<date>.jsonl。"},
+				{Name: "channel_retention_days", Type: pluginapi.ConfigFieldTypeNumber, Description: "默认 3（上限 30）。渠道记录保留天数。"},
+				{Name: "channel_max_size_mb", Type: pluginapi.ConfigFieldTypeNumber, Description: "默认 512（下限 16）。渠道记录目录的总大小上限，单位 MB；超出后从最旧的文件开始删。"},
+				{Name: "channel_baseline_provider", Type: pluginapi.ConfigFieldTypeString, Description: "默认 deepseek。基准渠道名：finalProvider/resolvedProvider 不等于它的请求计入「未落在基准渠道」。取值以页面「真实渠道」表里出现的名字为准，不一致时偏离比例会失真——管理页顶部的「配置自检」会把窗口内实际出现的渠道名列出来。"},
+				{Name: "channel_log_enabled", Type: pluginapi.ConfigFieldTypeBoolean, Description: "默认 false。CPA 请求日志扫描开关。CPA 在 observability.logs.request-log 打开且 server.commercial-mode 关闭时，会把每个请求的完整调试日志写进 channel_log_dir，而上游 chat 响应原文里的 gateway.routing 渠道块只有这些日志能看到（CPA 翻译成 Responses 时丢掉了它）。开启后插件在旁路轮询该目录、解析 .log、把结论写入 channel_store_dir；关闭时不启协程、不访问目录。打开前请先确认 CPA 侧 request-log 已开、commercial-mode 已关并**重启过容器**；管理页顶部的「配置自检」会按当前状态列出还缺哪一项。"},
+				{Name: "channel_log_dir", Type: pluginapi.ConfigFieldTypeString, Description: "默认 /CLIProxyAPI/logs（容器内路径）。CPA 请求日志目录。只扫描该目录顶层的 *.log，不递归子目录，且跳过 main.log。"},
+				{Name: "channel_log_delete_after_read", Type: pluginapi.ConfigFieldTypeBoolean, Description: "默认 true。解析并落盘后删除日志文件。这些文件含明文 prompt，读完即 unlink，磁盘占用只与一个轮询窗口有关；解析失败的文件不删。"},
+				{Name: "channel_log_min_age_seconds", Type: pluginapi.ConfigFieldTypeNumber, Description: "默认 5。只读取 mtime 早于该秒数的日志文件，避免读到 CPA 正在写的半个请求；读取前后都比对文件大小，变大的文件留到下一轮。"},
+				{Name: "account_guard_enabled", Type: pluginapi.ConfigFieldTypeBoolean, Description: "默认 false。账号守卫总开关。打开后，某个账号的真实渠道连续 N 次不是基准渠道（channel_baseline_provider）就把该 openai-compatibility 条目的 disabled 置 true，再按 account_guard_reenable_minutes 起、每次翻倍的退避自动放回。它会**写 CPA 的 config.yaml**（只改那一个标量、原子替换，改完由 CPA 自己的 watcher 热加载），所以默认关闭；第一次打开请让 account_guard_dry_run 保持 true。没有真实渠道数据时（channel_log_enabled=false 或渠道没 join 上）守卫不判定，也不会误关账号。"},
+				{Name: "account_guard_dry_run", Type: pluginapi.ConfigFieldTypeBoolean, Description: "默认 true。只算不动：守卫照常算连击、写审计和页面状态，但不改 config.yaml，只在宿主日志里写 account guard (dry run)。先这样观察一两天，确认没有误报再改成 false。"},
+				{Name: "account_guard_threshold", Type: pluginapi.ConfigFieldTypeNumber, Description: "默认 3。连续多少次非基准渠道就关这个账号。没有渠道块、没 join 上的请求既不计数也不清零；基准渠道命中一次清零。"},
+				{Name: "account_guard_min_enabled", Type: pluginapi.ConfigFieldTypeNumber, Description: "默认 1（0 或负数按 1 处理）。至少保留几个可用账号：守卫不会把账号全部关掉。"},
+				{Name: "account_guard_scope_names", Type: pluginapi.ConfigFieldTypeString, Description: "默认：留空（守所有 openai-compatibility 条目）。只守这些条目名（不区分大小写；YAML 列表或逗号分隔）。第一次上线建议只写一个账号名试。"},
+				{Name: "account_guard_reenable_minutes", Type: pluginapi.ConfigFieldTypeNumber, Description: "默认 30。被守卫关掉的账号过多少分钟自动放回；每次再犯翻倍，直到 account_guard_max_disable_minutes。0 = 永不自动放回，只能人工改回。"},
+				{Name: "account_guard_max_disable_minutes", Type: pluginapi.ConfigFieldTypeNumber, Description: "默认 360 分钟。退避上限：账号被关得越频繁，放回前等得越久，但不会超过这个值。"},
 			},
 		},
 		Capabilities: registrationCapability{

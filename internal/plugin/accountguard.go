@@ -393,14 +393,15 @@ func entryDisabled(raw []byte, name string, want bool) bool {
 
 // writeConfigAtomic replaces CPA's configuration file in one rename, keeping its permissions.
 // The plugin never writes that file any other way: a half-written file would be read by the host
-// watcher and could take the gateway down with it.
+// watcher and could take the gateway down with it. Both writers - the account guard and the
+// configuration-defaults seeder - go through here.
 func writeConfigAtomic(path string, data []byte) error {
 	mode := os.FileMode(0o600)
 	if info, errStat := os.Stat(path); errStat == nil {
 		mode = info.Mode().Perm()
 	}
 	dir := filepath.Dir(path)
-	tmp, errCreate := os.CreateTemp(dir, ".account-guard-*.tmp")
+	tmp, errCreate := os.CreateTemp(dir, ".clinepass-*.tmp")
 	if errCreate != nil {
 		return errCreate
 	}

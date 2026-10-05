@@ -139,6 +139,11 @@ type AccountState struct {
 	NextRetryAt     *time.Time `json:"next_retry_at,omitempty"`
 	LastChannel     string     `json:"last_channel,omitempty"`
 	LastSampleAt    *time.Time `json:"last_sample_at,omitempty"`
+	// DryRunReported is set once the current streak has been reported under DryRun. A streak is
+	// reported once, the first round it reaches the threshold - not only on the exact step that
+	// equals it, because a batch of requests can carry the streak past the threshold in one round
+	// (facts land in groups, and a restart re-reads a whole window).
+	DryRunReported bool `json:"dry_run_reported,omitempty"`
 }
 
 // NewState returns an empty state ready for Advance.
@@ -250,6 +255,7 @@ func (s *State) count(samples []Sample, index map[string]Account, opts Options) 
 			// Rule 2: a baseline channel resets the streak.
 			state.Streak = 0
 			state.Channels = nil
+			state.DryRunReported = false
 			continue
 		}
 		// Rule 3: any other channel extends the streak.
@@ -308,6 +314,7 @@ func (s *State) decide(accounts []Account, now time.Time, opts Options) []Decisi
 			state.DisabledByGuard = false
 			state.Streak = 0
 			state.Channels = nil
+			state.DryRunReported = false
 			state.NextRetryAt = nil
 			// DisableCount is kept so the next offence escalates the backoff.
 
@@ -317,6 +324,7 @@ func (s *State) decide(accounts []Account, now time.Time, opts Options) []Decisi
 			state.DisabledByGuard = false
 			state.Streak = 0
 			state.Channels = nil
+			state.DryRunReported = false
 			state.DisableCount = 0
 			state.NextRetryAt = nil
 
@@ -325,17 +333,22 @@ func (s *State) decide(accounts []Account, now time.Time, opts Options) []Decisi
 			// disable we are not responsible for.
 			state.Streak = 0
 			state.Channels = nil
+			state.DryRunReported = false
 
 		default:
 			if !opts.canJudge() || !inScope(account.Name) || state.Streak < opts.Threshold {
 				continue
 			}
 			if opts.DryRun {
-				// Rule 5: report once per streak, at the exact threshold step, and
-				// change nothing.
-				if state.Streak != opts.Threshold {
+				// Rule 5: report once per streak, the first round it is at or past the
+				// threshold, and change nothing. Requiring the exact threshold step would
+				// drop the report whenever a round carries the streak from below it to
+				// above it - which is normal, because the channel facts land in batches
+				// and a restart re-reads the whole window in one round.
+				if state.DryRunReported {
 					continue
 				}
+				state.DryRunReported = true
 				decisions = append(decisions, Decision{
 					Time:        now,
 					Name:        account.Name,

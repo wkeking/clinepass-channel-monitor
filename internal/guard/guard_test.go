@@ -300,6 +300,36 @@ func TestRule5DryRunOnce(t *testing.T) {
 	}
 }
 
+// TestRule5DryRunReportsABatchThatJumpsPastTheThreshold covers what the production host did on
+// 2026-10-05: the channel facts of several requests land in one round, so the streak goes from
+// below the threshold to above it without ever equalling it (2 -> 5 in the real case). A dry-run
+// deployment that stays silent exactly then is useless, so the report is "once per streak, the
+// first round at or past the threshold".
+func TestRule5DryRunReportsABatchThatJumpsPastTheThreshold(t *testing.T) {
+	opts := judgeOpts()
+	opts.DryRun = true
+	state := NewState()
+	accounts := []Account{acct("Cline1", cline1Key, false)}
+
+	decisions := state.Advance([]Sample{
+		smp(0, "r1", cline1Key, "openai-compatible-private"),
+		smp(1, "r2", cline1Key, "openai-compatible-private"),
+		smp(2, "r3", cline1Key, "openai-compatible-private"),
+		smp(3, "r4", cline1Key, "openai-compatible-private"),
+	}, accounts, at(4), opts)
+	if len(decisions) != 1 || decisions[0].Action != ActionDisableDry || decisions[0].Streak != 4 {
+		t.Fatalf("dry-run decisions = %+v, want one disable_dry_run at streak 4", decisions)
+	}
+	if slot := slotFor(t, state, cline1Key); slot.DisabledByGuard {
+		t.Fatalf("dry-run mutated guarded state: %+v", slot)
+	}
+
+	// Re-reading the same batch must not report a second time for the same streak.
+	if again := state.Advance([]Sample{smp(3, "r4", cline1Key, "openai-compatible-private")}, accounts, at(5), opts); len(again) != 0 {
+		t.Fatalf("dry-run reported twice in one streak: %+v", again)
+	}
+}
+
 // TestRule5DryRunDoesNotConsultMinEnabled documents that dry-run follows the literal
 // rule: it reports what a disable would look like even when the floor would block it.
 func TestRule5DryRunDoesNotConsultMinEnabled(t *testing.T) {

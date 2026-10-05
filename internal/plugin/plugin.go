@@ -85,13 +85,15 @@ func LoadConfig(raw []byte) {
 	}
 	stopObservation()
 	stopChannelLog()
+	stopAccountGuard()
 	state.SetConfig(cfg)
 	if cfg.PlanEnabled {
 		state.SetPlan(plan.Start(cfg))
 	}
 	startObservation(cfg)
 	startChannelLog(cfg)
-	hostapi.LogAsync("info", buildinfo.ID+": configured", map[string]string{
+	startAccountGuard(cfg)
+	fields := map[string]string{
 		"plan_enabled":      strconv.FormatBool(cfg.PlanEnabled),
 		"plan_refresh":      cfg.PlanRefresh.Or(config.DefaultPlanRefresh).String(),
 		"plan_usage":        strconv.FormatBool(cfg.PlanUsageEnabled),
@@ -101,7 +103,11 @@ func LoadConfig(raw []byte) {
 		"channel_baseline":  cfg.ChannelBaselineProvider,
 		"channel_log":       strconv.FormatBool(cfg.ChannelLogEnabled),
 		"channel_log_dir":   cfg.ChannelLogDir,
-	})
+	}
+	for key, value := range accountGuardLogFields(cfg) {
+		fields[key] = value
+	}
+	hostapi.LogAsync("info", buildinfo.ID+": configured", fields)
 	// 装完最容易漏的是网关渠道那一套开关（插件侧的 channel_log_enabled 默认 false，CPA 侧
 	// 的请求日志也默认关）。加载时把还缺的项说一次，和页面顶部「配置自检」卡片同源。
 	if hint := hostconf.GatewayHint(cfg); hint != "" {
@@ -286,6 +292,13 @@ func buildRegistration() registration {
 				{Name: "channel_log_dir", Type: pluginapi.ConfigFieldTypeString, Description: "CPA 请求日志目录（默认 /CLIProxyAPI/logs，容器内路径）。只扫描该目录顶层的 *.log，不递归子目录，且跳过 main.log。"},
 				{Name: "channel_log_delete_after_read", Type: pluginapi.ConfigFieldTypeBoolean, Description: "解析并落盘后删除日志文件（默认 true）。这些文件含明文 prompt，读完即 unlink，磁盘占用只与一个轮询窗口有关；解析失败的文件不删。"},
 				{Name: "channel_log_min_age_seconds", Type: pluginapi.ConfigFieldTypeNumber, Description: "只读取 mtime 早于该秒数（默认 5）的日志文件，避免读到 CPA 正在写的半个请求；读取前后都比对文件大小，变大的文件留到下一轮。"},
+				{Name: "account_guard_enabled", Type: pluginapi.ConfigFieldTypeBoolean, Description: "账号守卫总开关（默认 false）。打开后，某个账号的真实渠道连续 N 次不是基准渠道（channel_baseline_provider）就把该 openai-compatibility 条目的 disabled 置 true，再按 account_guard_reenable_minutes 起、每次翻倍的退避自动放回。它会**写 CPA 的 config.yaml**（只改那一个标量、原子替换，改完由 CPA 自己的 watcher 热加载），所以默认关闭；第一次打开请让 account_guard_dry_run 保持 true。没有真实渠道数据时（channel_log_enabled=false 或渠道没 join 上）守卫不判定，也不会误关账号。"},
+				{Name: "account_guard_dry_run", Type: pluginapi.ConfigFieldTypeBoolean, Description: "只算不动（默认 true）。守卫照常算连击、写审计和页面状态，但不改 config.yaml，只在宿主日志里写 account guard (dry run)。先这样观察一两天，确认没有误报再改成 false。"},
+				{Name: "account_guard_threshold", Type: pluginapi.ConfigFieldTypeNumber, Description: "连续多少次非基准渠道就关这个账号（默认 3）。没有渠道块、没 join 上的请求既不计数也不清零；基准渠道命中一次清零。"},
+				{Name: "account_guard_min_enabled", Type: pluginapi.ConfigFieldTypeNumber, Description: "至少保留几个可用账号（默认 1，0 或负数按 1 处理）：守卫不会把账号全部关掉。"},
+				{Name: "account_guard_scope_names", Type: pluginapi.ConfigFieldTypeString, Description: "只守这些条目名（不区分大小写；YAML 列表或逗号分隔），留空 = 所有 openai-compatibility 条目。第一次上线建议只写一个账号名试。"},
+				{Name: "account_guard_reenable_minutes", Type: pluginapi.ConfigFieldTypeNumber, Description: "被守卫关掉的账号过多少分钟自动放回（默认 30；每次再犯翻倍，直到 account_guard_max_disable_minutes）。0 = 永不自动放回，只能人工改回。"},
+				{Name: "account_guard_max_disable_minutes", Type: pluginapi.ConfigFieldTypeNumber, Description: "退避上限（默认 360 分钟）：账号被关得越频繁，放回前等得越久，但不会超过这个值。"},
 			},
 		},
 		Capabilities: registrationCapability{

@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Cline 渠道监控</title>
 <style>
-:root{color-scheme:light dark;--bg:#f5f6f8;--card:#fff;--fg:#15171c;--muted:#6a7280;--line:#e5e8ec;--accent:#2563eb;--accent-soft:rgba(37,99,235,.08);--warn:#b45309;--err:#b91c1c;--ok:#15803d;--chip:#eef2f7}
+:root{color-scheme:light dark;--bg:#f5f6f8;--card:#fff;--fg:#15171c;--muted:#666d7b;--line:#e5e8ec;--accent:#2563eb;--accent-soft:rgba(37,99,235,.08);--warn:#b45309;--err:#b91c1c;--ok:#14722f;--chip:#eef2f7}
 @media (prefers-color-scheme:dark){:root{--bg:#0d0f13;--card:#14181f;--fg:#e9ecf1;--muted:#8b95a5;--line:#222833;--accent:#60a5fa;--accent-soft:rgba(96,165,250,.12);--warn:#fbbf24;--err:#f87171;--ok:#4ade80;--chip:#1b2029}}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans CJK SC","PingFang SC","Microsoft YaHei",sans-serif;-webkit-font-smoothing:antialiased}
@@ -114,6 +114,14 @@ input::placeholder{color:var(--muted)}
 .check-done button{padding:3px 10px;font-size:13px}
 /* 窄屏：一行放不下时让摘要换行，别让配置键把页面撑出横向滚动条 */
 @media (max-width:820px){.check-item .body>summary{flex-wrap:wrap}.check-item .short{flex-basis:100%;white-space:normal;overflow:visible;text-overflow:clip}}
+/* 账号守卫（渠道表下面）：跟「配置自检」同一套字号与颜色语义，绿=正常、橙=观察中、红=被关掉 */
+#guard-flag{margin-left:8px;color:var(--muted);font-size:13px;font-weight:400;letter-spacing:0;text-transform:none}
+#guard-accounts td{font-size:13.5px}
+#guard-recent{font-size:13px}
+.guard-ok{color:var(--ok)}
+.guard-warn{color:var(--warn)}
+.guard-err{color:var(--err)}
+.guard-off{color:var(--muted)}
 .wrap{overflow-x:auto;border:1px solid var(--line);border-radius:14px;background:var(--card)}
 table{width:100%;border-collapse:separate;border-spacing:0}
 th,td{padding:10px 13px;text-align:left;white-space:nowrap;vertical-align:middle}
@@ -179,6 +187,13 @@ td.num,th.num{text-align:right}
       <div class="wrap"><table id="channel-providers"><thead>
         <tr><th>真实渠道</th><th class="num">请求</th><th class="num">占比</th><th class="num">偏离</th><th class="num">失败</th><th class="num">TTFT p50</th><th class="num">TTFT p90</th><th class="num">解码 p50</th><th class="num">输入</th><th class="num">输出</th><th class="num">缓存</th></tr>
       </thead><tbody></tbody></table></div>
+      <div id="guard-block" class="hidden">
+        <div class="sub" id="guard-note" style="margin:18px 0 8px;font-weight:600">账号守卫<span id="guard-flag"></span></div>
+        <div class="wrap"><table id="guard-accounts"><thead>
+          <tr><th>账号</th><th>当前渠道</th><th class="num">连击</th><th>状态</th><th>下次重试</th><th class="num">累计关闭</th></tr>
+        </thead><tbody></tbody></table></div>
+        <div class="sub" id="guard-recent" style="margin:8px 0 0"></div>
+      </div>
       <div class="sub" id="channel-timeline-note" style="margin:18px 0 8px;font-weight:600">时间线（每小时 · 最近 10 小时）</div>
       <div class="chart" id="channel-hour-chart"></div>
       <div class="wrap" style="margin-top:14px"><table id="channel-hours"><thead>
@@ -513,6 +528,58 @@ function renderConfigCheck(){
     (ignored?'<div class="check-done"><span>已忽略 '+int(ignored)+' 项。</span>'+
       '<button type="button" id="config-check-restore">恢复检查</button></div>':"")+
     "</div>";
+}
+
+// --- 账号守卫（渠道表下面）----------------------------------------------------
+// 状态来自 /health 的 account_guard。插件每 5 秒刷一次，页面每 60 秒读一次，所以这里看到的最多
+// 落后一分钟。它只回答三件事：守哪些账号、每个账号连着几次没落在基准渠道、守卫把它关过没有；
+// dry_run 时明确写明「只记录，不改 CPA 配置」。
+function guardStateText(account,status){
+  if(account.pending)return "写入待确认";
+  if(account.disabled)return account.by_guard?"已被守卫关闭":"已关闭（人工）";
+  if(status.enabled!==true)return "未启用";
+  // 没有真实渠道数据时不算数：写「未判定」而不是绿色「正常」，否则会被读成“已确认没问题”。
+  if(status.judging!==true)return "未判定";
+  const limit=n(status.threshold)||3;
+  if(n(account.streak)>0)return "观察中 "+n(account.streak)+"/"+limit;
+  return "正常";
+}
+
+function guardStateClass(account,status){
+  // 灰色 = 不是“正常”，也不是守卫在推进：待确认写入、人工关闭、未启用、暂不判定都归这一类。
+  if(account.pending)return "guard-off";
+  if(account.disabled)return account.by_guard?"guard-err":"guard-off";
+  if(status.enabled!==true)return "guard-off";
+  if(status.judging!==true)return "guard-off";
+  return n(account.streak)>0?"guard-warn":"guard-ok";
+}
+
+function renderAccountGuard(status){
+  const block=$("guard-block"),flag=$("guard-flag"),recent=$("guard-recent");
+  if(!block)return;
+  if(!status||!(status.accounts||[]).length){
+    block.classList.add("hidden");
+    return;
+  }
+  block.classList.remove("hidden");
+  const bits=[status.enabled===true?"已启用":"未启用"];
+  if(status.enabled===true&&status.dry_run===true)bits.push('<span class="guard-warn">试运行：只记录，不改 CPA 配置</span>');
+  if(status.enabled===true&&status.judging!==true)bits.push('<span class="guard-warn">还没有真实渠道数据，暂不判定</span>');
+  bits.push("基准渠道 <code>"+esc(status.baseline||"-")+"</code>");
+  bits.push("连续 "+int(n(status.threshold)||3)+" 次非基准就关该账号");
+  if(status.enabled===true&&status.dry_run!==true&&status.path)bits.push("写入 <code>"+esc(status.path)+"</code>");
+  if(status.error)bits.push('<span class="guard-err">'+esc(status.error)+'</span>');
+  flag.innerHTML=" · "+bits.join(" · ");
+  $("guard-accounts").querySelector("tbody").innerHTML=(status.accounts||[]).map(function(account){
+    return "<tr><td>"+esc(account.name||"-")+"</td>"+
+      "<td>"+(account.last_channel?esc(account.last_channel):"—")+"</td>"+
+      '<td class="num">'+int(n(account.streak))+"</td>"+
+      '<td class="'+guardStateClass(account,status)+'">'+esc(guardStateText(account,status))+"</td>"+
+      "<td>"+(account.next_retry_at?esc(fmtTime(account.next_retry_at)):"—")+"</td>"+
+      '<td class="num">'+int(n(account.disable_count))+"</td></tr>";
+  }).join("");
+  const history=status.recent||[],last=history.length?history[history.length-1]:null;
+  recent.textContent=last?("最近一次动作："+fmtTime(last.time)+" — "+(last.reason||last.action)):"还没有关闭或恢复动作";
 }
 
 // --- 渠道观测（GET /channel）--------------------------------------------------
@@ -1081,6 +1148,7 @@ async function load(){
     $("ver").textContent="v"+health.version;
     healthSnapshot=health;
     renderConfigCheck();
+    renderAccountGuard(health.account_guard||null);
     const bits=["运行 "+esc(health.uptime||"-")];
     if(health.plan_enabled===false)bits.push('<span class="plan-warn">套餐轮询未启用</span>');
     if(health.plan_usage&&health.plan_usage.enabled)bits.push("官方逐条用量已启用");

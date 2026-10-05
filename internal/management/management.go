@@ -16,6 +16,7 @@ import (
 
 	"github.com/wkeking/clinepass-channel-monitor/internal/abi"
 	"github.com/wkeking/clinepass-channel-monitor/internal/buildinfo"
+	"github.com/wkeking/clinepass-channel-monitor/internal/guard"
 	"github.com/wkeking/clinepass-channel-monitor/internal/hostapi"
 	"github.com/wkeking/clinepass-channel-monitor/internal/hostconf"
 	"github.com/wkeking/clinepass-channel-monitor/internal/observation"
@@ -119,6 +120,10 @@ type healthResponse struct {
 	// HostConfig is the read-only self-check of CPA's own configuration. It carries only
 	// booleans, a number, a directory name and key names, never a credential value.
 	HostConfig hostconf.Snapshot `json:"host_config"`
+	// AccountGuard is the account guard's last snapshot: which accounts it watches, what the
+	// configuration file says about each, the current streak and what it decided when. It is nil
+	// until the plugin has applied a configuration.
+	AccountGuard *guard.Status `json:"account_guard,omitempty"`
 	// Plan is the full subscription snapshot: which plan the account is on, how much of
 	// each rolling quota is used, the official totals and the per-credential view.
 	Plan        plan.Quota `json:"plan"`
@@ -183,6 +188,7 @@ func buildHealthResponse() healthResponse {
 		Uptime:             time.Since(pluginStart).Round(time.Second).String(),
 		UptimeSeconds:      int64(time.Since(pluginStart).Seconds()),
 		HostConfig:         hostconf.Read(cfg),
+		AccountGuard:       state.AccountGuard(),
 		PlanEnabled:        cfg.PlanEnabled,
 		RequestHeaderNames: headerNames,
 		RequestBearerLen:   bearerLen,

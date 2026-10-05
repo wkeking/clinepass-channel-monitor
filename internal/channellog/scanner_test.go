@@ -37,6 +37,13 @@ func newScanner(t *testing.T, options Options) (*Scanner, string, string) {
 	return New(options), dir, storeDir
 }
 
+// keepEverything is a retention window wide enough that the frozen request-log captures (their
+// logs are dated 2026-10-02) can never fall outside it. The tests below are about the scanner's
+// write path; pruning has its own test. Without this they quietly become calendar tests: the fact
+// sidecar is named after the request's own day, so once that day leaves the default three-day
+// window the file these tests read back is deleted by the retention pass that follows the write.
+const keepEverything = 100000
+
 // scannerHealth decodes the health snapshot the way a consumer sees it.
 func scannerHealth(t *testing.T, scanner *Scanner) map[string]json.RawMessage {
 	t.Helper()
@@ -55,7 +62,7 @@ func scannerHealth(t *testing.T, scanner *Scanner) map[string]json.RawMessage {
 // both files become facts, both carry a channel, both are written to the day file and both are
 // unlinked, because that is what the defaults ask for.
 func TestScannerTurnsFixturesIntoStoredFacts(t *testing.T) {
-	scanner, dir, storeDir := newScanner(t, Options{MinAge: 0, DeleteAfterRead: true})
+	scanner, dir, storeDir := newScanner(t, Options{MinAge: 0, DeleteAfterRead: true, RetentionDays: keepEverything})
 	plainPath := deployLog(t, dir, "req-1.log", fixtureLog(t, fixturePlain))
 	retryPath := deployLog(t, dir, "req-2.log", fixtureLog(t, fixtureRetry))
 
@@ -645,7 +652,7 @@ func TestHealthCarriesEveryKey(t *testing.T) {
 // without this the scanner re-parses every file on every pass and the fact store counts one
 // request many times, which corrupts every ratio computed from it.
 func TestSecondPassWithDeletionOffDoesNotStoreDuplicates(t *testing.T) {
-	scanner, dir, storeDir := newScanner(t, Options{MinAge: 0, DeleteAfterRead: false})
+	scanner, dir, storeDir := newScanner(t, Options{MinAge: 0, DeleteAfterRead: false, RetentionDays: keepEverything})
 	path := deployLog(t, dir, "req-1.log", fixtureLog(t, fixturePlain))
 
 	if stored, errScan := scanner.ScanOnce(); errScan != nil || stored != 1 {
@@ -685,7 +692,11 @@ func TestSecondPassWithDeletionOffDoesNotStoreDuplicates(t *testing.T) {
 func TestExpiredFactFilesArePruned(t *testing.T) {
 	scanner, dir, storeDir := newScanner(t, Options{MinAge: 0, RetentionDays: 3})
 	old := filepath.Join(storeDir, "channel-log-2020-01-01.jsonl")
-	current := filepath.Join(storeDir, "channel-log-2026-10-02.jsonl")
+	// The retention cutoff is "today minus RetentionDays-1", so the file that must survive is the
+	// one named after today. Naming a literal date here made the test a time bomb: it only passed
+	// while the wall clock happened to be that day.
+	today := time.Now().UTC().Format("2006-01-02")
+	current := filepath.Join(storeDir, "channel-log-"+today+".jsonl")
 	for _, path := range []string{old, current} {
 		if errWrite := os.WriteFile(path, []byte("{\"time\":\"2026-10-02T00:00:00Z\"}\n"), 0o644); errWrite != nil {
 			t.Fatalf("seed %s: %v", path, errWrite)

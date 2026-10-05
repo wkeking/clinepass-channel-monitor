@@ -1,5 +1,6 @@
 // Package state holds the process-wide runtime state: the active configuration, the
-// Cline usage poller, the channel-observation collector and the CPA request-log scanner.
+// Cline usage poller, the channel-observation collector, the CPA request-log scanner and the
+// account guard's last snapshot.
 //
 // The plugin package publishes it on load and on every reconfigure; the management API
 // reads it. Keeping it in its own package is what lets those packages depend on one
@@ -11,17 +12,34 @@ import (
 
 	"github.com/wkeking/clinepass-channel-monitor/internal/channellog"
 	"github.com/wkeking/clinepass-channel-monitor/internal/config"
+	"github.com/wkeking/clinepass-channel-monitor/internal/guard"
 	"github.com/wkeking/clinepass-channel-monitor/internal/observation"
 	"github.com/wkeking/clinepass-channel-monitor/internal/plan"
 )
 
 var (
-	mu   sync.RWMutex
-	cfg  = config.Default()
-	pol  *plan.Poller
-	obs  *observation.Recorder
-	clog *channellog.Scanner
+	mu          sync.RWMutex
+	cfg         = config.Default()
+	pol         *plan.Poller
+	obs         *observation.Recorder
+	clog        *channellog.Scanner
+	guardStatus *guard.Status
 )
+
+// AccountGuard returns the account guard's last published snapshot, or nil when the guard has
+// never run.
+func AccountGuard() *guard.Status {
+	mu.RLock()
+	defer mu.RUnlock()
+	return guardStatus
+}
+
+// SetAccountGuard publishes a new guard snapshot.
+func SetAccountGuard(value *guard.Status) {
+	mu.Lock()
+	guardStatus = value
+	mu.Unlock()
+}
 
 // Config returns the active configuration (defaults before the first load).
 func Config() config.Config {

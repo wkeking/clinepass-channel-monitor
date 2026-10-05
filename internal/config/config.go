@@ -35,6 +35,18 @@ const (
 	// scanner reads it. CPA appends to a file while the request is running, and a file read
 	// half-way yields a fact that describes no request.
 	DefaultChannelLogMinAgeSeconds = 5
+	// DefaultAccountGuardThreshold is how many consecutive non-baseline channels an account may
+	// serve before the guard disables it. Three is what the production traffic of 2026-10-04
+	// showed as the shortest honest signal: one account ran fifteen `fireworks` requests in a
+	// row, the third of them two minutes after the first.
+	DefaultAccountGuardThreshold = 3
+	// DefaultAccountGuardMinEnabled keeps the last account from being switched off: a guard that
+	// can empty the account pool turns one bad upstream episode into an outage.
+	DefaultAccountGuardMinEnabled = 1
+	// DefaultAccountGuardReenableMinutes is how long a guarded account stays disabled before the
+	// guard tries it again, and DefaultAccountGuardMaxDisableMinutes caps the doubling backoff.
+	DefaultAccountGuardReenableMinutes   = 30
+	DefaultAccountGuardMaxDisableMinutes = 360
 	// DefaultChannelRetentionDays and DefaultChannelMaxSizeMB bound the on-disk history.
 	// Retention is the primary limit; the size cap is the safety net for a traffic burst
 	// that makes a day of records far larger than usual.
@@ -125,6 +137,29 @@ type Config struct {
 	ChannelLogDeleteAfterRead bool `yaml:"channel_log_delete_after_read"`
 	// ChannelLogMinAgeSeconds is how old a file must be before it is read.
 	ChannelLogMinAgeSeconds int `yaml:"channel_log_min_age_seconds"`
+
+	// ---- 账号守卫（默认关闭）----
+	// AccountGuardEnabled switches the guard on. It edits CPA's own configuration file, so it is
+	// off by default and the first deployment day is meant to run with DryRun still on.
+	AccountGuardEnabled bool `yaml:"account_guard_enabled"`
+	// AccountGuardDryRun computes and reports the decisions without touching the file. It is on
+	// by default: a switch that edits the host's own configuration has to be turned on
+	// deliberately, never by omission.
+	AccountGuardDryRun bool `yaml:"account_guard_dry_run"`
+	// AccountGuardThreshold is how many consecutive non-baseline channels disable an account.
+	AccountGuardThreshold int `yaml:"account_guard_threshold"`
+	// AccountGuardMinEnabled is how many enabled accounts must stay behind. The guard treats zero
+	// and negative values as one: it is allowed to close an account, never the account pool.
+	AccountGuardMinEnabled int `yaml:"account_guard_min_enabled"`
+	// AccountGuardScopeNames limits the guard to these entry names (case-insensitive); empty
+	// means every openai-compatibility entry.
+	AccountGuardScopeNames []string `yaml:"account_guard_scope_names"`
+	// AccountGuardReenableMinutes is how long a guarded account stays disabled before the guard
+	// enables it again; every repeat doubles it up to AccountGuardMaxDisableMinutes. 0 means the
+	// guard never re-enables anything by itself.
+	AccountGuardReenableMinutes int `yaml:"account_guard_reenable_minutes"`
+	// AccountGuardMaxDisableMinutes caps that backoff.
+	AccountGuardMaxDisableMinutes int `yaml:"account_guard_max_disable_minutes"`
 }
 
 // Duration accepts both Go duration strings ("5s", "1m30s") and plain numbers,
@@ -190,6 +225,13 @@ func Default() Config {
 		ChannelLogDir:             DefaultChannelLogDir,
 		ChannelLogDeleteAfterRead: true,
 		ChannelLogMinAgeSeconds:   DefaultChannelLogMinAgeSeconds,
+
+		AccountGuardEnabled:           false,
+		AccountGuardDryRun:            true,
+		AccountGuardThreshold:         DefaultAccountGuardThreshold,
+		AccountGuardMinEnabled:        DefaultAccountGuardMinEnabled,
+		AccountGuardReenableMinutes:   DefaultAccountGuardReenableMinutes,
+		AccountGuardMaxDisableMinutes: DefaultAccountGuardMaxDisableMinutes,
 	}
 }
 
@@ -294,6 +336,33 @@ func normalize(cfg *Config) {
 		// A negative age would mean "read a file before it exists"; zero is allowed and means
 		// "read it as soon as it appears", which is what a short-lived debug window wants.
 		cfg.ChannelLogMinAgeSeconds = DefaultChannelLogMinAgeSeconds
+	}
+	if cfg.AccountGuardThreshold <= 0 {
+		cfg.AccountGuardThreshold = DefaultAccountGuardThreshold
+	}
+	if cfg.AccountGuardMinEnabled < 0 {
+		cfg.AccountGuardMinEnabled = DefaultAccountGuardMinEnabled
+	}
+	if cfg.AccountGuardReenableMinutes < 0 {
+		// Negative has no meaning for "how long until we try again"; zero already says never.
+		cfg.AccountGuardReenableMinutes = 0
+	}
+	if cfg.AccountGuardMaxDisableMinutes <= 0 {
+		cfg.AccountGuardMaxDisableMinutes = DefaultAccountGuardMaxDisableMinutes
+	}
+	if cfg.AccountGuardReenableMinutes > cfg.AccountGuardMaxDisableMinutes {
+		cfg.AccountGuardMaxDisableMinutes = cfg.AccountGuardReenableMinutes
+	}
+	scope := make([]string, 0, len(cfg.AccountGuardScopeNames))
+	for _, name := range cfg.AccountGuardScopeNames {
+		if trimmed := strings.TrimSpace(name); trimmed != "" {
+			scope = append(scope, trimmed)
+		}
+	}
+	if len(scope) == 0 {
+		cfg.AccountGuardScopeNames = nil
+	} else {
+		cfg.AccountGuardScopeNames = scope
 	}
 }
 

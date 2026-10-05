@@ -338,7 +338,9 @@ key、某个自建中转），而「真实渠道不是 deepseek」这条规则�
 退避计时、去重表；原子写、权限 0600）与 `account-guard.jsonl`（一行一次决策，含触发它的那几条
 渠道与时间）。`/health` 的 `account_guard` 是同一份状态的快照（账号名、渠道名、计数、时间，
 没有 key），页面「渠道」区下方的**账号守卫**表直接渲染它。人工把账号改回 `disabled: false`，
-守卫下一轮会认输并清空自己的记忆，不跟你抢。
+守卫下一轮会认输并清空自己的记忆，不跟你抢。表下面那行「最近一次动作」在运行实例自己没做过
+决策时（**每次插件重载都会换一个实例**）从 `account-guard.jsonl` 的尾部读回：连击存在状态文件
+里、决策存在审计文件里，两者都是持久的，所以重载不会让页面失去对当前连击的解释。
 
 **代价**：守卫每 5 秒读一次最近一小时的记录（样本按 `provider|request_id` 去重，所以重复读同一
 小时不会重复计数），状态文件封顶约 0.3 MB（去重表 4096 条）、每 15 秒原子写一次，折算约
@@ -425,7 +427,7 @@ v0.1.x 的 `/stats`、`/events`、`/export` 三条路由已移除，请求它们
 | `plugin` / `version` / `enabled` / `uptime` | 插件标识、版本、配置里的启用开关与本次加载后的运行时长 |
 | `uptime_seconds` | 同一段运行时长的秒数（页面「配置自检」用它区分「改了配置但没重启容器」） |
 | `host_config` | 插件对 CPA 自己 `config.yaml` 的**只读**快照，供页面「配置自检」使用：`path`、`readable`、`error`、`plugins_enabled`、`plugins_dir`、`request_log`、`logs_max_total_size_mb`、`commercial_mode`、`plugin_block_keys`（`plugins.configs.clinepass-channel-monitor` 这个块的键名，按文件里的顺序）、`store_version` / `store_source`。**只有布尔、数字和键名，没有任何凭据值**；键缺失时那个字段直接不出现，而不是拿 `false` 冒充「读到了 false」 |
-| `account_guard` | 账号守卫的快照（`account_guard_enabled` 为 false 时也在，页面据此显示「未启用」）：`enabled`、`dry_run`、`judging`（有没有真实渠道数据可判）、`path`（会写哪个文件）、`entries`、`threshold`、`baseline`、`last_tick_at`、`last_action_at`、`error`、`accounts[]`、`recent[]`（最近 10 次决策）。`entries` 与 `accounts[]` **只含 Cline 条目**（按 `hosts` 的 host 规则，或条目名恰为 `Cline` 过滤），每条是 `name` / `provider_key` / `disabled` / `by_guard` / `streak` / `last_channel` / `last_sample_at` / `next_retry_at` / `disable_count` / `pending`。**只有账号名、渠道名、计数与时间，没有 key、也没有 base-url**；插件还没应用过配置时不出现 |
+| `account_guard` | 账号守卫的快照（`account_guard_enabled` 为 false 时也在，页面据此显示「未启用」）：`enabled`、`dry_run`、`judging`（有没有真实渠道数据可判）、`path`（会写哪个文件）、`entries`、`threshold`、`baseline`、`last_tick_at`、`last_action_at`、`error`、`accounts[]`、`recent[]`（最近 10 次决策；运行实例自己没做过决策时从审计文件尾部读回，所以插件重载后页面仍能解释表格里的连击）。`entries` 与 `accounts[]` **只含 Cline 条目**（按 `hosts` 的 host 规则，或条目名恰为 `Cline` 过滤），每条是 `name` / `provider_key` / `disabled` / `by_guard` / `streak` / `last_channel` / `last_sample_at` / `next_retry_at` / `disable_count` / `pending`。**只有账号名、渠道名、计数与时间，没有 key、也没有 base-url**；插件还没应用过配置时不出现 |
 | `plan` | 完整套餐快照，页面直接渲染它：`available`、`source`、`account`、`plan_name`、`plan_price`、`plan_description`、`plan_interval` / `plan_type` / `plan_active`、`plan_benefits[]`、`plan_period_start` / `plan_period_end` / `plan_canceled_at`、`limits[]`（`percent_used` / `resets_at` / `resets_in`）、`tokens`（31 天输入/输出/总量、成本、余额、计费条目数）、`usage`、`fetched_at`、`error`、`accounts[]`；`accounts[].windows[1h\|24h\|7d]`（**仅 `plan_usage_enabled: true` 时存在**）里另有 `models[]`（按模型拆分：`model` / `requests` / `input_tokens` / `output_tokens` / `cached_tokens` / `cache_ratio` / `cost_usd` / `credits_used`）、`stream_requests`、`byok_requests`、`credits_used` |
 | `plan_enabled` | 官方套餐轮询是否开启 |
 | `plan_usage` | 官方逐条用量的采集状态：`enabled`（默认 `false`）、`items`、`oldest`、`fetched_at`、`truncated`、`failures`、`retry_at`、`error` |

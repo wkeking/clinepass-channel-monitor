@@ -68,6 +68,46 @@ func TestHealthCarriesTheAccountGuard(t *testing.T) {
 	}
 }
 
+// TestHealthFillsTheLastActionFromTheAuditFile pins the fallback the page depends on after a
+// plugin reload: the published snapshot is one runner's memory, so any process that did not make
+// the decision carries no list while the table still shows the streak it produced. The audit file
+// is shared, so /health reads the tail of it rather than letting the page say "no action yet" next
+// to an account that is past the threshold.
+func TestHealthFillsTheLastActionFromTheAuditFile(t *testing.T) {
+	dir := t.TempDir()
+	loadTestConfig([]byte("channel_store_dir: " + dir + "\n"))
+	if errAppend := guard.NewStore(dir).AppendAudit(guard.Decision{
+		Time: time.Date(2026, 10, 5, 4, 0, 0, 0, time.UTC), Name: "Cline3",
+		ProviderKey: "openai-compatible-cline3", Action: guard.ActionDisableDry, Streak: 6,
+		Reason: "dry-run：连续 6 次真实渠道不是基准渠道 deepseek，本应禁用该账号",
+	}); errAppend != nil {
+		t.Fatalf("append audit: %v", errAppend)
+	}
+	state.SetAccountGuard(&guard.Status{
+		Enabled: true, DryRun: true, Threshold: 3, Baseline: "deepseek",
+	})
+	defer state.SetAccountGuard(nil)
+
+	req := pluginAPIRequest(BasePath + "/health")
+	resp := route(&req)
+	if resp.StatusCode != 200 {
+		t.Fatalf("health status = %d, want 200", resp.StatusCode)
+	}
+	var decoded healthResponse
+	if errUnmarshal := json.Unmarshal(resp.Body, &decoded); errUnmarshal != nil {
+		t.Fatalf("health payload: %v", errUnmarshal)
+	}
+	if decoded.AccountGuard == nil {
+		t.Fatal("health payload is missing account_guard")
+	}
+	if len(decoded.AccountGuard.Recent) != 1 || decoded.AccountGuard.Recent[0].Action != guard.ActionDisableDry {
+		t.Fatalf("recent = %#v, want the decision read back from the audit file", decoded.AccountGuard.Recent)
+	}
+	if decoded.AccountGuard.Recent[0].Streak != 6 {
+		t.Errorf("recent streak = %d, want 6", decoded.AccountGuard.Recent[0].Streak)
+	}
+}
+
 // TestAccountGuardBlockIsOnThePage pins the rendering contract: the block exists, it is hidden
 // until the snapshot arrives, and it says out loud that a dry run does not touch the file.
 func TestAccountGuardBlockIsOnThePage(t *testing.T) {

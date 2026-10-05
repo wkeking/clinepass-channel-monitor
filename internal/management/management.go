@@ -16,6 +16,7 @@ import (
 
 	"github.com/wkeking/clinepass-channel-monitor/internal/abi"
 	"github.com/wkeking/clinepass-channel-monitor/internal/buildinfo"
+	"github.com/wkeking/clinepass-channel-monitor/internal/config"
 	"github.com/wkeking/clinepass-channel-monitor/internal/guard"
 	"github.com/wkeking/clinepass-channel-monitor/internal/hostapi"
 	"github.com/wkeking/clinepass-channel-monitor/internal/hostconf"
@@ -178,6 +179,32 @@ func firstNonEmpty(values ...string) string {
 
 var pluginStart = time.Now()
 
+// accountGuardRecentLimit is how many past decisions the page shows under the guard table. It
+// matches the runner's own ring.
+const accountGuardRecentLimit = 10
+
+// accountGuardSnapshot returns the guard's published snapshot, with its recent decisions filled in
+// from the audit file when the snapshot carries none.
+//
+// The published snapshot is a runner's memory, and a plugin reload starts a new runner: the streaks
+// come back from the state file (so the table is right), while the decision that explains them
+// lives only in the audit log, which every process shares. Measured on the production host on
+// 2026-10-05: the audit file already held a dry-run decision while /health carried no recent list,
+// so the page said "还没有关闭或恢复动作" next to an account that was past the threshold.
+func accountGuardSnapshot(cfg config.Config) *guard.Status {
+	status := state.AccountGuard()
+	if status == nil || len(status.Recent) > 0 {
+		return status
+	}
+	recent, errRecent := guard.NewStore(cfg.ChannelStoreDir).RecentAudit(accountGuardRecentLimit)
+	if errRecent != nil || len(recent) == 0 {
+		return status
+	}
+	clone := *status
+	clone.Recent = recent
+	return &clone
+}
+
 func buildHealthResponse() healthResponse {
 	cfg := state.Config()
 	headerNames, bearerLen := plan.BearerDiagnostics()
@@ -188,7 +215,7 @@ func buildHealthResponse() healthResponse {
 		Uptime:             time.Since(pluginStart).Round(time.Second).String(),
 		UptimeSeconds:      int64(time.Since(pluginStart).Seconds()),
 		HostConfig:         hostconf.Read(cfg),
-		AccountGuard:       state.AccountGuard(),
+		AccountGuard:       accountGuardSnapshot(cfg),
 		PlanEnabled:        cfg.PlanEnabled,
 		RequestHeaderNames: headerNames,
 		RequestBearerLen:   bearerLen,

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // marshalState renders a state the way the store would, for round-trip comparisons.
@@ -16,6 +17,56 @@ func marshalState(t *testing.T, state *State) string {
 		t.Fatalf("marshal state: %v", err)
 	}
 	return string(data)
+}
+
+// TestRecentAuditReturnsTheTail pins the reader the page falls back to: the decisions, oldest
+// first, bounded to the limit, and tolerant of the torn line a live append can leave behind.
+func TestRecentAuditReturnsTheTail(t *testing.T) {
+	dir := t.TempDir()
+	store := NewStore(dir)
+	if got, errRecent := store.RecentAudit(5); errRecent != nil || got != nil {
+		t.Fatalf("RecentAudit on a missing file = (%v, %v), want (nil, nil)", got, errRecent)
+	}
+	for i := 1; i <= 4; i++ {
+		decision := Decision{
+			Time: guardBase.Add(time.Duration(i) * time.Minute), Name: "Cline1",
+			ProviderKey: cline1Key, Action: ActionDisableDry, Streak: i, Reason: "test",
+		}
+		if errAppend := store.AppendAudit(decision); errAppend != nil {
+			t.Fatalf("append %d: %v", i, errAppend)
+		}
+	}
+	// One unparseable line in the middle must not hide the rest of the history.
+	file, errOpen := os.OpenFile(filepath.Join(dir, AuditFileName), os.O_APPEND|os.O_WRONLY, 0o600)
+	if errOpen != nil {
+		t.Fatalf("open audit: %v", errOpen)
+	}
+	if _, errWrite := file.WriteString("{not json\n"); errWrite != nil {
+		t.Fatalf("write torn line: %v", errWrite)
+	}
+	if errClose := file.Close(); errClose != nil {
+		t.Fatalf("close audit: %v", errClose)
+	}
+
+	all, errAll := store.RecentAudit(10)
+	if errAll != nil {
+		t.Fatalf("RecentAudit: %v", errAll)
+	}
+	if len(all) != 4 {
+		t.Fatalf("RecentAudit(10) returned %d entries, want 4: %+v", len(all), all)
+	}
+	for index, decision := range all {
+		if decision.Streak != index+1 {
+			t.Errorf("entry %d streak = %d, want %d (oldest first)", index, decision.Streak, index+1)
+		}
+	}
+	tail, errTail := store.RecentAudit(2)
+	if errTail != nil {
+		t.Fatalf("RecentAudit(2): %v", errTail)
+	}
+	if len(tail) != 2 || tail[0].Streak != 3 || tail[1].Streak != 4 {
+		t.Fatalf("RecentAudit(2) = %+v, want the last two decisions", tail)
+	}
 }
 
 // TestStoreLoadMissingFile covers the "no file yet" contract.

@@ -1,6 +1,7 @@
 package guard
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
@@ -116,6 +117,55 @@ func (s *Store) Save(state *State) error {
 	renamed = true
 	syncDir(dir)
 	return nil
+}
+
+// RecentAudit returns the last limit decisions from the audit file, oldest first, and nil when
+// there are none. Unparseable lines are skipped rather than failing the read: the file is appended
+// to by a live process, and one torn line must not hide the rest of the history.
+//
+// This is the durable record of what the guard decided. The in-memory list a runner keeps is only
+// a cache of it, and that cache is empty in every process that did not personally make the
+// decision - which is exactly what a plugin reload leaves behind.
+func (s *Store) RecentAudit(limit int) ([]Decision, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	file, errOpen := os.Open(s.auditPath())
+	if errOpen != nil {
+		if errors.Is(errOpen, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read account guard audit: %w", errOpen)
+	}
+	defer func() { _ = file.Close() }()
+
+	ring := make([]Decision, 0, limit)
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		line := bytes.TrimSpace(scanner.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+		var decision Decision
+		if errDecode := json.Unmarshal(line, &decision); errDecode != nil {
+			continue
+		}
+		if len(ring) == limit {
+			ring = append(ring[:0], ring[1:]...)
+		}
+		ring = append(ring, decision)
+	}
+	if errScan := scanner.Err(); errScan != nil {
+		return nil, fmt.Errorf("read account guard audit: %w", errScan)
+	}
+	if len(ring) == 0 {
+		return nil, nil
+	}
+	return ring, nil
 }
 
 // AppendAudit appends one decision as a JSON line and fsyncs it.

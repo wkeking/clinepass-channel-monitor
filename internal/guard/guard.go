@@ -218,10 +218,6 @@ func (s *State) count(samples []Sample, index map[string]Account, opts Options) 
 		if key == "" {
 			continue
 		}
-		if s.markSeen(sampleToken(sample, key)) {
-			// Consumed in an earlier round (e.g. before a restart): never count twice.
-			continue
-		}
 		account, known := index[key]
 		if !known {
 			// Rule: only providers that appear in accounts are counted at all.
@@ -229,7 +225,18 @@ func (s *State) count(samples []Sample, index map[string]Account, opts Options) 
 		}
 		channel := strings.TrimSpace(sample.Channel)
 		if channel == "" {
-			// Rule 1: no channel block, neither +1 nor reset.
+			// Rule 1: no channel block, neither +1 nor reset - and not consumed either. The
+			// channel is read out of CPA's request log, which the scanner only picks up seconds
+			// after the request ends (channel_log_min_age_seconds plus a poll), while this runs
+			// every few seconds over the whole window. So "no channel" mostly means "the fact has
+			// not landed yet", and the same request has to be looked at again next round. Marking
+			// it seen here consumed it without counting it: on the production host on 2026-10-05
+			// every recent off-baseline request of one account sat in the seen ring while its
+			// streak stayed at 1.
+			continue
+		}
+		if s.markSeen(sampleToken(sample, key)) {
+			// Consumed in an earlier round (e.g. before a restart): never count twice.
 			continue
 		}
 		state := s.account(key)

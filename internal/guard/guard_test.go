@@ -82,6 +82,48 @@ func TestRule1EmptyChannelIgnored(t *testing.T) {
 	}
 }
 
+// TestAJoiningChannelIsCountedWhenTheFactLands pins the defect the production host showed on
+// 2026-10-05: an account had four off-baseline requests inside the hour, all four were in the seen
+// ring, and its streak was still 1. The cause is the order of the two checks below - the record
+// exists the moment CPA's usage hook fires, but its channel only exists after the request log has
+// been written and parsed, so the first round sees the record with an empty channel. Consuming it
+// there loses the request for good; the same request has to be looked at again once the fact lands.
+func TestAJoiningChannelIsCountedWhenTheFactLands(t *testing.T) {
+	state := NewState()
+	accounts := []Account{acct("Cline1", cline1Key, false), witness()}
+
+	// Round 1: the record exists, the fact has not landed yet.
+	state.Advance([]Sample{smp(0, "r1", cline1Key, "")}, accounts, at(1), judgeOpts())
+	if got := slotFor(t, state, cline1Key).Streak; got != 0 {
+		t.Fatalf("streak with an empty channel = %d, want 0", got)
+	}
+
+	// Round 2: the same request, now with its channel. It has to count exactly once.
+	joined := []Sample{smp(0, "r1", cline1Key, "openai-compatible-private")}
+	if decisions := state.Advance(joined, accounts, at(2), judgeOpts()); len(decisions) != 0 {
+		t.Fatalf("decisions = %+v, want none below the threshold", decisions)
+	}
+	if got := slotFor(t, state, cline1Key).Streak; got != 1 {
+		t.Fatalf("streak after the channel landed = %d, want 1", got)
+	}
+
+	// Round 3: re-reading the same joined sample must not count it twice.
+	state.Advance(joined, accounts, at(3), judgeOpts())
+	if got := slotFor(t, state, cline1Key).Streak; got != 1 {
+		t.Fatalf("streak after re-reading the same request = %d, want 1", got)
+	}
+
+	// Two more off-baseline requests reach the threshold, with the first still counted once.
+	decisions := state.Advance([]Sample{
+		joined[0],
+		smp(1, "r2", cline1Key, "openai-compatible-private"),
+		smp(2, "r3", cline1Key, "openai-compatible-private"),
+	}, accounts, at(4), judgeOpts())
+	if len(decisions) != 1 || decisions[0].Streak != 3 || decisions[0].Action != ActionDisable {
+		t.Fatalf("decisions = %+v, want one disable at streak 3", decisions)
+	}
+}
+
 // TestRule2BaselineResetsCaseInsensitive covers rule 2.
 func TestRule2BaselineResetsCaseInsensitive(t *testing.T) {
 	state := NewState()

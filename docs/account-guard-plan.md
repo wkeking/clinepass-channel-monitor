@@ -258,3 +258,11 @@ account_guard_management_key: ""      # 留空 = 走「直接最小节点编辑�
 - `plugin`：写成功 / 写失败保持 pending / 已经是想要的值就不写 / `pending` 覆盖读到的状态 / start-stop 发布快照 / 原子写保留权限且不留临时文件，各有单测；
 - 真实渲染（1920×1080，浅色 + 深色）：试运行混合态、正式运行、无渠道数据、老版本无 `account_guard` 四种，`bodyWidth = docWidth = 1905`，控制台无错误；视觉验收见下一条；
 - 注意：本轮的 `go test ./...` 第一次是**红的**，原因不在本功能：`internal/channellog` 有两个测试把 `channel-log-2026-10-02.jsonl` 当成「今天」，到了 10-05 就被 3 天保留期删掉了。已把它们改成用足够宽的保留窗口（这两个测试测的是扫描/去重，不是保留），保留策略本身仍由 `TestExpiredFactFilesArePruned` 覆盖。
+
+### 7.1 上线后修掉的三处（2026-10-05，都在生产上实测到）
+
+| 问题 | 症状 | 修法 |
+|---|---|---|
+| 去重标在了「还没拿到渠道」的样本上 | 某个账号一小时里有 4 条偏离渠道，连击却一直是 1：这 4 条的 token 全在去重表里，但一条都没计过 | `State.count` 把 `markSeen` 移到「账号在名单里 + 渠道非空」之后。渠道来自 CPA 请求日志，比记录本身晚几秒落地，所以「没有渠道」多数是「fact 还没到」；在那里消费掉这一天就永远补不回来 |
+| `rename` 写不动 bind mount 上的 config.yaml | 面板默认值一条没写进去；账号守卫真去关账号时同样会失败（之前一直 dry-run 没暴露）。实测报错 `rename /CLIProxyAPI/.clinepass-*.tmp /CLIProxyAPI/config.yaml: device or resource busy` | `writeConfigAtomic` 在 `rename` 失败后退回原地覆写（`O_TRUNC` + write + fsync），和 CPA 自己保存配置的做法一致（`internal/config/config_yaml.go` 用 `os.WriteFile`） |
+| 守卫会去看非 Cline 的条目 | 生产列表里有官方 DeepSeek 与 ugq.ai 两条无关账号，也在「账号守卫」表里 | 守卫先用凭据发现那条规则过滤：`base-url` host 命中 `hosts`，或条目名恰为 `Cline`；其余条目完全不进判定（`config.Config.IsClineEntry`）。生产上 `entries` 从 5 降到 3 |

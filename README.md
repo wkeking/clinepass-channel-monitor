@@ -145,7 +145,7 @@ plugins:
 | `channel_log_min_age_seconds` | `5` | 只读 mtime 早于该秒数的日志文件，避免读到 CPA 正在写的半个请求；读前读后都比对文件大小，变大的留到下一轮 |
 | `account_guard_enabled` | `false` | 账号守卫总开关。打开后，某个账号的真实渠道连续 `account_guard_threshold` 次不是 `channel_baseline_provider` 时，插件把该 `openai-compatibility` 条目的 `disabled` 置 true；它和上面「[面板里的默认值是怎么来的](#面板里的默认值是怎么来的)」那套回填，是本插件**仅有的两个会写 CPA 配置的行为**，详见「[账号守卫](#账号守卫可选默认关闭)」 |
 | `account_guard_dry_run` | `true` | 只算不改：照样算连击、写审计与页面状态，但**不动任何 `openai-compatibility` 条目**，宿主日志里写 `account guard (dry run) …`。上线头一两天应该保持 true |
-| `account_guard_threshold` | `3` | 连续几次非基准渠道算问题。没有渠道块、没 join 上的请求既不计数也不清零；命中一次基准渠道清零 |
+| `account_guard_threshold` | `3` | 连续几次非基准渠道算问题。没有渠道块、没 join 上的请求既不计数也不清零，而且**会留到下一轮再看**：渠道来自 CPA 请求日志，请求刚结束时那份日志还没被扫描到（要等 `channel_log_min_age_seconds`），等渠道块落地后这一条仍然会计数；命中一次基准渠道清零 |
 | `account_guard_min_enabled` | `1` | 至少保留几个可用账号（0 或负数按 1 处理）：守卫不会把账号全部关掉 |
 | `account_guard_scope_names` | 空 | 在「只守 Cline 条目」之上再缩小范围：只守这些条目名（不区分大小写）；留空 = 所有命中 `hosts` 的条目（或名字恰为 `Cline` 的条目）。第一次上线建议只写一个账号名 |
 | `account_guard_reenable_minutes` | `30` | 被守卫关掉的账号过多久自动放回；每再犯一次翻倍，直到 `account_guard_max_disable_minutes`。`0` = 永不自动放回 |
@@ -469,6 +469,7 @@ v0.1.x 的 `/stats`、`/events`、`/export` 三条路由已移除，请求它们
 | 打开 `channel_log_enabled` 有没有代价 | 有，且是明确测过的：CPA 请求日志里是**明文 prompt**，单个长上下文请求 4.0–5.7 MB，实测目录增速约 8 MB/分钟、日增量约 3.5 GB；代价对照（解码 p50 −2.4%、CPU 中位 +0.35 个百分点、内存中位 +16 MiB）见 [docs/channel-observation.md](docs/channel-observation.md) §4.2 / §4.3。默认关闭 |
 | 账号被守卫关了 / 想立刻放回 | 把那个条目的 `disabled` 改成 `false`（或删掉这一行）就行：守卫下一轮读到「我记着是我关的，但文件说是 enabled」会认输并清空连击与退避，不跟你抢。想彻底停掉这个功能：`account_guard_enabled: false`（它已经关掉的账号**不会**自动放回，要你自己改回来） |
 | 账号守卫表里没有某个账号（或者你不想让某个 Cline 账号被守） | 守卫**只守 Cline 条目**：条目的 `base-url` host 必须命中 `hosts`（默认 `api.cline.bot`），或者条目名恰好是 `Cline`。同一个 `openai-compatibility` 列表里别的供应商（官方 DeepSeek、别的中转）本来就不进判定。要让某个 Cline 账号不进判定，把 `account_guard_scope_names` 缩到你想守的那几个名字。改完不用重启容器 |
+| 页面「连击」一直是 1/3，可这个账号明明一堆偏离 | 连击数的是**连续**次数：中间任何一次落回基准渠道都会把它清零，而且只看**最近一小时**（和页面的 1h 窗口同一个数据源）。判据：取 `/channel.csv?window=1h`，筛出该账号 `cpa_provider` 的记录、按时间排序，自己数一遍「连续几次不是基准渠道」，应该和页面的数字一致。渠道块来自 CPA 请求日志，比记录本身晚几秒落地；守卫对还没落地的请求不计数也不清零，留到下一轮再看，所以不会丢 |
 | 守卫不判定，页面写「还没有真实渠道数据，暂不判定」、状态列是灰色「未判定」 | 判定依赖真实渠道，先按上文把 `channel_log_enabled` 与 CPA 侧的 `observability.logs.request-log` 开起来；`/health` 的 `account_guard.judging=false` 就是这个状态。这一列此刻不会显示绿色「正常」，免得被当成“已确认没问题” |
 | 守卫该关却没关，页面写「写入待确认」 | 说明写 `config.yaml` 失败或回读不一致：看宿主日志里 `account guard could not …`（带 `error`），常见原因是配置文件路径只读、被换成了目录、或权限不对。守卫每个 tick 都会重试，不会重复写 |
 | 记录 / CSV 里有些列一直为空（`generation_id`、`pinned_provider`、`protocol`、`cost_usd` …） | 目录里仍有**旧版本（`v: 1`）写下的行**，CSV 也保留了这些 v1 列。usage 载荷里没有对应字段，所以 v2 不再写这些键；`v: 2` 的行这些列本来就是空的 |

@@ -294,6 +294,11 @@ func TestConfigCheckRendersAboveThePlan(t *testing.T) {
 			t.Errorf("configCheckItems must cover the %s check, got:\n%s", key, body)
 		}
 	}
+	// 「重启容器」必须要求插件确实见过请求：没有流量时 scanned 也是 0，那说明不了日志中间件
+	// 装没装，不能拿它劝一个客户端还没接过来的部署去重启。
+	if !strings.Contains(body, "n(obs.events)") || !strings.Contains(body, "seenRequests>0") {
+		t.Error("the restart check must require observed requests before telling the operator to restart")
+	}
 	for _, forbidden := range []string{"health.plan=", "health.host_config=", "channel.summary="} {
 		if strings.Contains(body, forbidden) {
 			t.Errorf("configCheckItems must not write back to its inputs: %s", forbidden)

@@ -83,6 +83,8 @@ curl -s -X POST -H "Authorization: Bearer $CPA_MANAGEMENT_KEY" \
 
 插件在管理页最顶部放了一块**配置自检**：它只读 CPA 的 `config.yaml` 与插件自己的运行时状态，把「现在缺哪一项、缺了会少什么功能、补哪一行」逐条列出来。每项默认只占一行（状态 / 名称 / 配置键 / 缺什么），点开那一行才展开原因与修法——这样同时有三四项待处理时也不会把下面的表挤出首屏。每项都能单独忽略，忽略记录只存在浏览器里。没有任何问题、也没忽略过时这块**自动隐藏**——所以它出现，就代表确实还有待处理的项。常见几项：Cline 凭据、`channel_log_enabled`（网关渠道）、CPA 侧 `observability.logs.request-log` 与 `server.commercial-mode`、改完是否**重启过容器**、`channel_baseline_provider` 是否和真实渠道名一致、请求日志容量。
 
+「重启容器」这一项只在**插件确实收到过请求**、却一条请求日志都没读到的时候才出现（`channel_observation.events > 0` 且 `channel_log.health.scanned == 0`）。没有流量时 `scanned` 同样是 0，但那说明不了日志中间件装没装，所以不提示——刚装好、客户端还没接过来的部署不会被劝去白重启一次。
+
 检测面是只读的：插件不会替任何人改 CPA 的配置，也不会把凭据回显到页面或 `/health`（`host_config` 里只有布尔、数字和键名）。
 
 ## 配置

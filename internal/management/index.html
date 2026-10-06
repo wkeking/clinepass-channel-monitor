@@ -465,9 +465,13 @@ function configCheckItems(health,channel){
       "CPA 在这个模式下强制关闭请求日志中间件，即使 request-log 是 true 也不落文件。",
       "设 <code>server.commercial-mode: false</code>，改完<b>重启容器</b>。");
   }
-  if(cl.enabled===true&&host.request_log===true&&n(clh.scanned)===0&&n(health.uptime_seconds)>300){
+  // 「一个请求日志都没读到」只有在插件确实见过请求时才算证据。没有请求时 scanned 同样是 0，
+  // 那只能说明还没有流量，说明不了 CPA 的日志中间件装没装；把它报成「去重启容器」，刚装好、
+  // 客户端还没接过来的部署会白重启一次。所以先要求 usage 回调已经来过（channel_observation.events）。
+  const seenRequests=n(obs.events);
+  if(cl.enabled===true&&host.request_log===true&&n(clh.scanned)===0&&seenRequests>0&&n(health.uptime_seconds)>300){
     add("restart","todo","重启容器","","日志中间件还没按新配置重新装配",
-      "插件已经运行 "+esc(health.uptime||"")+"，request-log 也是开的，但一个请求日志都没读到：CPA 的日志中间件只在容器启动时装配。",
+      "插件已经运行 "+esc(health.uptime||"")+"，这期间收到 "+int(seenRequests)+" 条请求，request-log 也是开的，但一个请求日志都没读到：CPA 的日志中间件只在容器启动时装配。",
       "重启容器（<code>docker restart cpa</code>），再回来看这一项是否消失。");
   }
   if(host.request_log===true&&host.logs_max_total_size_mb===0){

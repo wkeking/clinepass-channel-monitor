@@ -5,27 +5,31 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Cline 渠道监控</title>
 <style>
-/* 视觉基线对齐 CPA Usage Keeper：暖灰纸感配色（浅色 #faf9f5 / #f0eee8，深色 #151412 / #1d1b18）、
-   24px 大圆角卡片、1px 描边 + 低对比阴影、大写小标题、等宽数字。颜色全部走 CSS 变量，
-   浅色/深色由 prefers-color-scheme 切换。两处刻意偏离 keeper 令牌，只为过正文对比度：
-   深色下的状态色取浅一档（keeper 的 #c65746 压在 #1d1b18 上只有 4.0:1），主按钮填充取
-   比 #8b8680 深一档（#fff 压在 #8b8680 上只有 3.6:1）。图表三色仍用 keeper 的蓝/红/琥珀。 */
+/* 视觉基线对齐 CPA Usage Keeper。取值以它打包的 CSS（浅色用 [data-theme=white] 那一套：
+   页面与卡片都是白底、靠 1px #e5e5e5 描边分层，交互底色 #f6f6f6；深色用 [data-theme=dark]：
+   暖炭 #151412 / #1d1b18 / #262320）与线上截图为准：24px 卡片圆角、胶囊按钮与分段控件、
+   统计卡顶部一条渐隐主题色细线 + 左上角晕开的主题色 + 实心图标徽章 + #f6f6f6 迷你图底槽、
+   表头白底小字、等宽数字。颜色全部走 CSS 变量，浅色/深色由 prefers-color-scheme 切换。
+   两处刻意偏离 keeper 令牌，只为过正文对比度：深色下的状态色取浅一档（keeper 的 #c65746
+   压在 #1d1b18 上只有 4.0:1），主按钮填充比 #8b8680 深一档（白字压在 #8b8680 上只有 3.6:1）。 */
 :root{color-scheme:light dark;
-  --bg:#faf9f5;--card:#f0eee8;--card-2:#faf9f5;--fg:#2d2a26;--muted:#6d6760;--faint:#a29c95;
-  --line:#e3e1db;--line-strong:#cecac4;--accent:#8b8680;--accent-hover:#7f7a74;--accent-text:#6f6a63;
+  --bg:#fff;--card:#fff;--card-2:#fafafa;--well:#f6f6f6;--fg:#2d2a26;--muted:#6d6760;--faint:#a29c95;
+  --line:#e5e5e5;--line-strong:#d9d9d9;--accent:#8b8680;--accent-hover:#7f7a74;--accent-text:#6f6a63;
   --accent-soft:rgba(139,134,128,.12);--solid:#7a756f;--solid-hover:#6e6963;
-  --warn:#b45309;--err:#b91c1c;--ok:#15803d;--chip:#e9e6df;
+  --warn:#b45309;--err:#b91c1c;--ok:#15803d;--chip:#f6f6f6;
   --s-requests:#3b82f6;--s-off:#c65746;--s-failed:#d97706;
-  --shadow:0 1px 2px 0 rgba(0,0,0,.08);--shadow-lg:0 10px 18px -3px rgba(0,0,0,.10);
+  --shadow:0 1px 2px 0 rgba(0,0,0,.06);--shadow-lg:0 10px 18px -3px rgba(0,0,0,.08);
+  --badge-fg:#fff;
   --radius:24px;--radius-inner:14px;--page-max:clamp(1245px,86vw,1600px);
   --font:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Oxygen,Ubuntu,Cantarell,"Fira Sans","Droid Sans","Helvetica Neue","PingFang SC","Noto Sans CJK SC","Microsoft YaHei",sans-serif}
 @media (prefers-color-scheme:dark){:root{
-  --bg:#151412;--card:#1d1b18;--card-2:#151412;--fg:#f6f4f1;--muted:#c9c3bb;--faint:#9c958d;
-  --line:#3a3530;--line-strong:#5a544d;--accent:#8b8680;--accent-hover:#9a948e;--accent-text:#d8d2ca;
+  --bg:#151412;--card:#1d1b18;--card-2:#191714;--well:#262320;--fg:#f6f4f1;--muted:#c9c3bb;--faint:#9c958d;
+  --line:#3a3530;--line-strong:#4a453f;--accent:#8b8680;--accent-hover:#9a948e;--accent-text:#d8d2ca;
   --accent-soft:rgba(139,134,128,.18);--solid:#6f6a65;--solid-hover:#7d7873;
   --warn:#f0b46a;--err:#f0907e;--ok:#4ade80;--chip:#262320;
   --s-requests:#60a5fa;--s-off:#e0806f;--s-failed:#e0a24a;
-  --shadow:0 1px 3px 0 rgba(0,0,0,.30);--shadow-lg:0 10px 15px -3px rgba(0,0,0,.30)}}
+  --shadow:0 1px 3px 0 rgba(0,0,0,.30);--shadow-lg:0 10px 15px -3px rgba(0,0,0,.30);
+  --badge-fg:#151412}}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--fg);font:12.5px/1.55 var(--font);-webkit-font-smoothing:antialiased}
 header{display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between;padding:13px 24px;background:var(--card);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:5}
@@ -34,27 +38,33 @@ h1 span{color:var(--faint);font-weight:400;font-size:11.5px;margin-left:8px}
 .sub{color:var(--muted);font-size:11.5px}
 main{padding:22px 24px 48px;max-width:var(--page-max);margin:0 auto}
 section{margin-bottom:26px}
-h2{margin:0 0 12px;font-size:11px;font-weight:900;color:var(--faint);letter-spacing:.14em;text-transform:uppercase}
+/* 区块标题照 keeper 的 .recentActivityTitle：17px / 800 / line-height 1.2，不加大写不改色 */
+h2{margin:0 0 12px;font-size:17px;font-weight:800;line-height:1.2;color:var(--fg);letter-spacing:0;text-transform:none}
 /* 渠道区固定三块（请求数 / 偏离基准渠道 / 缓存命中率），任何宽度下都排在同一行。
-   卡片照 keeper 的统计卡：24px 圆角、顶边一条渐隐的强调色条（--tint 由卡片自己给），
-   悬停抬起 2px，数值用 800 字重 + 等宽数字。 */
+   卡片逐条照 keeper 的 .statCard：中性 #e5e5e5 描边 + 顶部一条左起渐隐的主题色细线 +
+   从左上角晕开 18% 的主题色、右上 34px 实心图标徽章（8px 圆角、白图标、软阴影）、
+   底部一块 #f6f6f6 迷你图底槽（--tint 由卡片自己给），悬停抬起 2px + 主题色 35% 描边，
+   数值 28px/800 + 等宽数字，标题用 --faint 而不是主题色（线上截图实测就是 --text-tertiary）。 */
 .cards{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px}
-@media (max-width:1180px){.cards{gap:12px}.card{padding:15px 16px 13px}.card .k{font-size:11.5px}.card .v{margin-top:10px;font-size:24px}.card .v small{font-size:11.5px}.card .s{font-size:11px;gap:3px 10px}.card .spark,.card .spark svg{height:28px}}
-.card{position:relative;background:radial-gradient(120% 140% at 0% 0%,color-mix(in srgb,var(--tint,var(--accent)) 10%,transparent),transparent 62%),var(--card);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow-lg);padding:18px 20px 16px;overflow:hidden;display:flex;flex-direction:column;min-height:168px;transition:transform .16s,border-color .16s,box-shadow .16s}
-.card::before{content:"";position:absolute;inset:0 0 auto 0;height:3px;background:linear-gradient(90deg,var(--tint,var(--accent)) 0,color-mix(in srgb,var(--tint,var(--accent)) 62%,transparent) 46%,transparent 78%)}
-.card:hover{transform:translateY(-2px);border-color:color-mix(in srgb,var(--tint,var(--accent)) 42%,var(--line));box-shadow:0 16px 40px rgba(0,0,0,.22)}
-.card .top{display:flex;align-items:flex-start;justify-content:space-between;gap:10px}
+@media (max-width:1180px){.cards{gap:12px}.card{padding:15px 16px 13px}.card .k{font-size:11.5px}.card .v{font-size:24px}.card .v small{font-size:11.5px}.card .s{font-size:11px;gap:3px 10px}.card .spark{height:34px}.card .spark svg{height:100%}}
+.card{position:relative;display:flex;flex-direction:column;gap:10px;background:radial-gradient(120% 140% at 12% 0%,color-mix(in srgb,var(--tint,var(--accent)) 18%,transparent),transparent 62%),var(--card);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow-lg);padding:18px;overflow:hidden;min-height:176px;transition:transform .15s,border-color .15s,box-shadow .15s}
+/* 顶部那条渐隐的主题色细线：起笔留 12px 圆角余量，42% 处降到 68%，右侧留 24px 收干净 */
+.card::before{content:"";position:absolute;inset:0 0 auto 0;height:2px;background:linear-gradient(90deg,transparent 0,var(--tint,var(--accent)) 12px,color-mix(in srgb,var(--tint,var(--accent)) 68%,transparent) 42%,transparent calc(100% - 24px))}
+.card:hover{transform:translateY(-2px);border-color:color-mix(in srgb,var(--tint,var(--accent)) 35%,transparent);box-shadow:0 16px 40px rgba(0,0,0,.22)}
+.card .top{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
 .card .k{color:var(--faint);font-size:12px;font-weight:700}
-.card .ico{width:26px;height:26px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:13px;line-height:1;background:color-mix(in srgb,var(--tint,var(--accent)) 16%,var(--card));color:var(--tint,var(--accent))}
-.card .v{margin-top:12px;font-size:30px;font-weight:800;letter-spacing:-.5px;font-variant-numeric:tabular-nums;display:flex;align-items:baseline;gap:5px}
+.card .ico{flex:none;width:34px;height:34px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:15px;line-height:1;background:var(--tint,var(--accent));color:var(--badge-fg);border:1px solid rgba(255,255,255,.08);box-shadow:0 10px 22px rgba(0,0,0,.25)}
+.card .v{font-size:28px;font-weight:800;line-height:1.2;letter-spacing:-.4px;font-variant-numeric:tabular-nums;display:flex;align-items:baseline;gap:5px}
 .card .v small{font-size:12px;font-weight:600;color:var(--muted);letter-spacing:0}
-.card .s{margin-top:8px;margin-bottom:2px;color:var(--muted);font-size:11.5px;display:flex;flex-wrap:wrap;gap:4px 12px}
-/* 折线图固定贴在卡片底部：三块的图因此落在同一水平线上 */
-.card .spark{margin-top:auto;padding-top:12px;height:46px}
-.card .spark svg{display:block;width:100%;height:34px}
+.card .s{color:var(--muted);font-size:11.5px;display:flex;flex-wrap:wrap;gap:4px 12px}
+/* 迷你图固定贴在卡片底部、放在浅灰底槽里：三块的图因此落在同一水平线上 */
+.card .spark{margin-top:auto;height:52px;padding:7px 10px 5px;background:var(--well);border-radius:12px}
+.card .spark svg{display:block;width:100%;height:100%}
 .bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:12px}
-button,select,input{font:inherit;font-size:12px;color:inherit;background:var(--card-2);border:1px solid var(--line);border-radius:8px;min-height:34px;padding:0 12px;transition:background-color .15s,border-color .15s,color .15s}
-button{cursor:pointer}
+/* 控件照 keeper：按钮是胶囊（白底 + 1px 描边，悬停转浅灰），下拉/输入是 10px 圆角 */
+button,select,input{font:inherit;font-size:12px;color:inherit;background:var(--card);border:1px solid var(--line);min-height:34px;padding:0 12px;transition:background-color .15s,border-color .15s,color .15s}
+button{border-radius:999px;padding:0 14px;cursor:pointer}
+select,input{border-radius:10px}
 button:hover{border-color:var(--line-strong);background:var(--chip)}
 button:focus-visible,select:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 button.primary{background:var(--solid);border-color:var(--solid);color:#fff;font-weight:700}
@@ -65,8 +75,10 @@ input::placeholder{color:var(--faint)}
 .segmented button{min-height:28px;padding:0 12px;border:0;border-radius:999px;background:0 0;color:var(--muted);font-size:11.5px;font-weight:800;transition:background-color .16s,color .16s,box-shadow .16s}
 .segmented button:hover{background:color-mix(in srgb,var(--card) 58%,transparent);color:var(--fg)}
 .segmented button[aria-pressed=true]{background:var(--card);color:var(--fg);box-shadow:0 6px 14px rgba(0,0,0,.08)}
-/* 小徽标照 keeper 的 pill：999px 圆角、9–11px 加粗、颜色用 color-mix 从语义色里调出来 */
-.chip{display:inline-block;padding:2px 8px;border-radius:999px;background:color-mix(in srgb,var(--accent) 14%,var(--card));color:var(--fg);font-size:10.5px;font-weight:800}
+/* 小徽标照 keeper 的 pill：999px 圆角、11px 加粗。默认中性（套餐名、占比这类纯标注），
+   只有「基准渠道」这个真正的状态标记加 .ok，用 keeper 的 success 语义色 */
+.chip{display:inline-block;padding:2px 9px;border-radius:999px;background:color-mix(in srgb,var(--accent) 14%,var(--card));color:var(--fg);font-size:11px;font-weight:700}
+.chip.ok{background:color-mix(in srgb,var(--ok) 12%,var(--card));border:1px solid color-mix(in srgb,var(--ok) 30%,transparent);color:var(--ok)}
 .msg{color:var(--muted);padding:16px}
 .hidden{display:none}
 /* 标题旁的说明图标：悬停/聚焦时自己画气泡，不用原生 title（原生提示依赖浏览器
@@ -161,11 +173,11 @@ input::placeholder{color:var(--faint)}
 .guard-warn{color:var(--warn)}
 .guard-err{color:var(--err)}
 .guard-off{color:var(--muted)}
-/* 表格照 keeper：卡片色容器 + 大写小标题表头（10px/800/字距）+ 1px 行分隔 + 等宽数字 */
+/* 表格照 keeper：卡片色容器 + 白底小字表头（10–11px/600，无大写）+ 1px 行分隔 + 等宽数字 */
 .wrap{overflow-x:auto;background:var(--card);border:1px solid var(--line);border-radius:var(--radius-inner);box-shadow:var(--shadow)}
 table{width:100%;border-collapse:separate;border-spacing:0}
-th,td{padding:9px 14px;text-align:left;white-space:nowrap;vertical-align:middle}
-th{font-size:10px;color:var(--muted);font-weight:800;letter-spacing:.07em;text-transform:uppercase;background:var(--card-2);border-bottom:1px solid var(--line)}
+th,td{padding:10px 14px;text-align:left;white-space:nowrap;vertical-align:middle}
+th{font-size:11px;color:var(--muted);font-weight:600;letter-spacing:0;text-transform:none;background:var(--card);border-bottom:1px solid var(--line)}
 td{border-bottom:1px solid var(--line);font-size:12.5px;font-variant-numeric:tabular-nums}
 tbody tr{transition:background-color .12s}
 tbody tr:hover{background:color-mix(in srgb,var(--chip) 55%,transparent)}
@@ -323,7 +335,9 @@ function card(opt){
     '<div class="top"><div class="k">'+esc(opt.label)+'</div><div class="ico">'+esc(opt.icon||"")+"</div></div>"+
     '<div class="v">'+esc(opt.value)+(opt.unit?'<small>'+esc(opt.unit)+"</small>":"")+"</div>"+
     (opt.sub&&opt.sub.length?'<div class="s">'+opt.sub.map(x=>"<span>"+esc(x)+"</span>").join("")+"</div>":"")+
-    (opt.spark?'<div class="spark">'+sparkline(opt.spark,tint)+"</div>":"")+
+    // 底槽无条件渲染：keeper 的统计卡即使没有数据也留着那块浅灰底槽（线上截图里四张卡
+    // 的迷你图都是空的），这样三张卡的高度与留白才对得齐。sparkline() 数据不足时返回 ""。
+    '<div class="spark">'+sparkline(opt.spark,tint)+"</div>"+
     "</div>";
 }
 
@@ -712,7 +726,7 @@ function renderChannelProviders(summary,baseline){
     const off=n(row.off_baseline);
     return "<tr>"+
       '<td><span class="mono">'+esc(provider||"—")+"</span>"+
-        (isBaseline?'<span class="chip" style="margin-left:6px">基准</span>':"")+
+        (isBaseline?'<span class="chip ok" style="margin-left:6px">基准</span>':"")+
         (off>0?'<span class="plan-warn" style="margin-left:6px">偏离</span>':"")+"</td>"+
       '<td class="num">'+int(row.requests)+"</td>"+
       '<td class="num">'+pctText(row.ratio)+"</td>"+
@@ -937,7 +951,7 @@ function recordRow(record,baseline){
     // A request whose log carried no routing block (typically a failure) has no real channel to
     // show: "无渠道块" is the honest cell, and it is not the same thing as the baseline.
     const channelCell=provider
-      ? (off?'<span class="plan-warn" style="font-weight:600">':"")+esc(provider)+(off?"（偏离）</span>":'<span class="chip" style="margin-left:6px">基准</span>')
+      ? (off?'<span class="plan-warn" style="font-weight:600">':"")+esc(provider)+(off?"（偏离）</span>":'<span class="chip ok" style="margin-left:6px">基准</span>')
       : '<span class="sub">无渠道块</span>';
     return "<tr>"+
       "<td>"+esc(fmtTime(record.time))+"</td>"+

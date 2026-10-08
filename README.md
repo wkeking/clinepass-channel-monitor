@@ -497,6 +497,35 @@ curl -s -H "Authorization: Bearer $CPA_MANAGEMENT_KEY" http://127.0.0.1:8317/v0/
 
 ## 升级与回滚
 
+### 升级到 v0.4.0
+
+v0.4.0 把 v0.3.1 之后的 14 个提交收在一起，用户可见的就这几件事：
+
+- **账号守卫（新功能，默认关闭）**：某个 Cline 账号的**真实渠道**连续 `account_guard_threshold`
+  （默认 3）次不是基准渠道时，把它所在的 `openai-compatibility` 条目的 `disabled` 置 true，
+  再过 `account_guard_reenable_minutes`（默认 5 分钟）自动放回，放回后再犯按每次翻倍、上限
+  `account_guard_max_disable_minutes`（默认 360 分钟）。**默认 `account_guard_dry_run: true`，
+  只记录不动手**；要真的关账号得同时打开 `account_guard_enabled` 并关掉 dry-run。判据是请求日志
+  join 出来的真实渠道，所以 `channel_log_enabled` 必须为 true——没有渠道数据时它**不判定**，
+  页面写「还没有真实渠道数据，暂不判定」而不是假装正常。只守 Cline 条目（凭据发现那条同样的规则），
+  其它供应商的 `openai-compatibility` 条目完全不进判定。详见「[账号守卫](#账号守卫可选默认关闭)」。
+- **配置面板只留有作用的键，并把默认值写回配置块**：新增的 `account_guard_*` 键会出现在面板里，
+  没有实际作用的项已移除；回填只补缺失的键，操作者写过的值一个字节都不覆盖。
+- **页面观感对齐 CPA Usage Keeper**：浅色改成 keeper 的 `[data-theme=white]`（白底 + `#e5e5e5`
+  描边 + `#f6f6f6` 交互底色/迷你图底槽），统计卡、表头、徽标、区块标题与图表悬停浮层都按实例页面
+  重做。**信息结构、接口契约与统计口径一律没变**，只是看起来像同一个产品。
+- 顺带一个修正：usage 记录与请求日志的 token 兜底匹配窗口从 2 秒放宽到 5 秒，大 body 请求不再
+  丢渠道。
+
+升级步骤与「升级到 v0.3.0」完全相同（替换 `.so` → 触发重载 → 回读 `/health.version` 应为
+`0.4.0`）。两个注意点：
+
+- 装过商店版本之后，宿主按 `store.version` **精确**挑文件；走商店更新（或把产物按 `store.version`
+  命名）才会被加载，直接丢一个 `0.4.0-dev.N.so` 进去会被跳过并删除，症状是该插件整个从
+  `/v0/management/plugins` 消失。
+- `account_guard_*` 是新增键，回填只补缺失项，所以从 0.3.1 升上来时**默认仍是关闭 + dry-run**，
+  不会因为升级就突然开始关账号。
+
 ### 升级到 v0.3.1
 
 v0.3.1 只加了一样东西：管理页顶部的**配置自检**。`/health` 多两个字段（`uptime_seconds`、`host_config`），插件加载时如果网关渠道没开，会往宿主日志打一条同源的提示。插件自己的配置键、`/channel` 契约、接口清单都没有变化，按下面「升级到 v0.3.0」的同一套步骤替换 `.so`、重载、回读版本即可（`make build` 的版本号来自 `internal/buildinfo`，0.3.1 的新旧文件名与 0.3.0 不会互相覆盖）。

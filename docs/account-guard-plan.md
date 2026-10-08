@@ -4,8 +4,14 @@
 （请求日志里的 `finalProvider`）连续 3 次不是官方渠道（不是 `deepseek`）时，把该账号
 `disabled` 改成 `true`。
 
-本文只做调研与方案，不含实现。证据分三档标注：**实测**（本次在生产 CPA v8.0.13 / 插件
-0.3.1 上跑出来的）、**代码**（读 `.reference/CLIProxyAPI` 检出）、**未验证**。
+> **状态（2026-10-08）：已实现并随 v0.4.0 发布。** 代码在 `internal/guard`（状态机 + 持久化）、
+> `internal/hostconf`（最小节点编辑 CPA 配置）、`internal/plugin/accountguard.go`（每 5 秒一轮）
+> 与 `internal/management`（页面「账号守卫」表 + `/health.account_guard`）；怎么用、默认值和边界
+> 以 README 的「账号守卫（可选，默认关闭）」一节为准。本文保留为当时的调研与取舍记录，**下文
+> 的「方案」「待定项」描述的是决策过程，不是当前实现状态**。
+>
+> 证据分三档标注：**实测**（当时在生产 CPA v8.0.13 / 插件 0.3.1 上跑出来的）、**代码**（读
+> `.reference/CLIProxyAPI` 检出）、**未验证**。
 
 ## 0. 结论
 

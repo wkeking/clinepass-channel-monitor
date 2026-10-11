@@ -40,12 +40,16 @@ main{padding:22px 24px 48px;max-width:var(--page-max);margin:0 auto}
 section{margin-bottom:26px}
 /* 区块标题照 keeper 的 .recentActivityTitle：17px / 800 / line-height 1.2，不加大写不改色 */
 h2{margin:0 0 12px;font-size:17px;font-weight:800;line-height:1.2;color:var(--fg);letter-spacing:0;text-transform:none}
-/* 渠道区固定三块（请求数 / 偏离基准渠道 / 缓存命中率），任何宽度下都排在同一行。
+/* 渠道区固定三块（请求数 / 偏离基准渠道 / 缓存命中率），宽屏上排在同一行；窄到放不下三列时
+   换成和上方「Cline 套餐用量」完全相同的 auto-fit（minmax(210px,1fr)），2 列 / 1 列的出现时机
+   因此和套餐卡一致（710px 是套餐卡从 3 列掉到 2 列的临界：3×210 的列 + 2×16 的间距 + main 的
+   48px 左右内边距）。手机上三块竖排，不再挤成一排。
    卡片逐条照 keeper 的 .statCard：中性 #e5e5e5 描边 + 顶部一条左起渐隐的主题色细线 +
    从左上角晕开 18% 的主题色、右上 34px 实心图标徽章（8px 圆角、白图标、软阴影）、
    底部一块 #f6f6f6 迷你图底槽（--tint 由卡片自己给），悬停抬起 2px + 主题色 35% 描边，
    数值 28px/800 + 等宽数字，标题用 --faint 而不是主题色（线上截图实测就是 --text-tertiary）。 */
 .cards{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px}
+@media (max-width:710px){.cards{grid-template-columns:repeat(auto-fit,minmax(210px,1fr))}}
 @media (max-width:1180px){.cards{gap:12px}.card{padding:15px 16px 13px}.card .k{font-size:11.5px}.card .v{font-size:24px}.card .v small{font-size:11.5px}.card .s{font-size:11px;gap:3px 10px}.card .spark{height:34px}.card .spark svg{height:100%}}
 .card{position:relative;display:flex;flex-direction:column;gap:10px;background:radial-gradient(120% 140% at 12% 0%,color-mix(in srgb,var(--tint,var(--accent)) 18%,transparent),transparent 62%),var(--card);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow-lg);padding:18px;overflow:hidden;min-height:176px;transition:transform .15s,border-color .15s,box-shadow .15s}
 /* 顶部那条渐隐的主题色细线：起笔留 12px 圆角余量，42% 处降到 68%，右侧留 24px 收干净 */

@@ -29,7 +29,7 @@ func TestLiveInstancesReportsEveryRunningGuard(t *testing.T) {
 		}
 	}
 
-	live, errLive := store.LiveInstances(instanceStaleAfter)
+	live, errLive := store.LiveInstances(instanceStaleAfter, now.Add(-3*time.Hour))
 	if errLive != nil {
 		t.Fatalf("live instances: %v", errLive)
 	}
@@ -66,7 +66,7 @@ func TestLiveInstancesForgetsAHeartbeatThatStopped(t *testing.T) {
 		}
 	}
 
-	live, errLive := store.LiveInstances(60 * time.Second)
+	live, errLive := store.LiveInstances(60*time.Second, time.Time{})
 	if errLive != nil {
 		t.Fatalf("live instances: %v", errLive)
 	}
@@ -78,6 +78,47 @@ func TestLiveInstancesForgetsAHeartbeatThatStopped(t *testing.T) {
 	}
 	if _, errStat := os.Stat(filepath.Join(dir, InstanceFilePrefix+"quiet"+instanceFileSuffix)); errStat != nil {
 		t.Errorf("a heartbeat inside the staleness bound must stay on disk: %v", errStat)
+	}
+}
+
+// TestLiveInstancesIgnoresAHeartbeatFromAPreviousProcess covers the false alarm measured on the
+// production host on 2026-10-14: the container was restarted, the killed process never got to
+// remove its heartbeat, and the new process counted that file as a second live guard until the
+// window expired - so the page told the operator to restart a container they had just restarted.
+// A heartbeat last refreshed before this process started cannot come from a live runner.
+func TestLiveInstancesIgnoresAHeartbeatFromAPreviousProcess(t *testing.T) {
+	dir := t.TempDir()
+	store := NewStore(dir)
+	now := time.Now().UTC()
+	dead := InstanceInfo{
+		ID: "killed", Version: "0.4.2", StartedAt: now.Add(-30 * time.Minute),
+		LastSeen: now.Add(-2 * time.Minute), PID: 4242,
+	}
+	current := InstanceInfo{
+		ID: "current", Version: "0.4.4", StartedAt: now, LastSeen: now, PID: 5151,
+	}
+	for _, info := range []InstanceInfo{dead, current} {
+		if errTouch := store.TouchInstance(info); errTouch != nil {
+			t.Fatalf("touch %s: %v", info.ID, errTouch)
+		}
+	}
+
+	live, errLive := store.LiveInstances(instanceStaleAfter, now.Add(-time.Minute))
+	if errLive != nil {
+		t.Fatalf("live instances: %v", errLive)
+	}
+	if len(live) != 1 || live[0].ID != "current" {
+		t.Fatalf("live = %#v, want only the runner of this process", live)
+	}
+
+	// Without a start bound the leftover is still reported, which is what keeps a retired build
+	// that refreshes its heartbeat from another live process visible.
+	all, errAll := store.LiveInstances(instanceStaleAfter, time.Time{})
+	if errAll != nil {
+		t.Fatalf("live instances without a start bound: %v", errAll)
+	}
+	if len(all) != 2 {
+		t.Fatalf("live = %#v, want both heartbeats without a start bound", all)
 	}
 }
 
@@ -94,7 +135,7 @@ func TestLiveInstancesIgnoresForeignAndTornFiles(t *testing.T) {
 		t.Fatalf("write a torn heartbeat: %v", errWrite)
 	}
 
-	live, errLive := store.LiveInstances(0)
+	live, errLive := store.LiveInstances(0, time.Time{})
 	if errLive != nil {
 		t.Fatalf("live instances: %v", errLive)
 	}
@@ -129,7 +170,7 @@ func TestForgetInstanceRemovesTheHeartbeat(t *testing.T) {
 		t.Errorf("forgetting one heartbeat must not touch another: %v", errStat)
 	}
 
-	live, errLive := store.LiveInstances(instanceStaleAfter)
+	live, errLive := store.LiveInstances(instanceStaleAfter, time.Time{})
 	if errLive != nil {
 		t.Fatalf("live instances: %v", errLive)
 	}

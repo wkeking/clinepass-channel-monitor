@@ -65,6 +65,10 @@ const (
 var (
 	accountGuardMu     sync.Mutex
 	accountGuardActive *accountGuardRunner
+	// accountGuardProcessStartedAt is when this build was loaded into the host process. It is what
+	// separates the heartbeats of runners alive right now from the file a previous, killed process
+	// left behind: only a live runner can refresh a heartbeat after this instant.
+	accountGuardProcessStartedAt = time.Now().UTC()
 )
 
 // accountGuardRunner owns the ticker, the guard's state file and the published snapshot.
@@ -297,7 +301,7 @@ func (r *accountGuardRunner) heartbeat(now time.Time) {
 	}); errTouch != nil {
 		return
 	}
-	live, errLive := r.store.LiveInstances(accountGuardInstanceWindow)
+	live, errLive := r.store.LiveInstances(accountGuardInstanceWindow, accountGuardProcessStartedAt)
 	if errLive != nil {
 		return
 	}

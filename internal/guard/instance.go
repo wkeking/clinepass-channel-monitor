@@ -96,10 +96,18 @@ func (s *Store) ForgetInstance(id string) error {
 // LiveInstances returns the heartbeats refreshed within the window, oldest start first, and
 // removes the ones that have been quiet for instanceStaleAfter.
 //
+// startedAfter is when the calling process was loaded. A heartbeat last refreshed before that
+// cannot belong to a runner in this process - a process that is gone cannot refresh anything - so
+// it is the file a killed process left behind. Counting it reported "two guards are running" for
+// the whole live window after every container restart, which is exactly the false alarm measured
+// on the production host on 2026-10-14. A runner in another live process (a retired .so the host
+// keeps loaded) goes on refreshing every save interval, so it is still counted, at most one
+// interval later. A zero startedAfter counts every heartbeat.
+//
 // It is deliberately forgiving: a directory that cannot be listed, a file that cannot be read and
 // a line that cannot be decoded are all skipped, because "how many guards are running" is a
 // warning, not a fact the guard may act on.
-func (s *Store) LiveInstances(within time.Duration) ([]InstanceInfo, error) {
+func (s *Store) LiveInstances(within time.Duration, startedAfter time.Time) ([]InstanceInfo, error) {
 	if s == nil {
 		return nil, nil
 	}
@@ -136,6 +144,9 @@ func (s *Store) LiveInstances(within time.Duration) ([]InstanceInfo, error) {
 			continue
 		}
 		if within > 0 && age > within {
+			continue
+		}
+		if !startedAfter.IsZero() && info.LastSeen.UTC().Before(startedAfter) {
 			continue
 		}
 		out = append(out, info)

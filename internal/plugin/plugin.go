@@ -17,6 +17,7 @@ package plugin
 import (
 	"encoding/json"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -110,12 +111,36 @@ func LoadConfig(raw []byte) {
 	for key, value := range accountGuardLogFields(cfg) {
 		fields[key] = value
 	}
-	hostapi.LogAsync("info", buildinfo.ID+": configured", fields)
+	hostapi.LogAsync("info", buildinfo.ID+": configured "+logFields(fields), fields)
 	// 装完最容易漏的是网关渠道那一套开关（插件侧的 channel_log_enabled 默认 false，CPA 侧
 	// 的请求日志也默认关）。加载时把还缺的项说一次，和页面顶部「配置自检」卡片同源。
 	if hint := hostconf.GatewayHint(cfg); hint != "" {
 		hostapi.LogAsync("info", buildinfo.ID+": "+hint, nil)
 	}
+}
+
+// logFields renders a field map into the message, in a fixed order.
+//
+// The host's log sink renders the message and drops the fields a plugin sends with it
+// (internal/pluginhost/host_callbacks.go), so anything an operator has to be able to read back
+// afterwards - above all the effective account_guard_dry_run of the instance that just loaded -
+// has to be part of the message itself. Measured on the production host on 2026-10-13: every
+// "configured" line in the log was identical, whichever build and whichever configuration had
+// produced it.
+func logFields(fields map[string]string) string {
+	if len(fields) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(fields))
+	for key := range fields {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		parts = append(parts, key+"="+fields[key])
+	}
+	return strings.Join(parts, " ")
 }
 
 // observationRecorder is the running collector. It is stopped before a reconfigure starts a
@@ -218,6 +243,7 @@ func startChannelLog(cfg config.Config) {
 func Shutdown() {
 	stopObservation()
 	stopChannelLog()
+	stopAccountGuard()
 	if poller := state.Plan(); poller != nil {
 		poller.Stop()
 	}
@@ -231,9 +257,7 @@ func HandleMethod(method string, request []byte) ([]byte, error) {
 		if method == pluginabi.MethodPluginRegister {
 			// A single line on load makes it obvious which build CPA is running, which
 			// matters because CPA replaces a plugin by file name rather than content.
-			hostapi.LogAsync("info", buildinfo.ID+": loaded", map[string]string{
-				"version": buildinfo.Version,
-			})
+			hostapi.LogAsync("info", buildinfo.ID+": loaded version="+buildinfo.Version, nil)
 		}
 		return abi.OK(buildRegistration())
 	case pluginabi.MethodPluginQuiesce, pluginabi.MethodPluginShutdown:
@@ -241,7 +265,16 @@ func HandleMethod(method string, request []byte) ([]byte, error) {
 		// of service, so it goes down with the lifecycle call. The published configuration and
 		// the usage collector stay as they are: a quiesce can be followed by a resume rather
 		// than by a reload, and this call carries no new configuration to act on.
+		//
+		// The account guard goes down with it, and that is the point of this case. CPA retires
+		// an old .so without unloading it (internal/pluginhost/host.go, retireLoadedPluginLocked)
+		// and quiesces it before it loads the replacement, so a retired instance whose guard kept
+		// ticking would keep writing the configuration it was loaded with - which is how a dry
+		// run disabled accounts on 2026-10-13. A quiesce is only ever sent while a replacement is
+		// being loaded, and that replacement registers (and so restarts the guard) immediately
+		// after, with a configuration that is current.
 		stopChannelLog()
+		stopAccountGuard()
 		return abi.OK(nil)
 	case pluginabi.MethodManagementRegister:
 		return abi.OK(buildManagementRegistration())

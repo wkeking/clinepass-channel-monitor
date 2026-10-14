@@ -109,7 +109,10 @@ func TestHealthFillsTheLastActionFromTheAuditFile(t *testing.T) {
 }
 
 // TestAccountGuardBlockIsOnThePage pins the rendering contract: the block exists, it is hidden
-// until the snapshot arrives, and it says out loud that a dry run does not touch the file.
+// until the snapshot arrives, it says out loud that a dry run does not disable accounts (while
+// still saying that an account the guard already disabled comes back), and it reports which build
+// answered and how many guard instances are alive - the two facts the 2026-10-13 incident was
+// missing when a dry run disabled accounts anyway.
 func TestAccountGuardBlockIsOnThePage(t *testing.T) {
 	page := string(indexHTML(nil))
 	for _, needle := range []string{
@@ -122,7 +125,14 @@ func TestAccountGuardBlockIsOnThePage(t *testing.T) {
 		}
 	}
 	body := jsFunctionBody(t, page, "renderAccountGuard")
-	for _, needle := range []string{"试运行：只记录，不改 CPA 配置", "还没有真实渠道数据", "guard-block"} {
+	for _, needle := range []string{
+		"试运行：只记录，不关闭账号（已关闭的仍会按退避放回）",
+		"还没有真实渠道数据",
+		"guard-block",
+		"status.version",
+		"status.reconfigured_at",
+		"status.instances",
+	} {
 		if !strings.Contains(body, needle) {
 			t.Errorf("renderAccountGuard must state %q, got:\n%s", needle, body)
 		}

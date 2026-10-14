@@ -8,6 +8,18 @@ type Status struct {
 	Enabled bool `json:"enabled"`
 	// DryRun says the guard is computing decisions without touching CPA's configuration.
 	DryRun bool `json:"dry_run"`
+	// Version is the plugin build that produced this snapshot. The host can keep an older .so
+	// loaded beside the current one, so "which build is answering" is part of the answer.
+	Version string `json:"version,omitempty"`
+	// ReconfiguredAt is when this runner last applied a configuration. An operator who has just
+	// saved the configuration can compare it with the file's own mtime to see whether this
+	// instance is still running on the block it was loaded with.
+	ReconfiguredAt *time.Time `json:"reconfigured_at,omitempty"`
+	// Instances is how many guard runners were alive in the same directory on the last
+	// heartbeat. More than one means an older plugin instance is still judging with its own
+	// configuration - the failure mode behind the 2026-10-13 incident, and the reason this is
+	// reported instead of assumed.
+	Instances int `json:"instances,omitempty"`
 	// Judging is false when the guard has no channel data to judge (observation or the
 	// request-log scanner is off): the page has to say that instead of looking healthy.
 	Judging bool `json:"judging"`

@@ -602,7 +602,9 @@ function renderConfigCheck(){
 // --- 账号守卫（渠道表下面）----------------------------------------------------
 // 状态来自 /health 的 account_guard。插件每 5 秒刷一次，页面每 60 秒读一次，所以这里看到的最多
 // 落后一分钟。它只回答三件事：守哪些账号、每个账号连着几次没落在基准渠道、守卫把它关过没有；
-// dry_run 时明确写明「只记录，不改 CPA 配置」。
+// dry_run 时明确写明「不会关闭账号」（已经关掉的账号仍会按退避放回，否则关掉就回不来了）。
+// 另外把「哪个版本、什么时候生效、同时有几个实例」一起显示：CPA 会保留旧 .so 继续运行，只报
+// 配置正确而不报是哪个实例在跑，就是 2026-10-13 那次 dry run 仍然关账号的原因。
 function guardStateText(account,status){
   if(account.pending)return "写入待确认";
   if(account.disabled)return account.by_guard?"已被守卫关闭":"已关闭（人工）";
@@ -632,11 +634,14 @@ function renderAccountGuard(status){
   }
   block.classList.remove("hidden");
   const bits=[status.enabled===true?"已启用":"未启用"];
-  if(status.enabled===true&&status.dry_run===true)bits.push('<span class="guard-warn">试运行：只记录，不改 CPA 配置</span>');
+  if(status.enabled===true&&status.dry_run===true)bits.push('<span class="guard-warn">试运行：只记录，不关闭账号（已关闭的仍会按退避放回）</span>');
   if(status.enabled===true&&status.judging!==true)bits.push('<span class="guard-warn">还没有真实渠道数据，暂不判定</span>');
   bits.push("基准渠道 <code>"+esc(status.baseline||"-")+"</code>");
   bits.push("连续 "+int(n(status.threshold)||3)+" 次非基准就关该账号");
   if(status.enabled===true&&status.dry_run!==true&&status.path)bits.push("写入 <code>"+esc(status.path)+"</code>");
+  if(status.version)bits.push("版本 <code>"+esc(status.version)+"</code>");
+  if(status.reconfigured_at)bits.push("本次生效 "+esc(fmtTime(status.reconfigured_at)));
+  if(n(status.instances)>1)bits.push('<span class="guard-err">同时有 '+int(n(status.instances))+' 个守卫实例在跑：旧实例按它加载时的配置继续写 CPA 配置，请重启 CPA</span>');
   if(status.error)bits.push('<span class="guard-err">'+esc(status.error)+'</span>');
   flag.innerHTML=" · "+bits.join(" · ");
   $("guard-accounts").querySelector("tbody").innerHTML=(status.accounts||[]).map(function(account){

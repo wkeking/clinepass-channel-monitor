@@ -432,14 +432,16 @@ func TestRule9ManualRevert(t *testing.T) {
 	}, []Account{acct("Cline1", cline1Key, false), witness()}, at(0), judgeOpts())
 
 	// The operator enables the entry again, and a fresh burst arrives in the same
-	// round: the guard yields and takes no action.
+	// round: the guard yields and takes no action. It does record the handover, because
+	// that line is what lets a later instance tell "the guard disabled this" from
+	// "an operator disabled this" when the state file no longer says so.
 	decisions := state.Advance([]Sample{
 		smp(3, "r4", cline1Key, "fireworks"),
 		smp(4, "r5", cline1Key, "fireworks"),
 		smp(5, "r6", cline1Key, "fireworks"),
 	}, []Account{acct("Cline1", cline1Key, false), witness()}, at(10), judgeOpts())
-	if len(decisions) != 0 {
-		t.Fatalf("manual revert still acted: %+v", decisions)
+	if len(decisions) != 1 || decisions[0].Action != ActionEnableExternal {
+		t.Fatalf("manual revert = %+v, want one enable_external record and no write", decisions)
 	}
 	slot := slotFor(t, state, cline1Key)
 	if slot.DisabledByGuard || slot.Streak != 0 || slot.DisableCount != 0 || slot.NextRetryAt != nil {

@@ -46,6 +46,11 @@ const (
 	ActionDisable    = "disable"
 	ActionEnable     = "enable"
 	ActionDisableDry = "disable_dry_run"
+	// ActionEnableExternal is recorded when the guard notices that an account it had disabled is
+	// enabled again by somebody else. It changes nothing - the operator's decision stands - but it
+	// is the entry that keeps the audit trail a complete record of who last decided about an
+	// account, which is what State.AdoptOwnership reads.
+	ActionEnableExternal = "enable_external"
 )
 
 // stateVersion is written into every persisted State so a later version can tell the
@@ -173,6 +178,57 @@ func (s *State) Advance(samples []Sample, accounts []Account, now time.Time, opt
 		s.count(samples, index, opts)
 	}
 	return s.decide(unique, now, opts)
+}
+
+// AdoptOwnership reconciles the persisted state with the durable audit trail and returns the
+// account names it took ownership of, for the caller to log.
+//
+// The state file is rewritten every few seconds by every running instance, so the flag that says
+// "the guard disabled this account" can be lost - a second instance that did not disable it
+// writes its own (false) value, and so does a state file that was deleted or that a crashed
+// process never finished writing. A lost flag is not harmless: with it, the guard reads its own
+// disable as somebody else's (rule 9b), forgets the streak and never brings the account back, so
+// the account stays off until a human notices.
+//
+// The audit trail is append-only and every process shares it, which makes it the record of who
+// disabled what. The rule is the audit's own: when the last action recorded for an account is a
+// disable and the account is still disabled, the guard is the one who disabled it. A dry-run
+// report is not a disable (nothing was written), and a recorded enable is not adopted either:
+// after it, an operator who disables the account by hand is making a decision the guard must not
+// undo.
+func (s *State) AdoptOwnership(accounts []Account, audit []Decision, now time.Time, opts Options) []string {
+	opts = opts.normalized()
+	last := make(map[string]Decision, len(audit))
+	for _, decision := range audit {
+		key := normalizeKey(decision.ProviderKey)
+		if key == "" {
+			continue
+		}
+		last[key] = decision
+	}
+	var adopted []string
+	for _, account := range uniqueAccounts(accounts) {
+		key := normalizeKey(account.ProviderKey)
+		if key == "" || !account.Disabled {
+			continue
+		}
+		state := s.account(key)
+		if state.DisabledByGuard {
+			continue
+		}
+		decision, ok := last[key]
+		if !ok || decision.Action != ActionDisable {
+			continue
+		}
+		state.Name = account.Name
+		state.DisabledByGuard = true
+		if state.DisableCount < 1 {
+			state.DisableCount = 1
+		}
+		state.NextRetryAt = backoffNext(now, state.DisableCount, opts)
+		adopted = append(adopted, account.Name)
+	}
+	return adopted
 }
 
 // canJudge reports whether off-baseline streaks are meaningful this round.
@@ -320,7 +376,19 @@ func (s *State) decide(accounts []Account, now time.Time, opts Options) []Decisi
 
 		case !account.Disabled && state.DisabledByGuard:
 			// Rule 9a: enabled again by hand. The operator wins: forget everything the
-			// guard remembered and take no action this round.
+			// guard remembered and take no action this round. The decision is still
+			// reported so the audit says who took the account back, and so a later
+			// hand-disable is not mistaken for a disable of ours that was never undone.
+			decisions = append(decisions, Decision{
+				Time:        now,
+				Name:        account.Name,
+				ProviderKey: account.ProviderKey,
+				Action:      ActionEnableExternal,
+				Streak:      state.Streak,
+				Baseline:    strings.TrimSpace(opts.Baseline),
+				Channels:    append([]string(nil), state.Channels...),
+				Reason:      "该账号已被人工放回，守卫解除接管",
+			})
 			state.DisabledByGuard = false
 			state.Streak = 0
 			state.Channels = nil

@@ -1,11 +1,14 @@
 package plugin
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -49,6 +52,14 @@ const (
 	accountGuardSaveEvery = 15 * time.Second
 	// accountGuardRecent is how many past decisions /health keeps for the page.
 	accountGuardRecent = 10
+	// accountGuardInstanceWindow is how recent a heartbeat has to be for this runner to count it
+	// as a live instance. It is four times the save interval the heartbeat rides on, so one slow
+	// tick cannot hide an instance.
+	accountGuardInstanceWindow = 60 * time.Second
+	// accountGuardAuditScan is how much of the audit trail the ownership reconciliation reads.
+	// The trail is one line per action, so a few hundred lines reach back far past any disable
+	// that could still be waiting to be undone.
+	accountGuardAuditScan = 500
 )
 
 var (
@@ -63,12 +74,27 @@ type accountGuardRunner struct {
 	stop  chan struct{}
 	done  chan struct{}
 
+	// instanceID identifies this runner in the heartbeat file it keeps in the store directory.
+	// It is random rather than derived from the configuration, because the whole point is to tell
+	// two runners with the same configuration apart.
+	instanceID string
+	// startedAt is when this runner applied its configuration, which is what /health reports as
+	// reconfigured_at.
+	startedAt time.Time
+
 	mu       sync.Mutex
 	state    *guard.State
 	status   guard.Status
 	recent   []guard.Decision
 	pending  map[string]bool
 	lastSave time.Time
+	// adopted records that the ownership reconciliation has run. It runs once per runner, on the
+	// first tick, because after that the state it reconciles is this runner's own.
+	adopted bool
+	// instances is how many heartbeats were alive on the last save, and instanceWarned keeps the
+	// warning to one line per runner instead of one per save.
+	instances      int
+	instanceWarned bool
 }
 
 // startAccountGuard publishes the guard and starts its loop. It runs even when the guard is
@@ -76,11 +102,13 @@ type accountGuardRunner struct {
 // recovery timer for an account a previous run disabled keeps running.
 func startAccountGuard(cfg config.Config) {
 	runner := &accountGuardRunner{
-		cfg:     cfg,
-		store:   guard.NewStore(cfg.ChannelStoreDir),
-		stop:    make(chan struct{}),
-		done:    make(chan struct{}),
-		pending: map[string]bool{},
+		cfg:        cfg,
+		store:      guard.NewStore(cfg.ChannelStoreDir),
+		stop:       make(chan struct{}),
+		done:       make(chan struct{}),
+		pending:    map[string]bool{},
+		instanceID: newInstanceID(),
+		startedAt:  time.Now().UTC(),
 	}
 	loaded, errLoad := runner.store.Load()
 	if errLoad != nil {
@@ -136,6 +164,7 @@ func (r *accountGuardRunner) tick() {
 		return
 	}
 	accounts := r.accounts(raw)
+	r.reconcileOwnership(accounts, now)
 	samples := r.samples()
 	decisions := r.state.Advance(samples, accounts, now, r.options())
 	for _, decision := range decisions {
@@ -182,6 +211,109 @@ func (r *accountGuardRunner) accounts(raw []byte) []guard.Account {
 		})
 	}
 	return accounts
+}
+
+// reconcileOwnership restores the guard's claim on the accounts it disabled, reading the audit
+// trail as the record of what it did.
+//
+// The state file's disabled_by_guard flag is what separates an account the guard switched off from
+// one an operator switched off, and it is the only thing that lets the guard switch an account
+// back on. Losing it - a second runner saving its own state over this one's, a state file that was
+// emptied, a state file older than the flag - therefore strands the account: the guard reads its
+// own disable as somebody else's and never undoes it. Measured on the production host on
+// 2026-10-13: Cline3 was disabled at 20:11 and never came back, because the flag said false.
+//
+// The audit trail does not lose it. It is append-only, it is written before every action, and its
+// last line about an account says who last decided about that account. So this runs once per
+// runner, on the first tick, and only reads the trail when there is something to reconcile: an
+// account that is disabled and that the state this runner loaded does not claim.
+func (r *accountGuardRunner) reconcileOwnership(accounts []guard.Account, now time.Time) {
+	r.mu.Lock()
+	done := r.adopted
+	r.adopted = true
+	r.mu.Unlock()
+	if done {
+		return
+	}
+	unclaimed := make([]guard.Account, 0, len(accounts))
+	for _, account := range accounts {
+		if !account.Disabled {
+			continue
+		}
+		if remembered, ok := r.state.Accounts[account.ProviderKey]; ok && remembered != nil && remembered.DisabledByGuard {
+			continue
+		}
+		unclaimed = append(unclaimed, account)
+	}
+	if len(unclaimed) == 0 {
+		return
+	}
+	audit, errAudit := r.store.RecentAudit(accountGuardAuditScan)
+	if errAudit != nil {
+		hostapi.LogAsync("warn", buildinfo.ID+": account guard could not read its audit trail", map[string]string{
+			"error": errAudit.Error(),
+		})
+		return
+	}
+	adopted := r.state.AdoptOwnership(unclaimed, audit, now, r.options())
+	if len(adopted) == 0 {
+		return
+	}
+	hostapi.LogAsync("info", buildinfo.ID+": account guard took back "+strings.Join(adopted, ", ")+
+		": the audit trail shows the guard disabled them and nothing enabled them again, so they are back on the recovery schedule", nil)
+}
+
+// newInstanceID returns this runner's random heartbeat id.
+func newInstanceID() string {
+	buffer := make([]byte, 8)
+	if _, errRead := rand.Read(buffer); errRead != nil {
+		return strconv.FormatInt(time.Now().UnixNano(), 16)
+	}
+	return hex.EncodeToString(buffer)
+}
+
+// heartbeat announces this runner in the store directory and counts the runners it finds.
+//
+// Two guard runners over one configuration is the failure this plugin hit in production: CPA keeps
+// an older .so loaded until the process exits, and that older instance keeps judging - and writing
+// - with the configuration it was loaded with, including an account_guard_dry_run that has since
+// been switched on. Nothing the plugin logged said so, because every instance logs the same
+// message. The heartbeat makes it visible in /health, and the warning makes it visible in the host
+// log (once per runner, not once per save).
+func (r *accountGuardRunner) heartbeat(now time.Time) {
+	if errTouch := r.store.TouchInstance(guard.InstanceInfo{
+		ID:        r.instanceID,
+		Version:   buildinfo.Version,
+		StartedAt: r.startedAt,
+		LastSeen:  now,
+		PID:       os.Getpid(),
+	}); errTouch != nil {
+		return
+	}
+	live, errLive := r.store.LiveInstances(accountGuardInstanceWindow)
+	if errLive != nil {
+		return
+	}
+	count := len(live)
+	r.mu.Lock()
+	r.instances = count
+	warn := count > 1 && !r.instanceWarned
+	if warn {
+		r.instanceWarned = true
+	}
+	r.mu.Unlock()
+	if !warn {
+		return
+	}
+	others := make([]string, 0, count-1)
+	for _, instance := range live {
+		if instance.ID == r.instanceID {
+			continue
+		}
+		others = append(others, instance.Version+" (started "+instance.StartedAt.Format(time.RFC3339)+")")
+	}
+	hostapi.LogAsync("warn", buildinfo.ID+": "+strconv.Itoa(count)+" account guard instances are running at once; "+
+		"the older ones keep writing the configuration they were loaded with: "+strings.Join(others, ", "), nil)
 }
 
 // samples is the last hour of records with their gateway channel joined in, oldest first. The
@@ -268,8 +400,15 @@ func (r *accountGuardRunner) record(decision guard.Decision) {
 // tick keeps showing it to the state machine instead of reading "still enabled" as an operator
 // override.
 func (r *accountGuardRunner) apply(decision guard.Decision) {
-	if decision.Action == "disable_dry_run" {
+	switch decision.Action {
+	case guard.ActionDisableDry:
 		hostapi.LogAsync("info", buildinfo.ID+": account guard (dry run) "+decision.Reason, nil)
+		return
+	case guard.ActionEnableExternal:
+		// The operator enabled the account again. There is nothing to write - the file already
+		// says what the decision wants - and the audit line is the point of the decision: it is
+		// what keeps a later hand-disable from being read as a disable of ours left undone.
+		hostapi.LogAsync("info", buildinfo.ID+": account guard "+decision.Reason, nil)
 		return
 	}
 	want := decision.Action == "disable"
@@ -340,6 +479,7 @@ func (r *accountGuardRunner) publish(path string, accounts []guard.Account, judg
 	status := guard.Status{
 		Enabled:    r.cfg.AccountGuardEnabled,
 		DryRun:     r.cfg.AccountGuardDryRun,
+		Version:    buildinfo.Version,
 		Judging:    judging,
 		Path:       path,
 		Entries:    len(accounts),
@@ -347,7 +487,12 @@ func (r *accountGuardRunner) publish(path string, accounts []guard.Account, judg
 		Baseline:   r.cfg.ChannelBaselineProvider,
 		LastTickAt: &now,
 		Error:      tickError,
+		Instances:  r.instances,
 		Recent:     append([]guard.Decision(nil), r.recent...),
+	}
+	if !r.startedAt.IsZero() {
+		startedAt := r.startedAt
+		status.ReconfiguredAt = &startedAt
 	}
 	if r.status.LastActionAt != nil {
 		lastAction := *r.status.LastActionAt
@@ -395,6 +540,9 @@ func (r *accountGuardRunner) maybeSave(now time.Time, forced bool) {
 			"error": errSave.Error(),
 		})
 	}
+	// The heartbeat rides on the same interval, so the instance count /health reports is never
+	// older than the state it is published with.
+	r.heartbeat(now)
 }
 
 // entryDisabled reports what the file now says about one entry.

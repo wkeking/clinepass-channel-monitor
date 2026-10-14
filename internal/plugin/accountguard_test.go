@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
+
 	"github.com/wkeking/clinepass-channel-monitor/internal/config"
 	"github.com/wkeking/clinepass-channel-monitor/internal/guard"
 	"github.com/wkeking/clinepass-channel-monitor/internal/hostconf"
@@ -30,6 +32,22 @@ api-keys:
           "name": "Cline1"
 `
 
+// guardDisabledFixture is the same account already switched off in CPA's file, the way the file
+// looks after the guard disabled it and the process that did so is no longer the one reading it.
+const guardDisabledFixture = `plugins:
+    enabled: true
+api-keys:
+    openai-compatibility:
+        - "base-url": "https://api.cline.bot/api/v1"
+          "disabled": true
+          "keys":
+            - "api-key": "sk-FIXTURE-cline1"
+          "models":
+            - "alias": "deepseek-flash-1"
+              "name": "cline-pass/deepseek-v4.1-flash"
+          "name": "Cline1"
+`
+
 func writeGuardConfig(t *testing.T, body string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "config.yaml")
@@ -43,12 +61,14 @@ func newGuardRunner(t *testing.T, path string) *accountGuardRunner {
 	t.Helper()
 	dir := t.TempDir()
 	return &accountGuardRunner{
-		cfg:     guardTestConfig(path, dir),
-		store:   guard.NewStore(dir),
-		stop:    make(chan struct{}),
-		done:    make(chan struct{}),
-		state:   guard.NewState(),
-		pending: map[string]bool{},
+		cfg:        guardTestConfig(path, dir),
+		store:      guard.NewStore(dir),
+		stop:       make(chan struct{}),
+		done:       make(chan struct{}),
+		state:      guard.NewState(),
+		pending:    map[string]bool{},
+		instanceID: "test-instance",
+		startedAt:  time.Now().UTC(),
 	}
 }
 
@@ -324,5 +344,107 @@ func TestGuardSamplesMapAndSortTheRecords(t *testing.T) {
 	}
 	if samples[2].Channel != "" {
 		t.Errorf("sample 2 channel = %q, want empty for a record with no channel block", samples[2].Channel)
+	}
+}
+
+// TestAccountGuardQuiesceStopsTheGuard pins the fix for the 2026-10-13 incident. CPA replaces a
+// plugin by quiescing it and loading a new .so, but it keeps the retired library loaded until the
+// process exits, so a guard that ignored the quiesce kept ticking - with the configuration it was
+// loaded with. On the production host the dry-run build reported "should disable" and the retired
+// build disabled the account 2.3 seconds later, which is exactly what this test forbids: a quiesce
+// must leave no guard behind.
+func TestAccountGuardQuiesceStopsTheGuard(t *testing.T) {
+	path := writeGuardConfig(t, guardFixture)
+	dir := t.TempDir()
+	previous := state.Config()
+	t.Cleanup(func() {
+		Shutdown()
+		state.SetConfig(previous)
+	})
+	reconfigure(t, "plan_enabled: false\nplan_config_path: "+path+
+		"\naccount_guard_enabled: true\nchannel_store_dir: "+dir+"\n")
+	if state.AccountGuard() == nil {
+		t.Fatal("account_guard_enabled: true must publish a snapshot")
+	}
+
+	if _, errCall := HandleMethod(pluginabi.MethodPluginQuiesce, nil); errCall != nil {
+		t.Fatalf("plugin.quiesce: %v", errCall)
+	}
+	if published := state.AccountGuard(); published != nil {
+		t.Errorf("a quiesce must stop the guard and unpublish it, got %#v", published)
+	}
+
+	// A quiesce is followed by a register that restarts the guard with the current configuration,
+	// so stopping must never be permanent.
+	reconfigure(t, "plan_enabled: false\nplan_config_path: "+path+
+		"\naccount_guard_enabled: true\nchannel_store_dir: "+dir+"\n")
+	if state.AccountGuard() == nil {
+		t.Error("the register that follows a quiesce must start the guard again")
+	}
+}
+
+// TestAccountGuardTakesBackAnAccountTheAuditStillClaims covers the recovery that used to be lost:
+// the state file says nothing about who disabled the account (a second instance overwrote the flag,
+// or the process that disabled it never finished saving), while the shared audit trail still says
+// the guard did it and nothing enabled it again. Without taking it back, the guard reads its own
+// disable as somebody else's (rule 9b) and the account stays off until a human notices.
+func TestAccountGuardTakesBackAnAccountTheAuditStillClaims(t *testing.T) {
+	path := writeGuardConfig(t, guardDisabledFixture)
+	runner := newGuardRunner(t, path)
+	if errAppend := runner.store.AppendAudit(guard.Decision{
+		Time: time.Now().UTC().Add(-time.Minute), Name: "Cline1",
+		ProviderKey: "openai-compatible-cline1", Action: guard.ActionDisable, Streak: 3,
+		Reason: "Cline1 连续 3 次真实渠道不是基准渠道 deepseek，关闭该账号",
+	}); errAppend != nil {
+		t.Fatalf("append audit: %v", errAppend)
+	}
+
+	runner.tick()
+
+	slot := runner.state.Accounts["openai-compatible-cline1"]
+	if slot == nil {
+		t.Fatalf("no state slot for the account: %#v", runner.state.Accounts)
+	}
+	if !slot.DisabledByGuard {
+		t.Error("disabled_by_guard = false, want the guard to own the disable the audit attributes to it")
+	}
+	if slot.NextRetryAt == nil {
+		t.Error("next_retry_at = nil, want the account back on the recovery schedule")
+	}
+	if slot.DisableCount < 1 {
+		t.Errorf("disable_count = %d, want at least 1", slot.DisableCount)
+	}
+	if runner.instances < 1 {
+		t.Errorf("instances = %d, want this runner's own heartbeat to be visible", runner.instances)
+	}
+}
+
+// TestAccountGuardLeavesAnOperatorDisableAlone pins the other side of taking ownership back: when the
+// last thing the audit recorded is an enable, an account that is disabled now was switched off by
+// hand afterwards - a decision the guard must not undo.
+func TestAccountGuardLeavesAnOperatorDisableAlone(t *testing.T) {
+	path := writeGuardConfig(t, guardDisabledFixture)
+	runner := newGuardRunner(t, path)
+	base := time.Now().UTC().Add(-10 * time.Minute)
+	for _, decision := range []guard.Decision{
+		{
+			Time: base, Name: "Cline1", ProviderKey: "openai-compatible-cline1",
+			Action: guard.ActionDisable, Streak: 3,
+		},
+		{
+			Time: base.Add(time.Minute), Name: "Cline1", ProviderKey: "openai-compatible-cline1",
+			Action: guard.ActionEnable, Streak: 0,
+		},
+	} {
+		if errAppend := runner.store.AppendAudit(decision); errAppend != nil {
+			t.Fatalf("append audit: %v", errAppend)
+		}
+	}
+
+	runner.tick()
+
+	slot := runner.state.Accounts["openai-compatible-cline1"]
+	if slot != nil && slot.DisabledByGuard {
+		t.Error("the guard must not adopt a disable the audit does not attribute to it")
 	}
 }

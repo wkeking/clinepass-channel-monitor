@@ -72,6 +72,27 @@ func (s *Store) TouchInstance(info InstanceInfo) error {
 	return nil
 }
 
+// ForgetInstance removes one runner's heartbeat file.
+//
+// A runner calls this while it stops. Without it, every reconfigure - and CPA reconfigures this
+// plugin several times on start-up - would leave a file behind that still looks alive for the whole
+// live window, and the next runner would report "several guards are running" for a guard that has
+// already stopped. Only a runner that never got the chance to stop (a killed process, or a build
+// too old to know about heartbeats) is left for the staleness rule.
+func (s *Store) ForgetInstance(id string) error {
+	if s == nil || strings.TrimSpace(id) == "" {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	path := filepath.Join(s.dirPath(), InstanceFilePrefix+id+instanceFileSuffix)
+	if errRemove := os.Remove(path); errRemove != nil && !errors.Is(errRemove, os.ErrNotExist) {
+		return fmt.Errorf("remove account guard heartbeat: %w", errRemove)
+	}
+	return nil
+}
+
 // LiveInstances returns the heartbeats refreshed within the window, oldest start first, and
 // removes the ones that have been quiet for instanceStaleAfter.
 //

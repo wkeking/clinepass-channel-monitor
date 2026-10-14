@@ -103,6 +103,50 @@ func TestLiveInstancesIgnoresForeignAndTornFiles(t *testing.T) {
 	}
 }
 
+// TestForgetInstanceRemovesTheHeartbeat covers the false alarm measured on the production host on
+// 2026-10-14: CPA reconfigures the plugin several times on start-up, every reconfigure stops the
+// previous guard, and the stopped guard's file kept counting as a live instance until the staleness
+// bound expired - so the page warned about "several guards running" for guards that were already
+// stopped. A guard that stops removes its own file, and only files it never removed remain.
+func TestForgetInstanceRemovesTheHeartbeat(t *testing.T) {
+	dir := t.TempDir()
+	store := NewStore(dir)
+	now := time.Now().UTC()
+	for _, id := range []string{"stopped", "running"} {
+		info := InstanceInfo{ID: id, Version: "0.4.2", StartedAt: now, LastSeen: now}
+		if errTouch := store.TouchInstance(info); errTouch != nil {
+			t.Fatalf("touch %s: %v", id, errTouch)
+		}
+	}
+
+	if errForget := store.ForgetInstance("stopped"); errForget != nil {
+		t.Fatalf("forget: %v", errForget)
+	}
+	if _, errStat := os.Stat(filepath.Join(dir, InstanceFilePrefix+"stopped"+instanceFileSuffix)); !os.IsNotExist(errStat) {
+		t.Errorf("a stopped guard must leave no heartbeat, stat error = %v", errStat)
+	}
+	if _, errStat := os.Stat(filepath.Join(dir, InstanceFilePrefix+"running"+instanceFileSuffix)); errStat != nil {
+		t.Errorf("forgetting one heartbeat must not touch another: %v", errStat)
+	}
+
+	live, errLive := store.LiveInstances(instanceStaleAfter)
+	if errLive != nil {
+		t.Fatalf("live instances: %v", errLive)
+	}
+	if len(live) != 1 || live[0].ID != "running" {
+		t.Errorf("live = %#v, want only the running instance", live)
+	}
+
+	// Forgetting twice, or forgetting a guard that never wrote a heartbeat, is not an error: this
+	// runs on the stop path, where a failure has nowhere to go.
+	if errForget := store.ForgetInstance("stopped"); errForget != nil {
+		t.Errorf("forget twice: %v", errForget)
+	}
+	if errForget := store.ForgetInstance(""); errForget != nil {
+		t.Errorf("forget without an id: %v", errForget)
+	}
+}
+
 // TestTouchInstanceNeedsAnID pins the no-op case: a runner without an identity writes no file, so a
 // half-built runner can never claim a heartbeat.
 func TestTouchInstanceNeedsAnID(t *testing.T) {

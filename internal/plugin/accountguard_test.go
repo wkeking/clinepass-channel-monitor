@@ -373,6 +373,15 @@ func TestAccountGuardQuiesceStopsTheGuard(t *testing.T) {
 	if published := state.AccountGuard(); published != nil {
 		t.Errorf("a quiesce must stop the guard and unpublish it, got %#v", published)
 	}
+	// The stopped guard must also stop looking alive. CPA reconfigures this plugin several times on
+	// start-up, so a heartbeat left behind by every stop made the next guard warn that several guards
+	// were running - on the production host, five stops in two seconds produced a five-instance
+	// warning. A guard that stopped removes its own heartbeat.
+	if leftovers, errGlob := filepath.Glob(filepath.Join(dir, guard.InstanceFilePrefix+"*")); errGlob != nil {
+		t.Fatalf("glob heartbeats: %v", errGlob)
+	} else if len(leftovers) != 0 {
+		t.Errorf("heartbeats left after a quiesce = %v, want none", leftovers)
+	}
 
 	// A quiesce is followed by a register that restarts the guard with the current configuration,
 	// so stopping must never be permanent.

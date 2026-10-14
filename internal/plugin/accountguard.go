@@ -137,6 +137,13 @@ func stopAccountGuard() {
 	if runner != nil {
 		close(runner.stop)
 		<-runner.done
+		// Take the heartbeat away as soon as the goroutine is gone: a stopped guard must not keep
+		// looking alive to the guard that replaces it.
+		if errForget := runner.store.ForgetInstance(runner.instanceID); errForget != nil {
+			hostapi.LogAsync("warn", buildinfo.ID+": account guard heartbeat not removed", map[string]string{
+				"error": errForget.Error(),
+			})
+		}
 	}
 }
 
